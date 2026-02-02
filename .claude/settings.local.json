@@ -23,7 +23,14 @@
       "Bash(git rm:*)",
       "Bash(xargs git rm:*)",
       "Bash(tee:*)",
-      "Bash(du:*)"
+      "Bash(du:*)",
+      "Bash(find:*)",
+      "Bash(xargs:*)",
+      "Bash(for item in *)",
+      "Bash(do if [ \"$item\" != \"data\" ])",
+      "Bash(then mv \"$item\" \"C:\\\\Users\\\\lukis\\\\Documents\\\\GitHub\\\\Time-Series-Models\\\\_archive\\\\PXChange_Refactored_v1/\")",
+      "Bash(fi)",
+      "Bash(done)"
     ],
     "deny": [],
     "ask": []
