@@ -181,7 +181,8 @@ SEQUENCE_TRAINING_CONFIG = {
     'learning_rate': 0.0001,
     'warmup_steps': 4000,
     'label_smoothing': 0.1,
-    'gradient_clip': 1.0,
+    'grad_clip_value': 1.0, # Renamed from 'gradient_clip'
+    'weight_decay': 1e-5,
     'early_stopping_patience': 15,
     'validation_split': 0.2
 }
@@ -217,7 +218,8 @@ COUNTS_TRAINING_CONFIG = {
     'epochs': 100,
     'learning_rate': 0.0001,
     'warmup_steps': 4000,
-    'gradient_clip': 1.0,
+    'grad_clip_value': 1.0, # Renamed from 'gradient_clip'
+    'weight_decay': 1e-5,
     'early_stopping_patience': 15,
     'validation_split': 0.2,
     'min_sigma': 0.1            # Minimum standard deviation

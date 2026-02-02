@@ -14,7 +14,8 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import (
     SEQUENCE_SAMPLING_CONFIG, COUNTS_SAMPLING_CONFIG,
-    OUTPUT_DIR, END_TOKEN_ID, PAD_TOKEN_ID, START_TOKEN_ID
+    OUTPUT_DIR, END_TOKEN_ID, PAD_TOKEN_ID, START_TOKEN_ID,
+    NUM_BODY_REGIONS, CONDITIONING_FEATURES
 )
 from preprocessing.sequence_encoder import decode_sequences, sequence_to_text
 
@@ -54,7 +55,8 @@ def decode_bodygroup(encoded_value):
         7: 'LEG',
         8: 'HAND',
         9: 'FOOT',
-        10: 'KNEE'
+        10: 'KNEE',
+        11: 'UNKNOWN' # Added for completeness
     }
     return bodygroup_map.get(encoded_value, 'UNKNOWN')
 
@@ -86,6 +88,158 @@ def remove_excessive_repetitions(tokens, max_consecutive_repeats=2):
             consecutive_count = 1
 
     return filtered
+
+
+def generate_sequence_pool(
+    sequence_model,
+    counts_model,
+    num_samples_per_category=500,
+    remove_repetitions=True,
+    device='cpu',
+    verbose=True
+):
+    """
+    Generates a large pool of sequences, conditioned only on the body region.
+    This creates a dataset for subsequent resampling to match true distributions.
+
+    Args:
+        sequence_model: Trained ConditionalSequenceGenerator
+        counts_model: Trained ConditionalCountsGenerator
+        num_samples_per_category: Number of sequences to generate per body region.
+        remove_repetitions: Whether to filter excessive consecutive token repetitions.
+        device: torch device
+        verbose: Whether to print progress
+
+    Returns:
+        results_df: DataFrame with the generated sequence pool.
+    """
+    sequence_model.eval()
+    counts_model.eval()
+
+    results = []
+
+    if verbose:
+        print(f"\n{'='*70}")
+        print(f"GENERATING SEQUENCE POOL")
+        print(f"{'='*70}\n")
+        print(f"Number of categories (body regions): {NUM_BODY_REGIONS}")
+        print(f"Samples per category: {num_samples_per_category}")
+        print(f"Total sequences to generate: {NUM_BODY_REGIONS * num_samples_per_category}")
+        print(f"Remove repetitions: {remove_repetitions}\n")
+
+    # Create a dummy conditioning vector (using zeros).
+    # The original conditioning features were found to be weak predictors,
+    # so we focus on the 'BodyGroup_from' feature which is explicitly handled.
+    conditioning_dim = len(CONDITIONING_FEATURES)
+    # The model expects BodyGroup_from to be part of the conditioning features, so we create a dummy one.
+    # The actual body group conditioning will be passed separately.
+    dummy_conditioning_array = np.zeros(conditioning_dim, dtype=np.float32)
+
+    with torch.no_grad():
+        for bodygroup_from_id in tqdm(range(NUM_BODY_REGIONS), desc="Generating for each body region", disable=not verbose):
+            
+            # Set the body group in the dummy conditioning vector
+            # This assumes 'BodyGroup_from' is one of the features. We find its index.
+            try:
+                bg_index = CONDITIONING_FEATURES.index('BodyGroup_from')
+                dummy_conditioning_array[bg_index] = bodygroup_from_id
+            except ValueError:
+                # If 'BodyGroup_from' is not in the features, we can't set it.
+                # This is a fallback, assuming the model handles it separately or doesn't use it.
+                pass
+
+            # Repeat conditioning array for batch generation
+            conditioning_tensor = torch.tensor(dummy_conditioning_array, dtype=torch.float32, device=device).repeat(num_samples_per_category, 1)
+
+            # Step 1: Generate symbolic sequences
+            max_gen_length = min(SEQUENCE_SAMPLING_CONFIG['max_length'], sequence_model.max_seq_len - 1)
+            generated_tokens = sequence_model.generate(
+                conditioning_tensor,
+                max_length=max_gen_length,
+                temperature=SEQUENCE_SAMPLING_CONFIG['temperature'],
+                top_k=SEQUENCE_SAMPLING_CONFIG['top_k'],
+                top_p=SEQUENCE_SAMPLING_CONFIG['top_p']
+            )
+
+            # Step 2: For each generated sequence, predict counts
+            for sample_idx in range(num_samples_per_category):
+                tokens = generated_tokens[sample_idx]
+                token_list = tokens.cpu().numpy()
+                
+                if END_TOKEN_ID in token_list:
+                    end_idx = np.where(token_list == END_TOKEN_ID)[0][0] + 1
+                else:
+                    end_idx = len(token_list)
+
+                if remove_repetitions:
+                    token_list_filtered = remove_excessive_repetitions(token_list[:end_idx], max_consecutive_repeats=2)
+                else:
+                    token_list_filtered = token_list[:end_idx]
+                end_idx = len(token_list_filtered)
+
+                if end_idx <= 1: # Skip empty sequences
+                    continue
+
+                tokens_trimmed = torch.tensor(token_list_filtered, dtype=torch.long, device=device).unsqueeze(0)
+                seq_features = torch.zeros(1, end_idx, 2, device=device)
+                mask = torch.ones(1, end_idx, dtype=torch.bool, device=device)
+
+                mu, sigma = counts_model(
+                    conditioning_tensor[sample_idx:sample_idx+1],
+                    tokens_trimmed,
+                    seq_features,
+                    mask
+                )
+
+                counts_sampled = counts_model.sample_counts(mu, sigma, num_samples=1).squeeze(-1)
+                token_strings = decode_sequences(tokens_trimmed[0].cpu().numpy(), remove_special_tokens=False)
+
+                patient_id_from = generate_patient_id()
+                patient_id_to = generate_patient_id()
+
+                filtered_step = 0
+                for step_idx in range(end_idx):
+                    token_id = int(token_list_filtered[step_idx])
+                    if token_id in [START_TOKEN_ID, END_TOKEN_ID]:
+                        continue
+                    
+                    token_name = token_strings[step_idx] if step_idx < len(token_strings) else 'PAD'
+                    if token_name in ['START', 'END']:
+                        continue
+
+                    results.append({
+                        'SN': f"pool_{bodygroup_from_id}", # Use a pool identifier as the SN
+                        'customer_idx': bodygroup_from_id, # Store body group id
+                        'sample_idx': sample_idx,
+                        'step': filtered_step,
+                        'token_id': token_id,
+                        'token_name': token_name,
+                        'BodyGroup_from': bodygroup_from_id,
+                        'BodyGroup_to': -1, # Placeholder
+                        'BodyGroup_from_text': decode_bodygroup(bodygroup_from_id),
+                        'BodyGroup_to_text': 'UNKNOWN',
+                        'PatientID_from': patient_id_from,
+                        'PatientID_to': patient_id_to,
+                        'predicted_mu': mu[0, step_idx].item(),
+                        'predicted_sigma': sigma[0, step_idx].item(),
+                        'sampled_duration': counts_sampled[0, step_idx].item()
+                    })
+                    filtered_step += 1
+
+    results_df = pd.DataFrame(results)
+    if results_df.empty:
+        print("Warning: No sequences were generated!")
+        return results_df
+
+    sequence_totals = results_df.groupby(['SN', 'sample_idx'])['sampled_duration'].sum().reset_index()
+    sequence_totals.columns = ['SN', 'sample_idx', 'total_time']
+    results_df = results_df.merge(sequence_totals, on=['SN', 'sample_idx'])
+
+    if verbose:
+        print(f"\n[OK] Generation complete!")
+        print(f"  Total sequences generated in pool: {len(results_df.groupby(['SN', 'sample_idx']))}")
+
+    return results_df
 
 
 def generate_sequences_and_counts(
@@ -131,8 +285,6 @@ def generate_sequences_and_counts(
     if 'dataset_id' not in conditioning_data.columns:
         raise ValueError("conditioning_data must contain 'dataset_id' column to identify customers")
 
-    from config import CONDITIONING_FEATURES
-
     # Group by dataset_id (customer)
     customers = conditioning_data['dataset_id'].unique()
     num_customers = len(customers)
@@ -168,20 +320,17 @@ def generate_sequences_and_counts(
 
             # Determine how many sequences to generate for this customer
             if sequences_per_customer is not None:
-                # Use string key for lookup (already converted to strings in main_pipeline.py)
                 customer_num_samples = sequences_per_customer.get(dataset_id_str, num_samples_per_customer)
-                if verbose and customer_idx < 5:  # Print first 5 for debugging
-                    print(f"  Customer {dataset_id_str}: generating {customer_num_samples} sequences")
             else:
                 customer_num_samples = num_samples_per_customer
 
-            # Repeat conditioning for customer_num_samples
-            batch_cond = torch.from_numpy(conditioning_array).float().unsqueeze(0).repeat(customer_num_samples, 1).to(device)
+            # Repeat conditioning array for batch generation
+            conditioning_tensor = torch.tensor(conditioning_array, dtype=torch.float32, device=device).repeat(customer_num_samples, 1)
 
             # Step 1: Generate symbolic sequences
             max_gen_length = min(SEQUENCE_SAMPLING_CONFIG['max_length'], sequence_model.max_seq_len - 1)
             generated_tokens = sequence_model.generate(
-                batch_cond,
+                conditioning_tensor,
                 max_length=max_gen_length,
                 temperature=SEQUENCE_SAMPLING_CONFIG['temperature'],
                 top_k=SEQUENCE_SAMPLING_CONFIG['top_k'],
@@ -195,68 +344,50 @@ def generate_sequences_and_counts(
             # Step 2: For each generated sequence, predict counts
             for sample_idx in range(customer_num_samples):
                 tokens = generated_tokens[sample_idx]
-                cond = batch_cond[sample_idx:sample_idx+1]
-
-                # Find actual sequence length (before PAD or after END)
                 token_list = tokens.cpu().numpy()
                 if END_TOKEN_ID in token_list:
                     end_idx = np.where(token_list == END_TOKEN_ID)[0][0] + 1
                 else:
                     end_idx = len(token_list)
 
-                # Remove excessive repetitions if enabled (fix for MRI_MSR_104 and other tokens)
                 if remove_repetitions:
                     token_list_filtered = remove_excessive_repetitions(token_list[:end_idx], max_consecutive_repeats=2)
                 else:
                     token_list_filtered = token_list[:end_idx]
                 end_idx = len(token_list_filtered)
 
-                # Convert back to tensor
-                tokens_trimmed = torch.tensor(token_list_filtered, dtype=torch.long, device=device).unsqueeze(0)  # [1, actual_len]
-
-                # Create dummy sequence features (zeros for now)
+                tokens_trimmed = torch.tensor(token_list_filtered, dtype=torch.long, device=device).unsqueeze(0)
                 seq_features = torch.zeros(1, end_idx, 2, device=device)
-
-                # Create mask
                 mask = torch.ones(1, end_idx, dtype=torch.bool, device=device)
 
-                # Predict counts with uncertainty
                 mu, sigma = counts_model(
-                    cond,
+                    conditioning_tensor[sample_idx:sample_idx+1],
                     tokens_trimmed,
                     seq_features,
                     mask
-                )  # [1, actual_len]
+                )
 
-                # Sample counts from Gamma distribution
                 counts_sampled = counts_model.sample_counts(
                     mu, sigma, num_samples=1
-                ).squeeze(-1)  # [1, actual_len]
+                ).squeeze(-1)
 
-                # Decode tokens
                 token_strings = decode_sequences(tokens_trimmed[0].cpu().numpy(), remove_special_tokens=False)
 
-                # Generate unique PatientIDs for this sample
                 patient_id_from = generate_patient_id()
                 patient_id_to = generate_patient_id()
 
-                # Store results (filter out START and END tokens)
-                filtered_step = 0  # Track step after removing START/END
+                filtered_step = 0
                 for step_idx in range(end_idx):
                     token_id = int(token_list_filtered[step_idx])
-
-                    # Skip START and END tokens
-                    if token_id == START_TOKEN_ID or token_id == END_TOKEN_ID:
+                    if token_id in [START_TOKEN_ID, END_TOKEN_ID]:
                         continue
-
+                    
                     token_name = token_strings[step_idx] if step_idx < len(token_strings) else 'PAD'
-
-                    # Skip if token_name is START or END (double check)
                     if token_name in ['START', 'END']:
                         continue
 
                     results.append({
-                        'SN': dataset_id_str,  # Add customer serial number
+                        'SN': dataset_id_str,
                         'customer_idx': customer_idx,
                         'sample_idx': sample_idx,
                         'step': filtered_step,
@@ -274,19 +405,14 @@ def generate_sequences_and_counts(
                     })
                     filtered_step += 1
 
-    # Convert to DataFrame
     results_df = pd.DataFrame(results)
 
     if len(results_df) == 0:
         print("Warning: No sequences were generated!")
         return results_df
 
-    # Steps are already correctly indexed (no need to re-index)
-
-    # Calculate total time per sequence
     sequence_totals = results_df.groupby(['SN', 'sample_idx'])['sampled_duration'].sum().reset_index()
     sequence_totals.columns = ['SN', 'sample_idx', 'total_time']
-
     results_df = results_df.merge(sequence_totals, on=['SN', 'sample_idx'])
 
     if verbose:

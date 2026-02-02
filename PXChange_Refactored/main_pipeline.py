@@ -1,6 +1,4 @@
-"""
-Main Pipeline: Complete training and generation workflow
-"""
+"Main Pipeline: Complete training and generation workflow"
 import os
 import sys
 import torch
@@ -8,17 +6,22 @@ import argparse
 import numpy as np
 import pandas as pd
 
+# Add project root to path
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
 from config import (
     SEQUENCE_MODEL_CONFIG, SEQUENCE_TRAINING_CONFIG,
     COUNTS_MODEL_CONFIG, COUNTS_TRAINING_CONFIG,
     MODEL_SAVE_DIR, OUTPUT_DIR, RANDOM_SEED, DATA_DIR
 )
-from preprocessing import load_preprocessed_data, create_dataloaders
 from preprocessing.preprocess_raw_data import preprocess_all_datasets
-from models import ConditionalSequenceGenerator, ConditionalCountsGenerator
-from training import train_sequence_model, train_counts_model
-from generation import generate_sequences_and_counts
-from generation.generate_pipeline import save_generated_results, print_generation_examples
+from models.conditional_sequence_generator import ConditionalSequenceGenerator
+from models.conditional_counts_generator import ConditionalCountsGenerator
+from training.train_sequence_model import train_sequence_model
+from training.train_counts_model import train_counts_model
+from generation.generate_pipeline import generate_sequences_and_counts, save_generated_results, print_generation_examples, generate_sequence_pool
+from resample_sequences import resample_sequences
+from config import CONDITIONING_FEATURES
 
 
 def set_random_seeds(seed=RANDOM_SEED):
@@ -67,49 +70,25 @@ def train_pipeline(args):
     # Set seeds
     set_random_seeds()
 
-    # Load data
-    print("Step 1: Loading preprocessed data...")
-    df = load_preprocessed_data(dataset_ids=args.dataset_ids)
-
-    # Create dataloaders
-    print("\nStep 2: Creating dataloaders...")
-    train_loader, val_loader, conditioning_scaler = create_dataloaders(
-        df,
-        batch_size=args.batch_size,
-        validation_split=args.val_split
-    )
-
-    # Save scaler for later use
-    import pickle
-    with open(os.path.join(MODEL_SAVE_DIR, 'conditioning_scaler.pkl'), 'wb') as f:
-        pickle.dump(conditioning_scaler, f)
-    print("[OK] Conditioning scaler saved")
+    data_path = os.path.join(DATA_DIR, 'preprocessed', 'all_preprocessed.csv')
+    if not os.path.exists(data_path):
+        raise FileNotFoundError(f"Preprocessed data not found at {data_path}. Run 'preprocess' first.")
 
     # Train sequence model
-    if not args.skip_sequence:
+    if 'sequence' in args.models or 'all' in args.models:
         print(f"\n{'='*70}")
-        print("Step 3: Training Conditional Sequence Generator...")
+        print("Step 1: Training Conditional Sequence Generator...")
         print(f"{'='*70}\n")
-
-        sequence_model, seq_history = train_sequence_model(
-            train_loader, val_loader,
-            config=SEQUENCE_MODEL_CONFIG,
-            training_config=SEQUENCE_TRAINING_CONFIG
-        )
+        train_sequence_model(data_path, validation_split=args.val_split)
     else:
         print("\n[SKIP] Skipping sequence model training")
 
     # Train counts model
-    if not args.skip_counts:
+    if 'counts' in args.models or 'all' in args.models:
         print(f"\n{'='*70}")
-        print("Step 4: Training Conditional Counts Generator...")
+        print("Step 2: Training Conditional Counts Generator...")
         print(f"{'='*70}\n")
-
-        counts_model, counts_history = train_counts_model(
-            train_loader, val_loader,
-            config=COUNTS_MODEL_CONFIG,
-            training_config=COUNTS_TRAINING_CONFIG
-        )
+        train_counts_model(data_path, validation_split=args.val_split)
     else:
         print("\n[SKIP] Skipping counts model training")
 
@@ -131,8 +110,8 @@ def generate_pipeline(args):
     set_random_seeds()
 
     # Check if models exist
-    seq_model_path = os.path.join(MODEL_SAVE_DIR, 'sequence_model_best.pt')
-    counts_model_path = os.path.join(MODEL_SAVE_DIR, 'counts_model_best.pt')
+    seq_model_path = os.path.join(MODEL_SAVE_DIR, 'sequence_model_best.pth')
+    counts_model_path = os.path.join(MODEL_SAVE_DIR, 'counts_model_best.pth')
     scaler_path = os.path.join(MODEL_SAVE_DIR, 'conditioning_scaler.pkl')
 
     if not os.path.exists(seq_model_path):
@@ -141,33 +120,35 @@ def generate_pipeline(args):
         raise FileNotFoundError(f"Counts model not found at {counts_model_path}. Train models first!")
 
     # Device
-    device = torch.device('cuda' if torch.cuda.is_available() and args.use_gpu else 'cpu')
+    device = torch.device('cuda' if torch.cuda.is_available() and not args.force_cpu else 'cpu')
     print(f"Using device: {device}\n")
 
     # Load models
     print("Step 1: Loading trained models...")
 
     # Load sequence model
-    seq_checkpoint = torch.load(seq_model_path, map_location=device)
-    sequence_model = ConditionalSequenceGenerator(seq_checkpoint['config'])
-    sequence_model.load_state_dict(seq_checkpoint['model_state_dict'])
+    sequence_model = ConditionalSequenceGenerator(SEQUENCE_MODEL_CONFIG)
+    sequence_model.load_state_dict(torch.load(seq_model_path, map_location=device))
     sequence_model.to(device)
     sequence_model.eval()
     print("[OK] Sequence model loaded")
 
     # Load counts model
-    counts_checkpoint = torch.load(counts_model_path, map_location=device)
-    counts_model = ConditionalCountsGenerator(counts_checkpoint['config'])
-    counts_model.load_state_dict(counts_checkpoint['model_state_dict'])
+    counts_model = ConditionalCountsGenerator(COUNTS_MODEL_CONFIG)
+    counts_model.load_state_dict(torch.load(counts_model_path, map_location=device))
     counts_model.to(device)
     counts_model.eval()
     print("[OK] Counts model loaded")
 
     # Load scaler
     import pickle
-    with open(scaler_path, 'rb') as f:
-        conditioning_scaler = pickle.load(f)
-    print("[OK] Conditioning scaler loaded")
+    if os.path.exists(scaler_path):
+        with open(scaler_path, 'rb') as f:
+            conditioning_scaler = pickle.load(f)
+        print("[OK] Conditioning scaler loaded")
+    else:
+        conditioning_scaler = None
+        print("[WARN] Scaler not found. Assuming conditioning data is not scaled.")
 
     # Load conditioning data
     print("\nStep 2: Preparing conditioning data...")
@@ -179,7 +160,11 @@ def generate_pipeline(args):
         print(f"    Customers found: {conditioning_df['dataset_id'].nunique()}")
     else:
         # Use preprocessed data - get one representative row per customer
-        df = load_preprocessed_data(dataset_ids=args.dataset_ids)
+        preprocessed_path = os.path.join(DATA_DIR, 'preprocessed', 'all_preprocessed.csv')
+        if not os.path.exists(preprocessed_path):
+            raise FileNotFoundError(f"Preprocessed data not found at {preprocessed_path}. Run 'preprocess' first.")
+            
+        df = pd.read_csv(preprocessed_path)
         # Get one row per customer (dataset_id)
         conditioning_df = df.groupby('dataset_id').first().reset_index()
         print(f"[OK] Loaded conditioning data for {len(conditioning_df)} customers")
@@ -187,16 +172,17 @@ def generate_pipeline(args):
     # Calculate number of sequences per customer from original data (to match input volume)
     print("\nStep 2b: Calculating sequence counts per customer...")
     if args.match_input_volume:
-        df_full = load_preprocessed_data(dataset_ids=args.dataset_ids)
+        full_df_path = os.path.join(DATA_DIR, 'preprocessed', 'all_preprocessed.csv')
+        df_full = pd.read_csv(full_df_path)
         sequences_per_customer = df_full.groupby('dataset_id')['SeqOrder'].nunique().to_dict()
         # Convert all keys to strings for consistent lookup
         sequences_per_customer = {str(k): v for k, v in sequences_per_customer.items()}
         print(f"[OK] Will generate matching number of sequences per customer (avg: {np.mean(list(sequences_per_customer.values())):.1f})")
-        print(f"    Example: Customer 141049 will generate {sequences_per_customer.get('141049', 'N/A')} sequences")
+        print(f"    Example: Customer 175832 will generate {sequences_per_customer.get('175832', 'N/A')} sequences")
         print(f"    Total sequences to generate: {sum(sequences_per_customer.values())}")
     else:
         sequences_per_customer = None
-        print(f"[OK] Will generate {args.num_samples_per_customer} sequences per customer")
+        print(f"[OK] Will generate {args.num_samples} sequences per customer")
 
     # Generate sequences and counts (per customer)
     print("\nStep 3: Generating sequences and counts (per customer)...")
@@ -205,7 +191,7 @@ def generate_pipeline(args):
         counts_model,
         conditioning_df,
         conditioning_scaler=conditioning_scaler,
-        num_samples_per_customer=args.num_samples_per_customer,
+        num_samples_per_customer=args.num_samples,
         sequences_per_customer=sequences_per_customer,
         remove_repetitions=not args.keep_repetitions,
         device=device,
@@ -217,12 +203,79 @@ def generate_pipeline(args):
     output_file = save_generated_results(results_df, filename=args.output_file)
 
     # Print examples
-    print_generation_examples(results_df, num_examples=min(5, len(conditioning_df)))
+    if not results_df.empty:
+        print_generation_examples(results_df, num_examples=min(5, len(conditioning_df)))
 
     print(f"\n{'='*70}")
     print("GENERATION PIPELINE COMPLETE")
     print(f"{'='*70}\n")
     print(f"[OK] Results saved to: {output_file}")
+
+
+def generate_calibrated_pipeline(args):
+    """
+    Generates a calibrated set of sequences by creating a pool and resampling.
+    """
+    print(f"\n{'='*70}")
+    print(f"CALIBRATED GENERATION PIPELINE")
+    print(f"{'='*70}\n")
+
+    # Set seeds
+    set_random_seeds()
+
+    # Check if models exist
+    seq_model_path = os.path.join(MODEL_SAVE_DIR, 'sequence_model_best.pth')
+    counts_model_path = os.path.join(MODEL_SAVE_DIR, 'counts_model_best.pth')
+
+    if not os.path.exists(seq_model_path) or not os.path.exists(counts_model_path):
+        raise FileNotFoundError("Models not found. Train models first with 'train' command.")
+
+    # Device
+    device = torch.device('cuda' if torch.cuda.is_available() and not args.force_cpu else 'cpu')
+    print(f"Using device: {device}\n")
+
+    # --- Step 1: Generate a large pool of sequences ---
+    print("--- Step 1: Generating sequence pool ---")
+    
+    # Load models
+    sequence_model = ConditionalSequenceGenerator(SEQUENCE_MODEL_CONFIG)
+    sequence_model.load_state_dict(torch.load(seq_model_path, map_location=device))
+    sequence_model.to(device)
+    
+    counts_model = ConditionalCountsGenerator(COUNTS_MODEL_CONFIG)
+    counts_model.load_state_dict(torch.load(counts_model_path, map_location=device))
+    counts_model.to(device)
+
+    pool_df = generate_sequence_pool(
+        sequence_model,
+        counts_model,
+        num_samples_per_category=args.num_samples_per_category,
+        remove_repetitions=not args.keep_repetitions,
+        device=device,
+        verbose=True
+    )
+
+    # Save the pool
+    pool_output_path = os.path.join(OUTPUT_DIR, args.pool_file)
+    save_generated_results(pool_df, filename=args.pool_file)
+
+    # --- Step 2: Resample the pool to match true distribution ---
+    print("\n--- Step 2: Resampling sequence pool to match true distribution ---")
+    
+    true_data_path = os.path.join(DATA_DIR, 'preprocessed', 'all_preprocessed.csv')
+    calibrated_output_path = os.path.join(OUTPUT_DIR, args.output_file)
+
+    resample_sequences(
+        generated_pool_path=pool_output_path,
+        true_data_path=true_data_path,
+        output_path=calibrated_output_path,
+        feature_column='BodyGroup_from'
+    )
+    
+    print(f"\n{'='*70}")
+    print("CALIBRATED GENERATION PIPELINE COMPLETE")
+    print(f"{'='*70}\n")
+    print(f"[OK] Calibrated results saved to: {calibrated_output_path}")
 
 
 def evaluate_pipeline(args):
@@ -240,6 +293,11 @@ def evaluate_pipeline(args):
 
     generated_df = pd.read_csv(generated_file)
     print(f"[OK] Loaded generated results from {generated_file}")
+    
+    if generated_df.empty:
+        print("[WARN] Generated data is empty. Cannot perform evaluation.")
+        return
+        
     print(f"  Total customers: {generated_df['SN'].nunique()}")
     print(f"  Total sequences: {len(generated_df.groupby(['SN', 'sample_idx']))}")
     print(f"  Average length: {generated_df.groupby(['SN', 'sample_idx'])['step'].max().mean():.1f}")
@@ -247,14 +305,15 @@ def evaluate_pipeline(args):
 
     # Load true data for comparison
     print("\n[OK] Loading true data for comparison...")
-    df = load_preprocessed_data(dataset_ids=args.dataset_ids)
+    true_data_path = os.path.join(DATA_DIR, 'preprocessed', 'all_preprocessed.csv')
+    if not os.path.exists(true_data_path):
+        raise FileNotFoundError(f"True data not found at {true_data_path}. Run 'preprocess' first.")
+    
+    df = pd.read_csv(true_data_path)
 
     # Compute statistics
     true_lengths = df.groupby('SeqOrder').size()
-    if 'true_total_time' in df.columns:
-        true_total_times = df.groupby('SeqOrder')['true_total_time'].first()
-    else:
-        true_total_times = df.groupby('SeqOrder')['step_duration'].sum()
+    true_total_times = df.groupby('SeqOrder')['step_duration'].sum()
 
     generated_lengths = generated_df.groupby(['SN', 'sample_idx']).size()
     generated_total_times = generated_df.groupby(['SN', 'sample_idx'])['total_time'].first()
@@ -273,47 +332,50 @@ def evaluate_pipeline(args):
 
     # Token distribution
     print("\nToken Distribution (top 10):")
-    true_tokens = df['sourceID'].value_counts().head(10)
-    generated_tokens = generated_df['token_id'].value_counts().head(10)
+    true_tokens = df['sourceID'].value_counts(normalize=True).head(10)
+    generated_tokens = generated_df['token_id'].value_counts(normalize=True).head(10)
 
     print("\n  True:")
-    for token_id, count in true_tokens.items():
-        print(f"    Token {token_id}: {count} ({count/len(df)*100:.1f}%)")
+    for token_id, ratio in true_tokens.items():
+        print(f"    Token {token_id}: {ratio*100:.2f}%")
 
     print("\n  Generated:")
-    for token_id, count in generated_tokens.items():
-        print(f"    Token {token_id}: {count} ({count/len(generated_df)*100:.1f}%)")
+    for token_id, ratio in generated_tokens.items():
+        print(f"    Token {token_id}: {ratio*100:.2f}%")
 
 
 def main():
     parser = argparse.ArgumentParser(description="Conditional Generation Pipeline")
-    subparsers = parser.add_subparsers(dest='command', help='Pipeline command')
+    subparsers = parser.add_subparsers(dest='command', help='Pipeline command', required=True)
 
     # Preprocess command
     preprocess_parser = subparsers.add_parser('preprocess', help='Preprocess raw CSV files')
 
     # Train command
-    train_parser = subparsers.add_parser('train', help='Train both models')
-    train_parser.add_argument('--dataset-ids', nargs='+', default=None, help='Dataset IDs to use')
-    train_parser.add_argument('--batch-size', type=int, default=32, help='Batch size')
-    train_parser.add_argument('--val-split', type=float, default=0.2, help='Validation split')
-    train_parser.add_argument('--skip-sequence', action='store_true', help='Skip sequence model training')
-    train_parser.add_argument('--skip-counts', action='store_true', help='Skip counts model training')
+    train_parser = subparsers.add_parser('train', help='Train models')
+    train_parser.add_argument('--models', nargs='+', default=['all'], choices=['sequence', 'counts', 'all'], help='Models to train')
+    train_parser.add_argument('--val-split', type=float, default=0.15, help='Validation split ratio')
 
     # Generate command
     generate_parser = subparsers.add_parser('generate', help='Generate sequences and counts per customer')
-    generate_parser.add_argument('--dataset-ids', nargs='+', default=None, help='Dataset IDs (customers) for generation')
     generate_parser.add_argument('--conditioning-file', type=str, default=None, help='CSV file with conditioning data (must have dataset_id column)')
-    generate_parser.add_argument('--num-samples-per-customer', type=int, default=15, help='Number of sequences to generate per customer (default: 15, ignored if --match-input-volume is set)')
-    generate_parser.add_argument('--match-input-volume', action='store_true', help='Generate same number of sequences as input data per customer')
+    generate_parser.add_argument('--num-samples', type=int, default=15, help='Number of sequences to generate per customer (ignored if --match-input-volume)')
+    generate_parser.add_argument('--match-input-volume', action='store_true', help='Generate same number of sequences as in original data per customer')
     generate_parser.add_argument('--keep-repetitions', action='store_true', help='Keep consecutive token repetitions (do not filter)')
     generate_parser.add_argument('--output-file', type=str, default='generated_sequences.csv', help='Output filename')
-    generate_parser.add_argument('--use-gpu', action='store_true', help='Use GPU if available')
+    generate_parser.add_argument('--force-cpu', action='store_true', help='Force CPU usage even if GPU is available')
+
+    # Calibrated Generate command
+    calibrated_generate_parser = subparsers.add_parser('generate-calibrated', help='Generate a calibrated set of sequences via pooling and resampling')
+    calibrated_generate_parser.add_argument('--num-samples-per-category', type=int, default=500, help='Number of sequences to generate for each body region in the pool.')
+    calibrated_generate_parser.add_argument('--keep-repetitions', action='store_true', help='Keep consecutive token repetitions (do not filter).')
+    calibrated_generate_parser.add_argument('--pool-file', type=str, default='generated_sequences_pool.csv', help='Filename for the intermediate sequence pool.')
+    calibrated_generate_parser.add_argument('--output-file', type=str, default='generated_sequences_calibrated.csv', help='Final output filename for calibrated sequences.')
+    calibrated_generate_parser.add_argument('--force-cpu', action='store_true', help='Force CPU usage even if GPU is available.')
 
     # Evaluate command
     eval_parser = subparsers.add_parser('evaluate', help='Evaluate generated sequences')
-    eval_parser.add_argument('--generated-file', type=str, default='generated_sequences.csv', help='Generated results file')
-    eval_parser.add_argument('--dataset-ids', nargs='+', default=None, help='Dataset IDs for comparison')
+    eval_parser.add_argument('--generated-file', type=str, default='generated_sequences_calibrated.csv', help='Generated results file to evaluate.')
 
     args = parser.parse_args()
 
@@ -323,6 +385,8 @@ def main():
         train_pipeline(args)
     elif args.command == 'generate':
         generate_pipeline(args)
+    elif args.command == 'generate-calibrated':
+        generate_calibrated_pipeline(args)
     elif args.command == 'evaluate':
         evaluate_pipeline(args)
     else:

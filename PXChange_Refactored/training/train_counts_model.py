@@ -1,361 +1,258 @@
 """
-Training script for Conditional Counts Generator
+Training script for the Conditional Counts Generator model.
 """
 import os
 import sys
 import torch
 import torch.nn as nn
-from torch.optim import Adam
-from torch.optim.lr_scheduler import ReduceLROnPlateau
-import numpy as np
+from torch.utils.data import DataLoader
+from torch.optim import AdamW
+from torch.optim.lr_scheduler import OneCycleLR
 from tqdm import tqdm
+import numpy as np
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from torch.utils.data import TensorDataset
 import matplotlib.pyplot as plt
 
+# Add project root to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import (
     COUNTS_MODEL_CONFIG, COUNTS_TRAINING_CONFIG,
-    MODEL_SAVE_DIR
+    CONDITIONING_FEATURES, MODEL_SAVE_DIR
 )
-from models import ConditionalCountsGenerator
+from models.conditional_counts_generator import ConditionalCountsGenerator
+from preprocessing.data_loader import load_preprocessed_data, create_dataloaders
 
 
-def calculate_metrics(mu, sigma, targets, mask=None):
+def plot_training_curves(train_losses, val_losses, save_path=None):
     """
-    Calculate evaluation metrics for count predictions.
+    Plot and save training and validation loss curves.
     """
-    with torch.no_grad():
-        if mask is not None:
-            mu_masked = mu[mask]
-            targets_masked = targets[mask]
-        else:
-            mu_masked = mu.reshape(-1)
-            targets_masked = targets.reshape(-1)
+    plt.figure(figsize=(10, 6))
+    plt.plot(train_losses, label='Training Loss')
+    plt.plot(val_losses, label='Validation Loss')
+    plt.title('Counts Model Training Curves')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss (NLL)')
+    plt.legend()
+    plt.grid(True)
 
-        # MAE
-        mae = torch.abs(mu_masked - targets_masked).mean().item()
+    if save_path:
+        plt.savefig(save_path)
+        print(f"Training curves saved to {save_path}")
+    else:
+        plt.show()
 
-        # RMSE
-        rmse = torch.sqrt(((mu_masked - targets_masked) ** 2).mean()).item()
-
-        # MAPE
-        mape = (torch.abs((targets_masked - mu_masked) / (targets_masked + 1e-8))).mean().item() * 100
-
-    return mae, rmse, mape
-
-
-def train_epoch(model, dataloader, optimizer, device):
+def gamma_nll_loss(mu, sigma, y_true, min_sigma=0.01):
     """
-    Train for one epoch.
+    Negative Log-Likelihood loss for a Gamma distribution.
+    Assumes mu and sigma are parameters of the distribution.
+    
+    Args:
+        mu (torch.Tensor): Mean of the distribution.
+        sigma (torch.Tensor): Standard deviation.
+        y_true (torch.Tensor): True values.
+        min_sigma (float): Minimum value for sigma to avoid division by zero.
+    
+    Returns:
+        torch.Tensor: Scalar loss value.
+    """
+    # Clamp sigma to avoid numerical issues
+    sigma = torch.clamp(sigma, min=min_sigma)
+    
+    # Convert (mu, sigma) to (shape, rate) of Gamma distribution
+    sigma_sq = sigma.pow(2)
+    shape = mu.pow(2) / sigma_sq
+    rate = mu / sigma_sq
+    
+    # Ensure shape and rate are positive
+    shape = torch.clamp(shape, min=1e-6)
+    rate = torch.clamp(rate, min=1e-6)
+
+    # Create Gamma distribution
+    gamma_dist = torch.distributions.Gamma(shape, rate)
+    
+    # Calculate negative log-likelihood
+    # Add small epsilon to y_true to avoid log(0) for zero durations
+    nll = -gamma_dist.log_prob(y_true + 1e-8)
+    
+    return nll.mean()
+
+
+def train_epoch(model, dataloader, optimizer, device, scaler=None, grad_clip_value=1.0):
+    """
+    Run one training epoch.
     """
     model.train()
     total_loss = 0
-    total_mae = 0
-    total_rmse = 0
-    total_mape = 0
-    num_batches = 0
-
-    pbar = tqdm(dataloader, desc="Training")
-
-    for batch in pbar:
-        # Move data to device
+    
+    for batch in tqdm(dataloader, desc="Training epoch", leave=False):
+        # Unpack batch and move to device
         conditioning = batch['conditioning'].to(device)
-        sequence_tokens = batch['sequence_tokens'].to(device)
-        sequence_features = batch['sequence_features'].to(device)
-        step_durations = batch['step_durations'].to(device)
+        seq_tokens = batch['sequence_tokens'].to(device)
+        seq_features = batch['sequence_features'].to(device)
+        seq_counts = batch['step_durations'].to(device)
         mask = batch['mask'].to(device)
 
-        # Forward pass
-        mu, sigma = model(conditioning, sequence_tokens, sequence_features, mask)
-
-        # Compute loss
-        loss = model.compute_loss(mu, sigma, step_durations, mask)
-
-        # Backward pass
         optimizer.zero_grad()
+
+        # Forward pass
+        mu, sigma = model(conditioning, seq_tokens, seq_features, mask)
+
+        # Calculate loss, applying mask
+        loss = gamma_nll_loss(mu[mask], sigma[mask], seq_counts[mask])
+        total_loss += loss.item()
+
+        # Backward pass and optimization
         loss.backward()
-
-        # Gradient clipping
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-
+        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_value)
         optimizer.step()
 
-        # Metrics
-        mae, rmse, mape = calculate_metrics(mu, sigma, step_durations, mask)
-
-        total_loss += loss.item()
-        total_mae += mae
-        total_rmse += rmse
-        total_mape += mape
-        num_batches += 1
-
-        # Update progress bar
-        pbar.set_postfix({
-            'loss': f'{loss.item():.4f}',
-            'mae': f'{mae:.2f}',
-            'rmse': f'{rmse:.2f}'
-        })
-
-    avg_loss = total_loss / num_batches
-    avg_mae = total_mae / num_batches
-    avg_rmse = total_rmse / num_batches
-    avg_mape = total_mape / num_batches
-
-    return avg_loss, avg_mae, avg_rmse, avg_mape
+    return total_loss / len(dataloader)
 
 
-@torch.no_grad()
-def validate_epoch(model, dataloader, device):
+def validate_epoch(model, dataloader, device, scaler=None):
     """
-    Validate for one epoch.
+    Run one validation epoch.
     """
     model.eval()
     total_loss = 0
-    total_mae = 0
-    total_rmse = 0
-    total_mape = 0
-    num_batches = 0
+    
+    with torch.no_grad():
+        for batch in tqdm(dataloader, desc="Validation epoch", leave=False):
+            # Unpack batch and move to device
+            conditioning = batch['conditioning'].to(device)
+            seq_tokens = batch['sequence_tokens'].to(device)
+            seq_features = batch['sequence_features'].to(device)
+            seq_counts = batch['step_durations'].to(device)
+            mask = batch['mask'].to(device)
 
-    for batch in tqdm(dataloader, desc="Validation"):
-        # Move data to device
-        conditioning = batch['conditioning'].to(device)
-        sequence_tokens = batch['sequence_tokens'].to(device)
-        sequence_features = batch['sequence_features'].to(device)
-        step_durations = batch['step_durations'].to(device)
-        mask = batch['mask'].to(device)
+            # Forward pass
+            mu, sigma = model(conditioning, seq_tokens, seq_features, mask)
 
-        # Forward pass
-        mu, sigma = model(conditioning, sequence_tokens, sequence_features, mask)
+            # Calculate loss
+            loss = gamma_nll_loss(mu[mask], sigma[mask], seq_counts[mask])
+            total_loss += loss.item()
 
-        # Compute loss
-        loss = model.compute_loss(mu, sigma, step_durations, mask)
+    return total_loss / len(dataloader)
 
-        # Metrics
-        mae, rmse, mape = calculate_metrics(mu, sigma, step_durations, mask)
-
-        total_loss += loss.item()
-        total_mae += mae
-        total_rmse += rmse
-        total_mape += mape
-        num_batches += 1
-
-    avg_loss = total_loss / num_batches
-    avg_mae = total_mae / num_batches
-    avg_rmse = total_rmse / num_batches
-    avg_mape = total_mape / num_batches
-
-    return avg_loss, avg_mae, avg_rmse, avg_mape
-
-
-def plot_training_curves(history, save_path):
+def train_counts_model(data_path, validation_split=0.15, save_model=True, plot_curves=True):
     """
-    Plot and save training curves.
+    Main training loop for the counts model.
     """
-    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+    # Config
+    config = COUNTS_TRAINING_CONFIG
+    device = torch.device(config['device'] if torch.cuda.is_available() else 'cpu')
+    print(f"Using device: {device}")
 
-    # Loss
-    axes[0, 0].plot(history['train_loss'], label='Train')
-    axes[0, 0].plot(history['val_loss'], label='Validation')
-    axes[0, 0].set_xlabel('Epoch')
-    axes[0, 0].set_ylabel('Loss (NLL)')
-    axes[0, 0].set_title('Training Loss')
-    axes[0, 0].legend()
-    axes[0, 0].grid(True)
+    # Load data
+    print("Loading preprocessed data and creating dataloaders...")
+    df = load_preprocessed_data()
+    train_loader, val_loader, scaler = create_dataloaders(df, batch_size=config['batch_size'], validation_split=validation_split)
 
-    # MAE
-    axes[0, 1].plot(history['train_mae'], label='Train')
-    axes[0, 1].plot(history['val_mae'], label='Validation')
-    axes[0, 1].set_xlabel('Epoch')
-    axes[0, 1].set_ylabel('MAE (seconds)')
-    axes[0, 1].set_title('Mean Absolute Error')
-    axes[0, 1].legend()
-    axes[0, 1].grid(True)
-
-    # RMSE
-    axes[1, 0].plot(history['train_rmse'], label='Train')
-    axes[1, 0].plot(history['val_rmse'], label='Validation')
-    axes[1, 0].set_xlabel('Epoch')
-    axes[1, 0].set_ylabel('RMSE (seconds)')
-    axes[1, 0].set_title('Root Mean Squared Error')
-    axes[1, 0].legend()
-    axes[1, 0].grid(True)
-
-    # MAPE
-    axes[1, 1].plot(history['train_mape'], label='Train')
-    axes[1, 1].plot(history['val_mape'], label='Validation')
-    axes[1, 1].set_xlabel('Epoch')
-    axes[1, 1].set_ylabel('MAPE (%)')
-    axes[1, 1].set_title('Mean Absolute Percentage Error')
-    axes[1, 1].legend()
-    axes[1, 1].grid(True)
-
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=150)
-    plt.close()
-    print(f"[OK] Training curves saved to {save_path}")
-
-
-def train_counts_model(train_loader, val_loader, config=None, training_config=None):
-    """
-    Main training function for counts model.
-
-    Args:
-        train_loader: Training dataloader
-        val_loader: Validation dataloader
-        config: Model configuration
-        training_config: Training configuration
-
-    Returns:
-        model: Trained model
-        history: Training history
-    """
-    if config is None:
-        config = COUNTS_MODEL_CONFIG
-    if training_config is None:
-        training_config = COUNTS_TRAINING_CONFIG
-
-    # Device
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"\nUsing device: {device}")
+    print(f"\nTraining data: {len(train_loader.dataset)} samples")
+    print(f"Validation data: {len(val_loader.dataset)} samples")
 
     # Initialize model
-    model = ConditionalCountsGenerator(config)
-    model.to(device)
-    print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
+    model_config = COUNTS_MODEL_CONFIG
+    model = ConditionalCountsGenerator(model_config).to(device)
+    print(f"\nModel initialized with {sum(p.numel() for p in model.parameters())/1e6:.2f}M parameters.")
 
-    # Optimizer
-    optimizer = Adam(model.parameters(), lr=training_config['learning_rate'])
-
-    # Learning rate scheduler
-    scheduler = ReduceLROnPlateau(
+    # Optimizer and scheduler
+    optimizer = AdamW(model.parameters(), lr=config['learning_rate'], weight_decay=config['weight_decay'])
+    scheduler = OneCycleLR(
         optimizer,
-        mode='min',
-        factor=0.5,
-        patience=5,
-        verbose=True
+        max_lr=config['learning_rate'],
+        epochs=config['epochs'],
+        steps_per_epoch=len(train_loader),
+        pct_start=0.2
     )
 
     # Training loop
-    history = {
-        'train_loss': [],
-        'val_loss': [],
-        'train_mae': [],
-        'val_mae': [],
-        'train_rmse': [],
-        'val_rmse': [],
-        'train_mape': [],
-        'val_mape': []
-    }
-
+    print(f"\nStarting training for {config['epochs']} epochs...")
+    train_losses, val_losses = [], []
     best_val_loss = float('inf')
-    patience_counter = 0
-    patience = training_config.get('early_stopping_patience', 15)
 
-    print(f"\n{'='*70}")
-    print(f"TRAINING CONDITIONAL COUNTS GENERATOR")
-    print(f"{'='*70}\n")
+    for epoch in range(config['epochs']):
+        # Training
+        train_loss = train_epoch(model, train_loader, optimizer, device, scaler, config['grad_clip_value'])
+        train_losses.append(train_loss)
 
-    for epoch in range(training_config['epochs']):
-        print(f"\nEpoch {epoch + 1}/{training_config['epochs']}")
+        # Validation
+        val_loss = validate_epoch(model, val_loader, device, scaler)
+        val_losses.append(val_loss)
 
-        # Train
-        train_loss, train_mae, train_rmse, train_mape = train_epoch(
-            model, train_loader, optimizer, device
-        )
+        print(f"Epoch {epoch+1}/{config['epochs']} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}")
 
-        # Validate
-        val_loss, val_mae, val_rmse, val_mape = validate_epoch(
-            model, val_loader, device
-        )
-
-        # Update scheduler
-        scheduler.step(val_loss)
-
-        # Record history
-        history['train_loss'].append(train_loss)
-        history['val_loss'].append(val_loss)
-        history['train_mae'].append(train_mae)
-        history['val_mae'].append(val_mae)
-        history['train_rmse'].append(train_rmse)
-        history['val_rmse'].append(val_rmse)
-        history['train_mape'].append(train_mape)
-        history['val_mape'].append(val_mape)
-
-        # Print epoch summary
-        print(f"\nEpoch {epoch + 1} Summary:")
-        print(f"  Train - Loss: {train_loss:.4f}, MAE: {train_mae:.2f}s, RMSE: {train_rmse:.2f}s, MAPE: {train_mape:.2f}%")
-        print(f"  Val   - Loss: {val_loss:.4f}, MAE: {val_mae:.2f}s, RMSE: {val_rmse:.2f}s, MAPE: {val_mape:.2f}%")
+        # Learning rate update
+        scheduler.step()
 
         # Save best model
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            patience_counter = 0
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'val_loss': val_loss,
-                'config': config
-            }, os.path.join(MODEL_SAVE_DIR, 'counts_model_best.pt'))
-            print(f"  [OK] Best model saved (val_loss: {val_loss:.4f})")
-        else:
-            patience_counter += 1
+            if save_model:
+                os.makedirs(MODEL_SAVE_DIR, exist_ok=True)
+                model_path = os.path.join(MODEL_SAVE_DIR, 'counts_model_best.pth')
+                torch.save(model.state_dict(), model_path)
+                print(f"  -> Best model saved to {model_path}")
 
-        # Early stopping
-        if patience_counter >= patience:
-            print(f"\n[OK] Early stopping triggered after {epoch + 1} epochs")
-            break
-
-    # Load best model
-    checkpoint = torch.load(os.path.join(MODEL_SAVE_DIR, 'counts_model_best.pt'))
-    model.load_state_dict(checkpoint['model_state_dict'])
+    print("\nTraining complete!")
+    print(f"Best validation loss: {best_val_loss:.4f}")
 
     # Plot training curves
-    plot_training_curves(history, os.path.join(MODEL_SAVE_DIR, 'counts_training_curves.png'))
+    if plot_curves:
+        save_path = os.path.join(MODEL_SAVE_DIR, 'counts_training_curves.png')
+        plot_training_curves(train_losses, val_losses, save_path=save_path)
+        
+    # --- Final evaluation and prediction example ---
+    print("\n--- Generating example prediction ---")
+    model.load_state_dict(torch.load(os.path.join(MODEL_SAVE_DIR, 'counts_model_best.pth')))
+    model.eval()
 
-    print(f"\n{'='*70}")
-    print(f"TRAINING COMPLETE")
-    print(f"{'='*70}\n")
-    print(f"Best validation loss: {best_val_loss:.4f}")
-    print(f"Final validation MAE: {history['val_mae'][-1]:.2f}s")
-    print(f"Final validation RMSE: {history['val_rmse'][-1]:.2f}s")
+    with torch.no_grad():
+        # Get one sample batch from validation set
+        sample_batch = next(iter(val_loader))
 
-    return model, history
+        sample_cond = sample_batch['conditioning'][0:1].to(device)
+        sample_tok = sample_batch['sequence_tokens'][0:1].to(device)
+        sample_feat = sample_batch['sequence_features'][0:1].to(device)
+        sample_counts = sample_batch['step_durations'][0:1].to(device)
+        sample_mask = sample_batch['mask'][0:1].to(device)
+
+        # Predict mu and sigma
+        mu, sigma = model(sample_cond, sample_tok, sample_feat, sample_mask)
+        
+        # Get valid steps
+        valid_mask = sample_mask.squeeze(0)
+        true_counts = sample_counts.squeeze(0)[valid_mask].cpu().numpy()
+        pred_mu = mu.squeeze(0)[valid_mask].cpu().numpy()
+        pred_sigma = sigma.squeeze(0)[valid_mask].cpu().numpy()
+        
+        print("\nExample Prediction:")
+        print(f"  Conditioning: {sample_cond.squeeze(0).cpu().numpy()}")
+        print("  Step | True Duration | Pred Mean | Pred StdDev")
+        print("-" * 50)
+        for i in range(len(true_counts)):
+            print(f"  {i:<4} | {true_counts[i]:<13.2f} | {pred_mu[i]:<9.2f} | {pred_sigma[i]:<9.2f}")
 
 
-if __name__ == "__main__":
-    # Test training with dummy data
-    print("Testing counts model training...")
+    return best_val_loss
 
-    from preprocessing import load_preprocessed_data, create_dataloaders
 
-    # Load data
-    df = load_preprocessed_data()
-    train_loader, val_loader, scaler = create_dataloaders(df, batch_size=8)
+if __name__ == '__main__':
+    if len(sys.argv) > 1:
+        data_file_path = sys.argv[1]
+        if not os.path.exists(data_file_path):
+            print(f"Error: Data file not found at {data_file_path}")
+            sys.exit(1)
+    else:
+        # Default path
+        data_file_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            'data', 'preprocessed', 'all_preprocessed.csv'
+        )
 
-    # Test config
-    test_config = {
-        'd_model': 128,
-        'nhead': 4,
-        'num_encoder_layers': 2,
-        'num_cross_attention_layers': 2,
-        'dim_feedforward': 512,
-        'dropout': 0.1,
-        'max_seq_len': 128,
-        'conditioning_dim': 6,
-        'sequence_feature_dim': 18,
-        'min_sigma': 0.1
-    }
-
-    test_training_config = {
-        'batch_size': 8,
-        'epochs': 2,
-        'learning_rate': 0.0001,
-        'gradient_clip': 1.0,
-        'early_stopping_patience': 5,
-        'min_sigma': 0.1
-    }
-
-    # Train
-    model, history = train_counts_model(train_loader, val_loader, test_config, test_training_config)
-    print("\n[OK] Training test complete!")
+    print(f"Using data file: {data_file_path}")
+    train_counts_model(data_path=data_file_path)

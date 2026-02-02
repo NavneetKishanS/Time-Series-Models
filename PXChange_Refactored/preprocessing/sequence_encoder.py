@@ -7,7 +7,7 @@ import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from PXChange_Refactored.config import SOURCEID_VOCAB, PAD_TOKEN_ID, START_TOKEN_ID, END_TOKEN_ID
+from config import SOURCEID_VOCAB, PAD_TOKEN_ID, START_TOKEN_ID, END_TOKEN_ID
 
 
 # Create reverse vocabulary for decoding

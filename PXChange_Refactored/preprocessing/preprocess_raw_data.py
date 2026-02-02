@@ -144,6 +144,7 @@ def preprocess_raw_file(raw_file_path, dataset_id):
                 'BodyGroup_from': encode_bodygroup(first_row['BodyGroup_from']),
                 'BodyGroup_to': encode_bodygroup(first_row['BodyGroup_to']),
                 'PTAB': safe_float(first_row['PTAB'], 0.0),
+                'entity_type': 0, # 0 for REAL_PATIENT
                 'Position_encoded': encode_position(first_row['Position']),
                 'Direction_encoded': encode_direction(first_row['Direction']),
                 'timediff': 0.0,
@@ -162,6 +163,7 @@ def preprocess_raw_file(raw_file_path, dataset_id):
                     'BodyGroup_from': encode_bodygroup(row['BodyGroup_from']),
                     'BodyGroup_to': encode_bodygroup(row['BodyGroup_to']),
                     'PTAB': safe_float(row['PTAB'], 0.0),
+                    'entity_type': 0, # 0 for REAL_PATIENT
                     'Position_encoded': encode_position(row['Position']),
                     'Direction_encoded': encode_direction(row['Direction']),
                     'timediff': safe_float(row['timediff'], 0.0),
@@ -180,6 +182,7 @@ def preprocess_raw_file(raw_file_path, dataset_id):
                 'BodyGroup_from': encode_bodygroup(last_row['BodyGroup_from']),
                 'BodyGroup_to': encode_bodygroup(last_row['BodyGroup_to']),
                 'PTAB': safe_float(last_row['PTAB'], 0.0),
+                'entity_type': 0, # 0 for REAL_PATIENT
                 'Position_encoded': encode_position(last_row['Position']),
                 'Direction_encoded': encode_direction(last_row['Direction']),
                 'timediff': safe_float(last_row['timediff'], 0.0),

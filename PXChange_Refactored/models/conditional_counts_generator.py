@@ -10,7 +10,7 @@ import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from PXChange_Refactored.config import COUNTS_MODEL_CONFIG, PAD_TOKEN_ID, VOCAB_SIZE
+from config import COUNTS_MODEL_CONFIG, PAD_TOKEN_ID, VOCAB_SIZE
 from models.layers import (
     PositionalEncoding, ConditioningProjection,
     CrossAttentionLayer, GammaOutputHead,
@@ -207,133 +207,32 @@ class ConditionalCountsGenerator(nn.Module):
 
         return mu, sigma
 
-    def compute_loss(self, mu, sigma, targets, mask=None):
-        """
-        Compute negative log-likelihood of Gamma distribution.
-
-        Gamma parameterization:
-            - shape (α) = (μ / σ)^2
-            - rate (β) = μ / σ^2
-
-        Args:
-            mu: [batch_size, seq_len] - predicted means
-            sigma: [batch_size, seq_len] - predicted standard deviations
-            targets: [batch_size, seq_len] - true counts/durations
-            mask: [batch_size, seq_len] - Boolean mask (True = valid)
-
-        Returns:
-            loss: Scalar loss value
-        """
-        # Compute Gamma parameters from μ and σ
-        alpha = (mu / sigma) ** 2  # shape parameter
-        beta = mu / (sigma ** 2)   # rate parameter
-
-        # Ensure positive and numerical stability
-        alpha = torch.clamp(alpha, min=1e-6)
-        beta = torch.clamp(beta, min=1e-6)
-        targets = torch.clamp(targets, min=1e-6)
-
-        # Compute negative log-likelihood
-        # log p(x|α,β) = (α-1)*log(x) - β*x + α*log(β) - log(Γ(α))
-        log_prob = (
-            (alpha - 1) * torch.log(targets)
-            - beta * targets
-            + alpha * torch.log(beta)
-            - torch.lgamma(alpha)
-        )
-
-        # Apply mask if provided
-        if mask is not None:
-            log_prob = log_prob * mask.float()
-            loss = -log_prob.sum() / mask.float().sum()
-        else:
-            loss = -log_prob.mean()
-
-        return loss
-
     def sample_counts(self, mu, sigma, num_samples=1):
         """
-        Sample counts from predicted Gamma distributions.
+        Sample from the predicted Gamma distribution.
 
         Args:
-            mu: [batch_size, seq_len] - predicted means
-            sigma: [batch_size, seq_len] - predicted standard deviations
-            num_samples: Number of samples to draw
+            mu (torch.Tensor): Mean of the distribution [batch_size, seq_len]
+            sigma (torch.Tensor): Standard deviation of the distribution [batch_size, seq_len]
+            num_samples (int): Number of samples to draw for each position.
 
         Returns:
-            samples: [batch_size, seq_len, num_samples] - sampled counts
+            torch.Tensor: Sampled counts [batch_size, seq_len, num_samples]
         """
-        # Compute Gamma parameters
-        alpha = (mu / sigma) ** 2
-        beta = mu / (sigma ** 2)
+        # Convert (mu, sigma) to (shape, rate) of Gamma distribution
+        # shape = (mu / sigma)^2, rate = mu / sigma^2
+        sigma_sq = sigma.pow(2)
+        shape = mu.pow(2) / (sigma_sq + 1e-8)
+        rate = mu / (sigma_sq + 1e-8)
 
-        # Ensure positive
-        alpha = torch.clamp(alpha, min=1e-6)
-        beta = torch.clamp(beta, min=1e-6)
+        # Ensure shape and rate are positive
+        shape = torch.clamp(shape, min=1e-6)
+        rate = torch.clamp(rate, min=1e-6)
 
-        # Sample from Gamma distribution
-        # PyTorch uses (concentration=α, rate=β) parameterization
-        gamma_dist = torch.distributions.Gamma(concentration=alpha, rate=beta)
+        # Create Gamma distribution
+        gamma_dist = torch.distributions.Gamma(shape, rate)
 
-        samples_list = []
-        for _ in range(num_samples):
-            sample = gamma_dist.sample()
-            samples_list.append(sample)
-
-        samples = torch.stack(samples_list, dim=-1)  # [batch_size, seq_len, num_samples]
+        # Sample from the distribution
+        samples = gamma_dist.sample((num_samples,)).permute(1, 2, 0)
 
         return samples
-
-
-if __name__ == "__main__":
-    # Test the model
-    print("Testing Conditional Counts Generator...")
-
-    # Create dummy config
-    test_config = {
-        'd_model': 128,
-        'nhead': 4,
-        'num_encoder_layers': 3,
-        'num_cross_attention_layers': 2,
-        'dim_feedforward': 512,
-        'dropout': 0.1,
-        'max_seq_len': 64,
-        'conditioning_dim': 6,
-        'sequence_feature_dim': 18,
-        'min_sigma': 0.1
-    }
-
-    # Initialize model
-    model = ConditionalCountsGenerator(test_config)
-    print(f"\n✓ Model initialized")
-    print(f"  Parameters: {sum(p.numel() for p in model.parameters()):,}")
-
-    # Create dummy inputs
-    batch_size = 4
-    seq_len = 20
-    conditioning = torch.randn(batch_size, test_config['conditioning_dim'])
-    sequence_tokens = torch.randint(1, 17, (batch_size, seq_len))
-    sequence_features = torch.randn(batch_size, seq_len, 2)
-    targets = torch.abs(torch.randn(batch_size, seq_len)) * 10  # Positive counts
-    mask = torch.ones(batch_size, seq_len, dtype=torch.bool)
-    mask[:, seq_len // 2:] = False  # Mask second half
-
-    # Forward pass
-    print(f"\n✓ Testing forward pass...")
-    mu, sigma = model(conditioning, sequence_tokens, sequence_features, mask)
-    print(f"  Conditioning shape: {conditioning.shape}")
-    print(f"  Sequence tokens shape: {sequence_tokens.shape}")
-    print(f"  Mu shape: {mu.shape}, range: [{mu.min():.2f}, {mu.max():.2f}]")
-    print(f"  Sigma shape: {sigma.shape}, range: [{sigma.min():.2f}, {sigma.max():.2f}]")
-
-    # Test loss
-    loss = model.compute_loss(mu, sigma, targets, mask)
-    print(f"\n✓ Loss computed: {loss.item():.4f}")
-
-    # Test sampling
-    print(f"\n✓ Testing sampling...")
-    samples = model.sample_counts(mu, sigma, num_samples=3)
-    print(f"  Samples shape: {samples.shape}")
-    print(f"  Sample statistics: mean={samples.mean():.2f}, std={samples.std():.2f}")
-
-    print("\n✓ All tests passed!")

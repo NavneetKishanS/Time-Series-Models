@@ -1,363 +1,279 @@
 """
-Training script for Conditional Sequence Generator
+Training script for the Conditional Sequence Generator model.
 """
 import os
 import sys
 import torch
 import torch.nn as nn
-from torch.optim import Adam
-from torch.optim.lr_scheduler import LambdaLR
-import numpy as np
+from torch.utils.data import DataLoader
+from torch.optim import AdamW
+from torch.optim.lr_scheduler import OneCycleLR
 from tqdm import tqdm
+import numpy as np
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from torch.utils.data import TensorDataset
 import matplotlib.pyplot as plt
 
+# Add project root to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import (
-    SEQUENCE_MODEL_CONFIG, SEQUENCE_TRAINING_CONFIG,
-    MODEL_SAVE_DIR, START_TOKEN_ID, PAD_TOKEN_ID
+    SEQUENCE_MODEL_CONFIG, SEQUENCE_TRAINING_CONFIG, SEQUENCE_SAMPLING_CONFIG, # Added SEQUENCE_SAMPLING_CONFIG
+    CONDITIONING_FEATURES, PAD_TOKEN_ID,
+    MODEL_SAVE_DIR, START_TOKEN_ID, END_TOKEN_ID
 )
-from models import ConditionalSequenceGenerator
-from preprocessing.sequence_encoder import create_decoder_input
+from models.conditional_sequence_generator import ConditionalSequenceGenerator
+from preprocessing.data_loader import load_preprocessed_data, create_dataloaders
+from preprocessing.sequence_encoder import sequence_to_text, decode_sequences
 
 
-def get_warmup_scheduler(optimizer, warmup_steps):
+def plot_training_curves(train_losses, val_losses, save_path=None):
     """
-    Learning rate scheduler with warmup.
+    Plot and save training and validation loss curves.
     """
-    def lr_lambda(step):
-        if step < warmup_steps:
-            return float(step) / float(max(1, warmup_steps))
-        return 1.0
+    plt.figure(figsize=(10, 6))
+    plt.plot(train_losses, label='Training Loss')
+    plt.plot(val_losses, label='Validation Loss')
+    plt.title('Sequence Model Training Curves')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.legend()
+    plt.grid(True)
 
-    return LambdaLR(optimizer, lr_lambda)
+    if save_path:
+        plt.savefig(save_path)
+        print(f"Training curves saved to {save_path}")
+    else:
+        plt.show()
 
-
-def calculate_perplexity(logits, targets, ignore_index=PAD_TOKEN_ID):
+def train_epoch(model, dataloader, optimizer, criterion, device, scaler=None, grad_clip_value=1.0):
     """
-    Calculate perplexity metric.
-    """
-    with torch.no_grad():
-        logits_flat = logits.reshape(-1, logits.size(-1))
-        targets_flat = targets.reshape(-1)
-
-        loss = nn.functional.cross_entropy(
-            logits_flat,
-            targets_flat,
-            ignore_index=ignore_index,
-            reduction='mean'
-        )
-
-        perplexity = torch.exp(loss)
-
-    return perplexity.item()
-
-
-def calculate_accuracy(logits, targets, ignore_index=PAD_TOKEN_ID):
-    """
-    Calculate token prediction accuracy.
-    """
-    with torch.no_grad():
-        predictions = torch.argmax(logits, dim=-1)
-        mask = targets != ignore_index
-        correct = (predictions == targets) & mask
-        accuracy = correct.sum().float() / mask.sum().float()
-
-    return accuracy.item()
-
-
-def train_epoch(model, dataloader, optimizer, scheduler, device, config):
-    """
-    Train for one epoch.
+    Run one training epoch.
     """
     model.train()
     total_loss = 0
-    total_perplexity = 0
-    total_accuracy = 0
-    num_batches = 0
-
-    pbar = tqdm(dataloader, desc="Training")
-
-    for batch in pbar:
-        # Move data to device
+    
+    for batch in tqdm(dataloader, desc="Training epoch", leave=False):
+        # Unpack batch and move to device
         conditioning = batch['conditioning'].to(device)
         sequence_tokens = batch['sequence_tokens'].to(device)
+        seq_length = batch['seq_length'].to(device)
 
-        # Create decoder input (shift right with START token)
-        decoder_input = create_decoder_input(sequence_tokens, start_token_id=START_TOKEN_ID)
+        # Create sequences_in (input to decoder, shifted right with START_TOKEN_ID)
+        # sequences_in will have START_TOKEN_ID at position 0, and then the actual sequence tokens.
+        # The target sequences_out will be the original sequence_tokens.
+        sequences_in = torch.full_like(sequence_tokens, PAD_TOKEN_ID, device=device)
+        sequences_in[:, 0] = START_TOKEN_ID # Prepend START token to all sequences
+
+        # Shift original sequence tokens to the right for sequences_in
+        for i in range(sequence_tokens.size(0)):
+            current_len = seq_length[i].item() # Get the actual length for this sequence
+            # Only shift if sequence has elements beyond the START_TOKEN_ID
+            if current_len > 0:
+                sequences_in[i, 1:current_len] = sequence_tokens[i, :current_len-1]
+        
+        sequences_out = sequence_tokens # The target for the loss calculation
+
+        optimizer.zero_grad()
 
         # Forward pass
-        logits = model(conditioning, decoder_input)
+        logits = model(conditioning, sequences_in)
 
-        # Compute loss
-        loss = model.compute_loss(
-            logits,
-            sequence_tokens,
-            ignore_index=PAD_TOKEN_ID,
-            label_smoothing=config.get('label_smoothing', 0.1)
-        )
+        # Reshape for loss calculation
+        # Logits: [batch, seq_len, vocab_size] -> [batch * seq_len, vocab_size]
+        # Target: [batch, seq_len] -> [batch * seq_len]
+        logits_flat = logits.view(-1, logits.shape[-1])
+        sequences_out_flat = sequences_out.reshape(-1)
 
-        # Backward pass
-        optimizer.zero_grad()
-        loss.backward()
-
-        # Gradient clipping
-        if config.get('gradient_clip', 0) > 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), config['gradient_clip'])
-
-        optimizer.step()
-        scheduler.step()
-
-        # Metrics
-        with torch.no_grad():
-            perplexity = calculate_perplexity(logits, sequence_tokens)
-            accuracy = calculate_accuracy(logits, sequence_tokens)
-
+        # Calculate loss
+        loss = criterion(logits_flat, sequences_out_flat)
         total_loss += loss.item()
-        total_perplexity += perplexity
-        total_accuracy += accuracy
-        num_batches += 1
 
-        # Update progress bar
-        pbar.set_postfix({
-            'loss': f'{loss.item():.4f}',
-            'ppl': f'{perplexity:.2f}',
-            'acc': f'{accuracy:.3f}'
-        })
+        # Backward pass and optimization
+        loss.backward()
+        
+        # Gradient clipping
+        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_value)
+        
+        optimizer.step()
 
-    avg_loss = total_loss / num_batches
-    avg_perplexity = total_perplexity / num_batches
-    avg_accuracy = total_accuracy / num_batches
-
-    return avg_loss, avg_perplexity, avg_accuracy
+    return total_loss / len(dataloader)
 
 
-@torch.no_grad()
-def validate_epoch(model, dataloader, device):
+def validate_epoch(model, dataloader, criterion, device, scaler=None):
     """
-    Validate for one epoch.
+    Run one validation epoch.
     """
     model.eval()
     total_loss = 0
-    total_perplexity = 0
-    total_accuracy = 0
-    num_batches = 0
+    
+    with torch.no_grad():
+        for batch in tqdm(dataloader, desc="Validation epoch", leave=False):
+            # Unpack batch and move to device
+            conditioning = batch['conditioning'].to(device)
+            sequence_tokens = batch['sequence_tokens'].to(device)
+            seq_length = batch['seq_length'].to(device)
 
-    for batch in tqdm(dataloader, desc="Validation"):
-        # Move data to device
-        conditioning = batch['conditioning'].to(device)
-        sequence_tokens = batch['sequence_tokens'].to(device)
+            # Create sequences_in (input to decoder, shifted right with START_TOKEN_ID)
+            # sequences_in will have START_TOKEN_ID at position 0, and then the actual sequence tokens.
+            # The target sequences_out will be the original sequence_tokens.
+            sequences_in = torch.full_like(sequence_tokens, PAD_TOKEN_ID, device=device)
+            sequences_in[:, 0] = START_TOKEN_ID # Prepend START token to all sequences
 
-        # Create decoder input
-        decoder_input = create_decoder_input(sequence_tokens, start_token_id=START_TOKEN_ID)
+            # Shift original sequence tokens to the right for sequences_in
+            for i in range(sequence_tokens.size(0)):
+                current_len = seq_length[i].item() # Get the actual length for this sequence
+                # Only shift if sequence has elements beyond the START_TOKEN_ID
+                if current_len > 0:
+                    sequences_in[i, 1:current_len] = sequence_tokens[i, :current_len-1]
+            
+            sequences_out = sequence_tokens # The target for the loss calculation
+            
+            # Forward pass
+            logits = model(conditioning, sequences_in)
 
-        # Forward pass
-        logits = model(conditioning, decoder_input)
+            # Reshape for loss calculation
+            logits_flat = logits.view(-1, logits.shape[-1])
+            sequences_out_flat = sequences_out.reshape(-1)
+            
+            # Calculate loss
+            loss = criterion(logits_flat, sequences_out_flat)
+            total_loss += loss.item()
 
-        # Compute loss
-        loss = model.compute_loss(logits, sequence_tokens, ignore_index=PAD_TOKEN_ID)
-
-        # Metrics
-        perplexity = calculate_perplexity(logits, sequence_tokens)
-        accuracy = calculate_accuracy(logits, sequence_tokens)
-
-        total_loss += loss.item()
-        total_perplexity += perplexity
-        total_accuracy += accuracy
-        num_batches += 1
-
-    avg_loss = total_loss / num_batches
-    avg_perplexity = total_perplexity / num_batches
-    avg_accuracy = total_accuracy / num_batches
-
-    return avg_loss, avg_perplexity, avg_accuracy
+    return total_loss / len(dataloader)
 
 
-def plot_training_curves(history, save_path):
+def train_sequence_model(data_path, validation_split=0.15, save_model=True, plot_curves=True):
     """
-    Plot and save training curves.
+    Main training loop for the sequence model.
     """
-    fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+    # Config
+    config = SEQUENCE_TRAINING_CONFIG
+    device = torch.device(config['device'] if torch.cuda.is_available() else 'cpu')
+    print(f"Using device: {device}")
 
-    # Loss
-    axes[0].plot(history['train_loss'], label='Train')
-    axes[0].plot(history['val_loss'], label='Validation')
-    axes[0].set_xlabel('Epoch')
-    axes[0].set_ylabel('Loss')
-    axes[0].set_title('Training Loss')
-    axes[0].legend()
-    axes[0].grid(True)
+    # Load data
+    print("Loading preprocessed data and creating dataloaders...")
+    df = load_preprocessed_data()
+    train_loader, val_loader, scaler = create_dataloaders(df, batch_size=config['batch_size'], validation_split=validation_split)
 
-    # Perplexity
-    axes[1].plot(history['train_perplexity'], label='Train')
-    axes[1].plot(history['val_perplexity'], label='Validation')
-    axes[1].set_xlabel('Epoch')
-    axes[1].set_ylabel('Perplexity')
-    axes[1].set_title('Perplexity')
-    axes[1].legend()
-    axes[1].grid(True)
-
-    # Accuracy
-    axes[2].plot(history['train_accuracy'], label='Train')
-    axes[2].plot(history['val_accuracy'], label='Validation')
-    axes[2].set_xlabel('Epoch')
-    axes[2].set_ylabel('Accuracy')
-    axes[2].set_title('Token Accuracy')
-    axes[2].legend()
-    axes[2].grid(True)
-
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=150)
-    plt.close()
-    print(f"[OK] Training curves saved to {save_path}")
-
-
-def train_sequence_model(train_loader, val_loader, config=None, training_config=None):
-    """
-    Main training function for sequence model.
-
-    Args:
-        train_loader: Training dataloader
-        val_loader: Validation dataloader
-        config: Model configuration
-        training_config: Training configuration
-
-    Returns:
-        model: Trained model
-        history: Training history
-    """
-    if config is None:
-        config = SEQUENCE_MODEL_CONFIG
-    if training_config is None:
-        training_config = SEQUENCE_TRAINING_CONFIG
-
-    # Device
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"\nUsing device: {device}")
-
+    print(f"\nTraining data: {len(train_loader.dataset)} samples")
+    print(f"Validation data: {len(val_loader.dataset)} samples")
     # Initialize model
-    model = ConditionalSequenceGenerator(config)
-    model.to(device)
-    print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
+    model_config = SEQUENCE_MODEL_CONFIG
+    model = ConditionalSequenceGenerator(model_config).to(device)
+    print(f"\nModel initialized with {sum(p.numel() for p in model.parameters())/1e6:.2f}M parameters.")
 
-    # Optimizer
-    optimizer = Adam(model.parameters(), lr=training_config['learning_rate'])
+    # Loss function (ignore padding)
+    criterion = nn.CrossEntropyLoss(ignore_index=PAD_TOKEN_ID)
 
-    # Learning rate scheduler
-    total_steps = len(train_loader) * training_config['epochs']
-    warmup_steps = training_config.get('warmup_steps', 4000)
-    scheduler = get_warmup_scheduler(optimizer, warmup_steps)
+    # Optimizer and scheduler
+    optimizer = AdamW(model.parameters(), lr=config['learning_rate'], weight_decay=config['weight_decay'])
+    scheduler = OneCycleLR(
+        optimizer,
+        max_lr=config['learning_rate'],
+        epochs=config['epochs'],
+        steps_per_epoch=len(train_loader),
+        pct_start=0.2
+    )
 
     # Training loop
-    history = {
-        'train_loss': [],
-        'val_loss': [],
-        'train_perplexity': [],
-        'val_perplexity': [],
-        'train_accuracy': [],
-        'val_accuracy': []
-    }
-
+    print(f"\nStarting training for {config['epochs']} epochs...")
+    train_losses, val_losses = [], []
     best_val_loss = float('inf')
-    patience_counter = 0
-    patience = training_config.get('early_stopping_patience', 15)
 
-    print(f"\n{'='*70}")
-    print(f"TRAINING CONDITIONAL SEQUENCE GENERATOR")
-    print(f"{'='*70}\n")
+    for epoch in range(config['epochs']):
+        # Training
+        train_loss = train_epoch(model, train_loader, optimizer, criterion, device, scaler, config['grad_clip_value'])
+        train_losses.append(train_loss)
 
-    for epoch in range(training_config['epochs']):
-        print(f"\nEpoch {epoch + 1}/{training_config['epochs']}")
+        # Validation
+        val_loss = validate_epoch(model, val_loader, criterion, device, scaler)
+        val_losses.append(val_loss)
 
-        # Train
-        train_loss, train_ppl, train_acc = train_epoch(
-            model, train_loader, optimizer, scheduler, device, training_config
-        )
+        print(f"Epoch {epoch+1}/{config['epochs']} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}")
 
-        # Validate
-        val_loss, val_ppl, val_acc = validate_epoch(model, val_loader, device)
-
-        # Record history
-        history['train_loss'].append(train_loss)
-        history['val_loss'].append(val_loss)
-        history['train_perplexity'].append(train_ppl)
-        history['val_perplexity'].append(val_ppl)
-        history['train_accuracy'].append(train_acc)
-        history['val_accuracy'].append(val_acc)
-
-        # Print epoch summary
-        print(f"\nEpoch {epoch + 1} Summary:")
-        print(f"  Train - Loss: {train_loss:.4f}, Perplexity: {train_ppl:.2f}, Accuracy: {train_acc:.3f}")
-        print(f"  Val   - Loss: {val_loss:.4f}, Perplexity: {val_ppl:.2f}, Accuracy: {val_acc:.3f}")
+        # Learning rate update
+        scheduler.step()
 
         # Save best model
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            patience_counter = 0
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'val_loss': val_loss,
-                'config': config
-            }, os.path.join(MODEL_SAVE_DIR, 'sequence_model_best.pt'))
-            print(f"  [OK] Best model saved (val_loss: {val_loss:.4f})")
-        else:
-            patience_counter += 1
+            if save_model:
+                os.makedirs(MODEL_SAVE_DIR, exist_ok=True)
+                model_path = os.path.join(MODEL_SAVE_DIR, 'sequence_model_best.pth')
+                torch.save(model.state_dict(), model_path)
+                print(f"  -> Best model saved to {model_path}")
 
-        # Early stopping
-        if patience_counter >= patience:
-            print(f"\n[OK] Early stopping triggered after {epoch + 1} epochs")
-            break
-
-    # Load best model
-    checkpoint = torch.load(os.path.join(MODEL_SAVE_DIR, 'sequence_model_best.pt'))
-    model.load_state_dict(checkpoint['model_state_dict'])
-
-    # Plot training curves
-    plot_training_curves(history, os.path.join(MODEL_SAVE_DIR, 'sequence_training_curves.png'))
-
-    print(f"\n{'='*70}")
-    print(f"TRAINING COMPLETE")
-    print(f"{'='*70}\n")
+    print("\nTraining complete!")
     print(f"Best validation loss: {best_val_loss:.4f}")
 
-    return model, history
+    # Plot training curves
+    if plot_curves:
+        save_path = os.path.join(MODEL_SAVE_DIR, 'sequence_training_curves.png')
+        plot_training_curves(train_losses, val_losses, save_path=save_path)
+        
+    # --- Final evaluation and generation example ---
+    print("\n--- Generating example sequence ---")
+    model.load_state_dict(torch.load(os.path.join(MODEL_SAVE_DIR, 'sequence_model_best.pth')))
+    model.eval()
+
+    with torch.no_grad():
+        # Get one sample batch from validation set
+        # Using next(iter(val_loader)) for simplicity to get one batch
+        sample_batch = next(iter(val_loader))
+
+        sample_cond = sample_batch['conditioning'][0:1].to(device)
+        true_seq_out = sample_batch['sequence_tokens'][0:1].to(device) # Target is sequence_tokens
+
+        # Generate sequence
+        generated_seq = model.generate(
+            sample_cond,
+            max_length=model.max_seq_len,
+            temperature=SEQUENCE_SAMPLING_CONFIG['temperature'],
+            top_k=SEQUENCE_SAMPLING_CONFIG['top_k']
+        )
+        
+        # Decode and print
+        true_sequence_text = sequence_to_text(true_seq_out.cpu().numpy()[0])
+        generated_sequence_text = sequence_to_text(generated_seq.cpu().numpy()[0])
+        
+        print(f"\nConditioning data (scaled):\n{pd.Series(sample_cond[0].cpu().numpy(), index=CONDITIONING_FEATURES)}")
+        print(f"\nTrue sequence:\n  -> {' '.join(true_sequence_text)}")
+        print(f"\nGenerated sequence:\n  -> {' '.join(generated_sequence_text)}")
+        
+        # Another example (more tokens)
+        print("\n--- Another example ---")
+        sample_cond_2 = sample_batch['conditioning'][1:2].to(device) # Get second sample
+        true_seq_out_2 = sample_batch['sequence_tokens'][1:2].to(device)
+        generated_seq_2 = model.generate(
+            sample_cond_2,
+            max_length=model.max_seq_len,
+            temperature=SEQUENCE_SAMPLING_CONFIG['temperature'],
+            top_k=SEQUENCE_SAMPLING_CONFIG['top_k']
+        )
+        true_text_2 = sequence_to_text(true_seq_out_2.cpu().numpy()[0])
+        gen_text_2 = sequence_to_text(generated_seq_2.cpu().numpy()[0])
+        print(f"\nTrue sequence 2:\n  -> {' '.join(true_text_2)}")
+        print(f"\nGenerated sequence 2:\n  -> {' '.join(gen_text_2)}")
+
+    return best_val_loss
 
 
-if __name__ == "__main__":
-    # Test training with dummy data
-    print("Testing sequence model training...")
+if __name__ == '__main__':
+    # Get data path from command line arguments
+    if len(sys.argv) > 1:
+        data_file_path = sys.argv[1]
+        if not os.path.exists(data_file_path):
+            print(f"Error: Data file not found at {data_file_path}")
+            sys.exit(1)
+    else:
+        # Default path if not provided
+        data_file_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            'data', 'preprocessed', 'all_preprocessed.csv'
+        )
 
-    from preprocessing import load_preprocessed_data, create_dataloaders
-
-    # Load data
-    df = load_preprocessed_data()
-    train_loader, val_loader, scaler = create_dataloaders(df, batch_size=8)
-
-    # Test config
-    test_config = {
-        'vocab_size': 18,
-        'd_model': 128,
-        'nhead': 4,
-        'num_encoder_layers': 2,
-        'num_decoder_layers': 2,
-        'dim_feedforward': 512,
-        'dropout': 0.1,
-        'max_seq_len': 128,
-        'conditioning_dim': 6
-    }
-
-    test_training_config = {
-        'batch_size': 8,
-        'epochs': 2,
-        'learning_rate': 0.0001,
-        'warmup_steps': 100,
-        'label_smoothing': 0.1,
-        'gradient_clip': 1.0,
-        'early_stopping_patience': 5
-    }
-
-    # Train
-    model, history = train_sequence_model(train_loader, val_loader, test_config, test_training_config)
-    print("\n[OK] Training test complete!")
+    print(f"Using data file: {data_file_path}")
+    train_sequence_model(data_path=data_file_path)
