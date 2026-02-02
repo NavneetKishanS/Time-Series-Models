@@ -14,7 +14,7 @@ import os
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from PXChange_Refactored.config import (
+from config import (
     EXAMINATION_MODEL_CONFIG, START_TOKEN_ID, END_TOKEN_ID,
     PAD_TOKEN_ID, NUM_BODY_REGIONS, BODY_REGIONS
 )

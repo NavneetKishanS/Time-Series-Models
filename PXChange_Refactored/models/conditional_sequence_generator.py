@@ -9,7 +9,7 @@ import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from PXChange_Refactored.config import (
+from config import (
     SEQUENCE_MODEL_CONFIG, START_TOKEN_ID, END_TOKEN_ID,
     PAD_TOKEN_ID, SEQUENCE_SAMPLING_CONFIG
 )
@@ -224,79 +224,3 @@ class ConditionalSequenceGenerator(nn.Module):
                 break
 
         return generated
-
-    def compute_loss(self, logits, targets, ignore_index=PAD_TOKEN_ID, label_smoothing=0.0):
-        """
-        Compute cross-entropy loss with optional label smoothing.
-
-        Args:
-            logits: [batch_size, seq_len, vocab_size]
-            targets: [batch_size, seq_len]
-            ignore_index: Index to ignore in loss (padding)
-            label_smoothing: Label smoothing factor
-
-        Returns:
-            loss: Scalar loss value
-        """
-        # Reshape for cross-entropy
-        logits_flat = logits.reshape(-1, self.vocab_size)
-        targets_flat = targets.reshape(-1)
-
-        # Compute loss
-        loss = nn.functional.cross_entropy(
-            logits_flat,
-            targets_flat,
-            ignore_index=ignore_index,
-            label_smoothing=label_smoothing
-        )
-
-        return loss
-
-
-if __name__ == "__main__":
-    # Test the model
-    print("Testing Conditional Sequence Generator...")
-
-    # Create dummy config
-    test_config = {
-        'vocab_size': 18,
-        'd_model': 128,
-        'nhead': 4,
-        'num_encoder_layers': 3,
-        'num_decoder_layers': 3,
-        'dim_feedforward': 512,
-        'dropout': 0.1,
-        'max_seq_len': 64,
-        'conditioning_dim': 6
-    }
-
-    # Initialize model
-    model = ConditionalSequenceGenerator(test_config)
-    print(f"\n✓ Model initialized")
-    print(f"  Parameters: {sum(p.numel() for p in model.parameters()):,}")
-
-    # Create dummy inputs
-    batch_size = 4
-    seq_len = 20
-    conditioning = torch.randn(batch_size, test_config['conditioning_dim'])
-    target_tokens = torch.randint(1, 17, (batch_size, seq_len))
-
-    # Forward pass
-    print(f"\n✓ Testing forward pass...")
-    logits = model(conditioning, target_tokens)
-    print(f"  Conditioning shape: {conditioning.shape}")
-    print(f"  Target tokens shape: {target_tokens.shape}")
-    print(f"  Output logits shape: {logits.shape}")
-
-    # Test loss
-    loss = model.compute_loss(logits, target_tokens, label_smoothing=0.1)
-    print(f"\n✓ Loss computed: {loss.item():.4f}")
-
-    # Test generation
-    print(f"\n✓ Testing generation...")
-    with torch.no_grad():
-        generated = model.generate(conditioning, max_length=30, temperature=1.0, top_k=10)
-    print(f"  Generated shape: {generated.shape}")
-    print(f"  Generated tokens: {generated[0].tolist()}")
-
-    print("\n✓ All tests passed!")

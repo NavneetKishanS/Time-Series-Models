@@ -12,7 +12,7 @@ import sys
 pxchange_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, pxchange_dir)
 
-import PXChange_Refactored.config as px_config
+import config as px_config
 DATA_DIR = px_config.DATA_DIR
 CONDITIONING_FEATURES = px_config.CONDITIONING_FEATURES
 SEQUENCE_FEATURE_COLUMNS = px_config.SEQUENCE_FEATURE_COLUMNS

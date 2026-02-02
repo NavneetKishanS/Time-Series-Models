@@ -19,7 +19,7 @@ import sys
 pxchange_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, pxchange_dir)
 
-import PXChange_Refactored.config as px_config
+import config as px_config
 
 # Body region vocabulary
 BODY_REGIONS = ['HEAD', 'NECK', 'CHEST', 'ABDOMEN', 'PELVIS',
