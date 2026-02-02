@@ -49,6 +49,35 @@ NUM_REGION_CLASSES = 13  # Total classes including START and END
 BUCKET_SIZE = 1000  # Number of samples per body region transition
 
 # ============================================================================
+# DURATION SCALING CONFIGURATION
+# ============================================================================
+
+# Duration multiplier to correct for time compression in training data
+# Training data covered 1-2 weeks without date information, causing the model
+# to compress weekly patterns into a single day (~7x faster than reality)
+DURATION_MULTIPLIER = 7.0
+
+# Base duration parameters (before multiplier)
+EXCHANGE_DURATION_SHAPE = 5.0   # Gamma shape for exchange
+EXCHANGE_DURATION_SCALE = 10.0  # Gamma scale for exchange (base mean ~50s -> scaled ~350s)
+EXAMINATION_DURATION_SHAPE = 2.0  # Gamma shape for examination events
+EXAMINATION_DURATION_SCALE = 5.0  # Gamma scale (base mean ~10s -> scaled ~70s per event)
+
+# ============================================================================
+# BODY REGION FILTERING
+# ============================================================================
+
+# Body regions to exclude from generation (not present in training data)
+EXCLUDED_BODY_REGIONS = ['CHEST']
+
+# Convert to IDs for internal use
+EXCLUDED_BODY_REGION_IDS = [BODY_REGION_TO_ID[r] for r in EXCLUDED_BODY_REGIONS if r in BODY_REGION_TO_ID]
+
+# Valid body regions for generation
+VALID_BODY_REGIONS = [r for r in BODY_REGIONS if r not in EXCLUDED_BODY_REGIONS]
+VALID_BODY_REGION_IDS = [BODY_REGION_TO_ID[r] for r in VALID_BODY_REGIONS]
+
+# ============================================================================
 # CONDITIONING FEATURES
 # ============================================================================
 

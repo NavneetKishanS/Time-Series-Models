@@ -22,7 +22,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import (
     BUCKETS_DIR, BUCKET_SIZE, NUM_REGION_CLASSES, NUM_BODY_REGIONS,
     BODY_REGIONS, START_REGION_ID, END_REGION_ID, ID_TO_SOURCEID,
-    GENERATION_CONFIG
+    GENERATION_CONFIG, DURATION_MULTIPLIER,
+    EXCHANGE_DURATION_SHAPE, EXCHANGE_DURATION_SCALE,
+    EXAMINATION_DURATION_SHAPE, EXAMINATION_DURATION_SCALE,
+    EXCLUDED_BODY_REGION_IDS, VALID_BODY_REGION_IDS
 )
 
 
@@ -121,13 +124,15 @@ class BucketGenerator:
                 probs = torch.softmax(logits, dim=-1)
 
             # Create sample with the forced transition
+            # Duration is scaled by DURATION_MULTIPLIER to correct for time compression
+            # in training data (model was trained on 1-2 weeks compressed to single day)
             sample = {
                 'body_from': body_from,
                 'body_to': body_to,
                 'conditioning': conditioning,
                 'transition_prob': probs[0, body_to].item(),
                 'sequence': [START_REGION_ID, body_to],  # Simplified sequence
-                'duration': np.random.gamma(5, 10)  # Sample duration from gamma dist
+                'duration': np.random.gamma(EXCHANGE_DURATION_SHAPE, EXCHANGE_DURATION_SCALE) * DURATION_MULTIPLIER
             }
 
             samples.append(sample)
@@ -177,7 +182,9 @@ class BucketGenerator:
             sequence_sourceids = [ID_TO_SOURCEID.get(t, 'UNK') for t in sequence]
 
             # Generate random durations for each token
-            durations = [np.random.gamma(2, 5) for _ in sequence]
+            # Duration is scaled by DURATION_MULTIPLIER to correct for time compression
+            durations = [np.random.gamma(EXAMINATION_DURATION_SHAPE, EXAMINATION_DURATION_SCALE) * DURATION_MULTIPLIER
+                         for _ in sequence]
 
             sample = {
                 'body_region': body_region,
@@ -206,20 +213,23 @@ class BucketGenerator:
         # Generate exchange buckets for all valid transitions
         if verbose:
             print("Generating exchange buckets...")
+            if EXCLUDED_BODY_REGION_IDS:
+                excluded_names = [BODY_REGIONS[i] for i in EXCLUDED_BODY_REGION_IDS]
+                print(f"  Excluding body regions: {excluded_names}")
 
         exchange_transitions = []
 
-        # START -> any body region
-        for to_region in range(NUM_BODY_REGIONS):
+        # START -> any valid body region (excluding filtered regions)
+        for to_region in VALID_BODY_REGION_IDS:
             exchange_transitions.append((START_REGION_ID, to_region))
 
-        # Any body region -> any body region (including same)
-        for from_region in range(NUM_BODY_REGIONS):
-            for to_region in range(NUM_BODY_REGIONS):
+        # Any valid body region -> any valid body region (including same)
+        for from_region in VALID_BODY_REGION_IDS:
+            for to_region in VALID_BODY_REGION_IDS:
                 exchange_transitions.append((from_region, to_region))
 
-        # Any body region -> END
-        for from_region in range(NUM_BODY_REGIONS):
+        # Any valid body region -> END
+        for from_region in VALID_BODY_REGION_IDS:
             exchange_transitions.append((from_region, END_REGION_ID))
 
         if self.exchange_model is not None:
@@ -229,12 +239,12 @@ class BucketGenerator:
                     body_from, body_to, num_samples
                 )
 
-        # Generate examination buckets for each body region
+        # Generate examination buckets for each valid body region
         if verbose:
             print("\nGenerating examination buckets...")
 
         if self.examination_model is not None:
-            for body_region in tqdm(range(NUM_BODY_REGIONS), disable=not verbose):
+            for body_region in tqdm(VALID_BODY_REGION_IDS, disable=not verbose):
                 self.examination_buckets[body_region] = self.generate_examination_bucket(
                     body_region, num_samples
                 )

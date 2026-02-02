@@ -32,15 +32,16 @@ def main():
     # Typically 10-20 patients in a 12-hour shift
     print("\nCreating ground truth patient sequence...")
     # We'll create a specific sequence to see different transitions
+    # Note: CHEST is excluded as it's not present in the training data
     ground_truth = [
         {'patient_id': 'PAT001', 'body_region': 'HEAD'},
         {'patient_id': 'PAT002', 'body_region': 'HEAD'},
-        {'patient_id': 'PAT003', 'body_region': 'CHEST'},
-        {'patient_id': 'PAT004', 'body_region': 'SPINE'},
-        {'patient_id': 'PAT005', 'body_region': 'ABDOMEN'},
-        {'patient_id': 'PAT006', 'body_region': 'PELVIS'},
-        {'patient_id': 'PAT007', 'body_region': 'HEAD'},
-        {'patient_id': 'PAT008', 'body_region': 'LEG'},
+        {'patient_id': 'PAT003', 'body_region': 'SPINE'},
+        {'patient_id': 'PAT004', 'body_region': 'ABDOMEN'},
+        {'patient_id': 'PAT005', 'body_region': 'PELVIS'},
+        {'patient_id': 'PAT006', 'body_region': 'HEAD'},
+        {'patient_id': 'PAT007', 'body_region': 'LEG'},
+        {'patient_id': 'PAT008', 'body_region': 'NECK'},
     ]
     
     for i, p in enumerate(ground_truth):
