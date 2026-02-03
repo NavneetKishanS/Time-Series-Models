@@ -8,10 +8,11 @@ import sys
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader, random_split
+from torch.utils.data import Dataset, DataLoader
 import numpy as np
 from tqdm import tqdm
 import pickle
+from datetime import timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -21,6 +22,50 @@ from config import (
 )
 from models.exchange_model import create_exchange_model
 from data.preprocessing import load_preprocessed_data
+
+
+def temporal_split(sequences, val_days=2):
+    """
+    Split sequences temporally to prevent data leakage.
+
+    Args:
+        sequences: List of sequence dicts with 'start_datetime' key
+        val_days: Number of days to hold out for validation
+
+    Returns:
+        train_sequences, val_sequences
+    """
+    sorted_seqs = sorted(sequences, key=lambda s: s['start_datetime'])
+
+    if len(sorted_seqs) == 0:
+        return [], []
+
+    last_date = sorted_seqs[-1]['start_datetime']
+    if hasattr(last_date, 'date'):
+        last_date = last_date.date() if hasattr(last_date, 'date') else last_date
+
+    if hasattr(last_date, '__sub__'):
+        cutoff = last_date - timedelta(days=val_days)
+    else:
+        from datetime import datetime
+        last_dt = datetime.combine(last_date, datetime.min.time())
+        cutoff_dt = last_dt - timedelta(days=val_days)
+        cutoff = cutoff_dt.date()
+
+    train_sequences = []
+    val_sequences = []
+
+    for seq in sorted_seqs:
+        seq_date = seq['start_datetime']
+        if hasattr(seq_date, 'date'):
+            seq_date = seq_date.date()
+
+        if seq_date < cutoff:
+            train_sequences.append(seq)
+        else:
+            val_sequences.append(seq)
+
+    return train_sequences, val_sequences
 
 
 def safe_float(val, default=0.0):
@@ -48,13 +93,21 @@ class ExchangeDataset(Dataset):
 
         for seq in exchange_sequences:
             # Extract conditioning features with safe conversion
+            # NOW INCLUDES TEMPORAL FEATURES (10 dims instead of 5)
             cond = seq['conditioning']
             conditioning = torch.tensor([
+                # Patient demographics (5 features)
                 safe_float(cond.get('Age', 0)),
                 safe_float(cond.get('Weight', 0)),
                 safe_float(cond.get('Height', 0)),
                 safe_float(cond.get('PTAB', 0)),
-                safe_float(cond.get('Direction_encoded', 0))
+                safe_float(cond.get('Direction_encoded', 0)),
+                # Temporal features (5 features) - NEW!
+                safe_float(cond.get('hour_sin', 0.0)),
+                safe_float(cond.get('hour_cos', 1.0)),
+                safe_float(cond.get('dow_sin', 0.0)),
+                safe_float(cond.get('dow_cos', 1.0)),
+                safe_float(cond.get('is_morning', 0)),
             ], dtype=torch.float32)
 
             # Body region transition
@@ -126,16 +179,23 @@ def train_exchange_model(data_path=None, config=None, training_config=None,
     if verbose:
         print(f"Loaded {len(exchange_sequences)} exchange sequences")
 
-    # Create dataset
-    dataset = ExchangeDataset(exchange_sequences)
-
-    # Split into train/val
-    val_size = int(len(dataset) * training_config['validation_split'])
-    train_size = len(dataset) - val_size
-    train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
+    # TEMPORAL SPLIT (NEW: prevents data leakage from future patterns)
+    train_sequences, val_sequences = temporal_split(exchange_sequences, val_days=2)
 
     if verbose:
-        print(f"Train: {len(train_dataset)}, Val: {len(val_dataset)}")
+        print(f"Temporal split: Train={len(train_sequences)}, Val={len(val_sequences)}")
+        if train_sequences and val_sequences:
+            train_dates = [s['start_datetime'] for s in train_sequences]
+            val_dates = [s['start_datetime'] for s in val_sequences]
+            print(f"  Train date range: {min(train_dates)} to {max(train_dates)}")
+            print(f"  Val date range: {min(val_dates)} to {max(val_dates)}")
+
+    # Create datasets
+    train_dataset = ExchangeDataset(train_sequences)
+    val_dataset = ExchangeDataset(val_sequences)
+
+    if verbose:
+        print(f"Train dataset: {len(train_dataset)}, Val dataset: {len(val_dataset)}")
 
     # Create dataloaders
     train_loader = DataLoader(
