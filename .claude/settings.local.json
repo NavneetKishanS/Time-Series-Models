@@ -31,7 +31,9 @@
       "Bash(then mv \"$item\" \"C:\\\\Users\\\\lukis\\\\Documents\\\\GitHub\\\\Time-Series-Models\\\\_archive\\\\PXChange_Refactored_v1/\")",
       "Bash(fi)",
       "Bash(done)",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "Bash(git add:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nfeat: Add preprocessed data with temporal features\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")"
     ],
     "deny": [],
     "ask": []
