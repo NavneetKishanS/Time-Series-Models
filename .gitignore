@@ -45,7 +45,6 @@ checkpoints/
 model_weights/
 
 # Preprocessed data (can be large)
-*/data/preprocessed/
 */data/preprocessed_segmented/
 */data/preprocessed_with_pauses/
 */data/temporal_training_data/
@@ -58,13 +57,6 @@ model_weights/
 */data/raw/
 */data/*.csv
 *.csv.gz
-
-# Generated outputs
-*/outputs/
-*/generated_schedules/
-*/event_timelines/
-*/patient_sessions/
-*/visualizations/
 
 # Logs
 *.log
