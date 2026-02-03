@@ -52,10 +52,10 @@ BUCKET_SIZE = 1000  # Number of samples per body region transition
 # DURATION SCALING CONFIGURATION
 # ============================================================================
 
-# Duration multiplier to correct for time compression in training data
-# Training data covered 1-2 weeks without date information, causing the model
-# to compress weekly patterns into a single day (~7x faster than reality)
-DURATION_MULTIPLIER = 7.0
+# Duration multiplier - NOW OBSOLETE with learned duration prediction
+# Previously used 7.0 to compensate for model not understanding time
+# With temporal features and learned durations, this should be 1.0
+DURATION_MULTIPLIER = 1.0  # Changed from 7.0 - duration now learned, not hacked
 
 # Base duration parameters (before multiplier)
 EXCHANGE_DURATION_SHAPE = 5.0   # Gamma shape for exchange
@@ -184,7 +184,8 @@ EXCHANGE_MODEL_CONFIG = {
     'hidden_dim': 256,             # Hidden layer dimension
     'num_layers': 3,               # Number of MLP layers
     'dropout': 0.1,
-    'conditioning_dim': len(EXCHANGE_CONDITIONING_FEATURES),
+    # Conditioning: 5 patient features + 5 temporal features = 10
+    'conditioning_dim': len(EXCHANGE_CONDITIONING_FEATURES) + 5,  # +5 for temporal features
     'num_regions': NUM_REGION_CLASSES,  # Output: body regions + START + END
 }
 
@@ -211,7 +212,8 @@ EXAMINATION_MODEL_CONFIG = {
     'dim_feedforward': 1024,       # FFN dimension
     'dropout': 0.1,
     'max_seq_len': MAX_SEQ_LEN,
-    'conditioning_dim': len(EXAMINATION_CONDITIONING_FEATURES) + 1,  # +1 for body region
+    # Conditioning: 5 patient features + 5 temporal features + 1 body region = 11
+    'conditioning_dim': len(EXAMINATION_CONDITIONING_FEATURES) + 5 + 1,  # +5 temporal, +1 body region
     'num_body_regions': NUM_BODY_REGIONS,
 }
 
@@ -248,3 +250,20 @@ RANDOM_SEED = 42
 # ============================================================================
 
 USE_GPU = True  # Set to False to force CPU usage
+
+# ============================================================================
+# TEMPORAL FORECASTING CONFIGURATION (NEW)
+# ============================================================================
+
+# Context and prediction horizons - explicit time windows
+CONTEXT_DAYS = 14  # How many days of history to use (2 weeks)
+PREDICTION_HORIZON = 1  # Predict 1 day of events
+
+# Validation split (temporal, not random)
+VALIDATION_DAYS = 2  # Hold out last 2 days for validation
+
+# Conditioning dimension breakdown:
+# - Patient demographics: 5 (Age, Weight, Height, PTAB, Direction_encoded)
+# - Temporal features: 5 (hour_sin, hour_cos, dow_sin, dow_cos, is_morning)
+# - Total base conditioning: 10
+TEMPORAL_CONDITIONING_DIM = 5  # Number of temporal features actually used

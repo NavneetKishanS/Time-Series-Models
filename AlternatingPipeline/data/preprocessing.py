@@ -18,8 +18,42 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import (
     DATA_DIR, BODY_REGION_TO_ID, SOURCEID_VOCAB,
     START_REGION_ID, END_REGION_ID, COIL_COLUMNS,
-    EXCHANGE_CONDITIONING_FEATURES, EXAMINATION_CONDITIONING_FEATURES
+    EXCHANGE_CONDITIONING_FEATURES, EXAMINATION_CONDITIONING_FEATURES,
+    TEMPORAL_FEATURES
 )
+
+
+def extract_temporal_features(df):
+    """
+    Extract temporal features from datetime column.
+
+    These features help the model understand time-of-day and day-of-week patterns.
+
+    Args:
+        df: DataFrame with 'datetime' column already parsed
+
+    Returns:
+        DataFrame with temporal features added
+    """
+    # Basic temporal features
+    df['hour_of_day'] = df['datetime'].dt.hour
+    df['minute_of_hour'] = df['datetime'].dt.minute
+    df['day_of_week'] = df['datetime'].dt.dayofweek  # Monday=0, Sunday=6
+    df['is_morning'] = (df['datetime'].dt.hour < 12).astype(int)
+    df['is_weekend'] = (df['datetime'].dt.dayofweek >= 5).astype(int)
+
+    # Cyclical encoding for hour (captures continuity: 23:00 is close to 00:00)
+    df['hour_sin'] = np.sin(2 * np.pi * df['hour_of_day'] / 24)
+    df['hour_cos'] = np.cos(2 * np.pi * df['hour_of_day'] / 24)
+
+    # Cyclical encoding for day of week
+    df['dow_sin'] = np.sin(2 * np.pi * df['day_of_week'] / 7)
+    df['dow_cos'] = np.cos(2 * np.pi * df['day_of_week'] / 7)
+
+    # Store the date for temporal splitting later
+    df['date'] = df['datetime'].dt.date
+
+    return df
 
 
 def load_raw_csv(filepath):
@@ -36,6 +70,9 @@ def load_raw_csv(filepath):
 
     # Parse datetime
     df['datetime'] = pd.to_datetime(df['datetime'])
+
+    # Extract temporal features (NEW: enables time-aware modeling)
+    df = extract_temporal_features(df)
 
     # Clean numeric columns - convert errors to NaN then fill with 0
     numeric_cols = ['Age', 'Weight', 'Height', 'PTAB', 'timediff']
@@ -164,11 +201,20 @@ def extract_exchange_events(df, verbose=False):
         # Get conditioning from the target (next) patient/examination
         row = segment.iloc[0]  # First row has the target info
         conditioning = {
+            # Patient demographics
             'Age': row.get('Age', 0),
             'Weight': row.get('Weight', 0),
             'Height': row.get('Height', 0),
             'PTAB': row.get('PTAB', 0),
-            'Direction_encoded': row.get('Direction_encoded', 0)
+            'Direction_encoded': row.get('Direction_encoded', 0),
+            # Temporal features (NEW: enables time-aware modeling)
+            'hour_of_day': row.get('hour_of_day', 0),
+            'day_of_week': row.get('day_of_week', 0),
+            'is_morning': row.get('is_morning', 0),
+            'hour_sin': row.get('hour_sin', 0.0),
+            'hour_cos': row.get('hour_cos', 1.0),
+            'dow_sin': row.get('dow_sin', 0.0),
+            'dow_cos': row.get('dow_cos', 1.0),
         }
 
         # Body region transition
@@ -179,13 +225,17 @@ def extract_exchange_events(df, verbose=False):
         if i == 0:
             body_from = START_REGION_ID
 
+        # Store start datetime for temporal splitting
+        start_datetime = exchange_segment.iloc[0]['datetime'] if len(exchange_segment) > 0 else row['datetime']
+
         exchange_sequences.append({
             'sequence': sequence,
             'durations': durations,
             'conditioning': conditioning,
             'body_from': body_from,
             'body_to': body_to,
-            'total_duration': sum(durations)
+            'total_duration': sum(durations),
+            'start_datetime': start_datetime,  # NEW: for temporal train/val split
         })
 
     if verbose:
@@ -257,11 +307,20 @@ def extract_examination_events(df, verbose=False):
         # Get conditioning
         row = segment.iloc[0]
         conditioning = {
+            # Patient demographics
             'Age': row.get('Age', 0),
             'Weight': row.get('Weight', 0),
             'Height': row.get('Height', 0),
             'PTAB': row.get('PTAB', 0),
-            'Direction_encoded': row.get('Direction_encoded', 0)
+            'Direction_encoded': row.get('Direction_encoded', 0),
+            # Temporal features (NEW: enables time-aware modeling)
+            'hour_of_day': row.get('hour_of_day', 0),
+            'day_of_week': row.get('day_of_week', 0),
+            'is_morning': row.get('is_morning', 0),
+            'hour_sin': row.get('hour_sin', 0.0),
+            'hour_cos': row.get('hour_cos', 1.0),
+            'dow_sin': row.get('dow_sin', 0.0),
+            'dow_cos': row.get('dow_cos', 1.0),
         }
 
         # Body region being examined
@@ -279,13 +338,52 @@ def extract_examination_events(df, verbose=False):
             'conditioning': conditioning,
             'body_region': body_region,
             'coil_config': coil_config,
-            'total_duration': sum(durations)
+            'total_duration': sum(durations),
+            'start_datetime': row['datetime'],  # NEW: for temporal train/val split
         })
 
     if verbose:
         print(f"Extracted {len(examination_sequences)} examination sequences")
 
     return examination_sequences
+
+
+def aggregate_by_day(df):
+    """
+    Group events by day and create daily summaries.
+
+    This is useful for understanding daily patterns and for the temporal
+    forecasting model that predicts 1 day based on 2-week history.
+
+    Args:
+        df: DataFrame from load_raw_csv with temporal features
+
+    Returns:
+        List of daily summary dicts
+    """
+    daily_summaries = []
+
+    for date, group in df.groupby('date'):
+        # Hourly event distribution (0-23)
+        hourly_dist = group.groupby('hour_of_day').size().reindex(range(24), fill_value=0).tolist()
+
+        summary = {
+            'date': date,
+            'day_of_week': group['day_of_week'].iloc[0],
+            'is_weekend': int(group['day_of_week'].iloc[0] >= 5),
+            'num_patients': group['PatientId'].nunique(),
+            'num_events': len(group),
+            'start_hour': group['hour_of_day'].min(),
+            'end_hour': group['hour_of_day'].max(),
+            'total_duration_seconds': group['timediff'].sum(),
+            'avg_duration_per_event': group['timediff'].mean(),
+            'hourly_distribution': hourly_dist,
+            'morning_event_ratio': (group['hour_of_day'] < 12).mean(),
+            'body_regions': group['BodyGroup_to'].value_counts().to_dict(),
+        }
+        daily_summaries.append(summary)
+
+    return sorted(daily_summaries, key=lambda x: x['date'])
 
 
 def preprocess_all_data(data_dir=None, output_dir=None, verbose=True):
@@ -316,6 +414,7 @@ def preprocess_all_data(data_dir=None, output_dir=None, verbose=True):
 
     all_exchange = []
     all_examination = []
+    all_daily_summaries = []
 
     for i, csv_path in enumerate(csv_files):
         if verbose:
@@ -326,12 +425,14 @@ def preprocess_all_data(data_dir=None, output_dir=None, verbose=True):
 
             exchange = extract_exchange_events(df, verbose=False)
             examination = extract_examination_events(df, verbose=False)
+            daily_summaries = aggregate_by_day(df)
 
             all_exchange.extend(exchange)
             all_examination.extend(examination)
+            all_daily_summaries.extend(daily_summaries)
 
             if verbose:
-                print(f"  Exchange: {len(exchange)}, Examination: {len(examination)}")
+                print(f"  Exchange: {len(exchange)}, Examination: {len(examination)}, Days: {len(daily_summaries)}")
 
         except Exception as e:
             print(f"  Error processing {csv_path}: {e}")
@@ -341,11 +442,13 @@ def preprocess_all_data(data_dir=None, output_dir=None, verbose=True):
         print(f"\n{'='*60}")
         print(f"Total exchange sequences: {len(all_exchange)}")
         print(f"Total examination sequences: {len(all_examination)}")
+        print(f"Total daily summaries: {len(all_daily_summaries)}")
 
     # Save preprocessed data
     result = {
         'exchange': all_exchange,
-        'examination': all_examination
+        'examination': all_examination,
+        'daily_summaries': all_daily_summaries,  # NEW: for temporal forecasting
     }
 
     output_path = os.path.join(output_dir, 'preprocessed_data.pkl')

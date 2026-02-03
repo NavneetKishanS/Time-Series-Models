@@ -67,28 +67,52 @@ class BucketGenerator:
         self.exchange_buckets = {}  # {(from_region, to_region): [samples]}
         self.examination_buckets = {}  # {body_region: [samples]}
 
-    def _sample_conditioning(self):
+    def _sample_conditioning(self, hour_of_day=None):
         """
         Sample random conditioning features for generation.
 
-        Returns typical patient demographics.
+        Args:
+            hour_of_day: Specific hour (0-23) or None for random
+
+        Returns typical patient demographics with temporal features.
         """
+        if hour_of_day is None:
+            hour_of_day = np.random.randint(7, 18)  # Typical working hours 7am-6pm
+
+        day_of_week = np.random.randint(0, 5)  # Monday-Friday (typical MRI days)
+
         return {
+            # Patient demographics
             'Age': np.random.uniform(20, 80),
             'Weight': np.random.uniform(50, 120),
             'Height': np.random.uniform(1.5, 2.0),
             'PTAB': np.random.uniform(-2000000, 0),
-            'Direction_encoded': np.random.choice([0, 1])  # Head First / Feet First
+            'Direction_encoded': np.random.choice([0, 1]),  # Head First / Feet First
+            # Temporal features (NEW: enables time-aware generation)
+            'hour_of_day': hour_of_day,
+            'day_of_week': day_of_week,
+            'is_morning': int(hour_of_day < 12),
+            'hour_sin': np.sin(2 * np.pi * hour_of_day / 24),
+            'hour_cos': np.cos(2 * np.pi * hour_of_day / 24),
+            'dow_sin': np.sin(2 * np.pi * day_of_week / 7),
+            'dow_cos': np.cos(2 * np.pi * day_of_week / 7),
         }
 
     def _conditioning_to_tensor(self, conditioning):
-        """Convert conditioning dict to tensor."""
+        """Convert conditioning dict to tensor (10 dims: 5 patient + 5 temporal)."""
         return torch.tensor([
+            # Patient demographics (5 features)
             conditioning['Age'],
             conditioning['Weight'],
             conditioning['Height'],
             conditioning['PTAB'],
-            conditioning['Direction_encoded']
+            conditioning['Direction_encoded'],
+            # Temporal features (5 features) - NEW!
+            conditioning.get('hour_sin', 0.0),
+            conditioning.get('hour_cos', 1.0),
+            conditioning.get('dow_sin', 0.0),
+            conditioning.get('dow_cos', 1.0),
+            conditioning.get('is_morning', 0),
         ], dtype=torch.float32)
 
     def generate_exchange_bucket(self, body_from, body_to, num_samples=None):
@@ -124,8 +148,9 @@ class BucketGenerator:
                 probs = torch.softmax(logits, dim=-1)
 
             # Create sample with the forced transition
-            # Duration is scaled by DURATION_MULTIPLIER to correct for time compression
-            # in training data (model was trained on 1-2 weeks compressed to single day)
+            # TODO: When duration prediction head is implemented, use:
+            # duration = self.exchange_model.predict_duration(cond_tensor, current_region)
+            # For now, using Gamma sampling (DURATION_MULTIPLIER is now 1.0)
             sample = {
                 'body_from': body_from,
                 'body_to': body_to,
@@ -181,8 +206,10 @@ class BucketGenerator:
             # Convert token IDs to sourceIDs
             sequence_sourceids = [ID_TO_SOURCEID.get(t, 'UNK') for t in sequence]
 
-            # Generate random durations for each token
-            # Duration is scaled by DURATION_MULTIPLIER to correct for time compression
+            # Generate durations for each token
+            # TODO: When duration prediction head is implemented, use:
+            # durations = self.examination_model.predict_durations(cond_tensor, region_tensor, sequence)
+            # For now, using Gamma sampling (DURATION_MULTIPLIER is now 1.0)
             durations = [np.random.gamma(EXAMINATION_DURATION_SHAPE, EXAMINATION_DURATION_SCALE) * DURATION_MULTIPLIER
                          for _ in sequence]
 
