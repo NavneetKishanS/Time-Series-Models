@@ -102,7 +102,11 @@ class DaySimulator:
                 )
                 schedule.extend(exchange_events)
                 event_id += len(exchange_events)
-                current_time += exchange_sample.get('duration', 60)  # Default 60s exchange
+                # Use sum of per-token durations (from real data), fall back to total duration
+                exchange_duration = sum(exchange_sample.get('durations', []))
+                if exchange_duration == 0:
+                    exchange_duration = exchange_sample.get('duration', 60)
+                current_time += exchange_duration
 
             # === EXAMINATION PHASE ===
             # Generate examination events for this body region
@@ -121,7 +125,11 @@ class DaySimulator:
                 )
                 schedule.extend(exam_events)
                 event_id += len(exam_events)
-                current_time += examination_sample.get('total_duration', 300)  # Default 5min exam
+                # Use sum of per-token durations, fall back to total_duration
+                exam_duration = sum(examination_sample.get('durations', []))
+                if exam_duration == 0:
+                    exam_duration = examination_sample.get('total_duration', 300)
+                current_time += exam_duration
 
             # Update previous body region for next exchange
             previous_body_region = body_region_id
@@ -154,7 +162,13 @@ class DaySimulator:
 
         # Use sample sequence if available, otherwise create placeholder
         sequence = sample.get('sequence', [])
-        durations = sample.get('durations', [sample.get('duration', 60)])
+        durations = sample.get('durations', [])
+
+        # If no per-token durations, distribute total duration evenly
+        if not durations or len(durations) == 0:
+            total = sample.get('duration', 60)
+            seq_len = max(len(sequence), 1)
+            durations = [total / seq_len] * seq_len
 
         # Ensure durations match sequence length
         if len(durations) < len(sequence):

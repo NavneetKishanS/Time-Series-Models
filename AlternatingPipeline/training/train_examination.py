@@ -273,7 +273,7 @@ def train_examination_model(data_path=None, config=None, training_config=None,
     scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
     # Training loop
-    history = {'train_loss': [], 'val_loss': [], 'val_perplexity': []}
+    history = {'train_loss': [], 'val_loss': [], 'val_perplexity': [], 'train_duration_loss': []}
     best_val_loss = float('inf')
     patience_counter = 0
     global_step = 0
@@ -282,6 +282,7 @@ def train_examination_model(data_path=None, config=None, training_config=None,
         # Training
         model.train()
         train_loss = 0.0
+        train_dur_loss = 0.0
 
         for conditioning, body_region, input_seq, target_seq, target_durations in tqdm(train_loader, disable=not verbose,
                                                                       desc=f"Epoch {epoch+1}"):
@@ -293,18 +294,24 @@ def train_examination_model(data_path=None, config=None, training_config=None,
 
             optimizer.zero_grad()
 
-            # Forward pass
-            logits = model(conditioning, body_region, input_seq)
+            # Forward pass - returns logits AND duration predictions
+            logits, duration_mu, duration_sigma = model(conditioning, body_region, input_seq)
 
-            # Compute loss (event tokens only for now, duration loss added later)
-            loss = model.compute_loss(
+            # Token prediction loss
+            token_loss = model.compute_loss(
                 logits, target_seq,
                 label_smoothing=training_config['label_smoothing']
             )
 
-            # TODO: Add duration loss when duration head is implemented
-            # duration_loss = model.compute_duration_loss(duration_preds, target_durations)
-            # loss = loss + 0.5 * duration_loss
+            # Duration prediction loss
+            pad_mask = (target_seq == PAD_TOKEN_ID)
+            duration_loss = model.compute_duration_loss(
+                duration_mu, duration_sigma, target_durations, ignore_mask=pad_mask
+            )
+
+            # Combined loss
+            duration_weight = training_config.get('duration_loss_weight', 0.1)
+            loss = token_loss + duration_weight * duration_loss
 
             loss.backward()
 
@@ -316,8 +323,10 @@ def train_examination_model(data_path=None, config=None, training_config=None,
             global_step += 1
 
             train_loss += loss.item()
+            train_dur_loss += duration_loss.item()
 
         train_loss /= len(train_loader)
+        train_dur_loss /= len(train_loader)
 
         # Validation
         model.eval()
@@ -331,8 +340,14 @@ def train_examination_model(data_path=None, config=None, training_config=None,
                 target_seq = target_seq.to(device)
                 target_durations = target_durations.to(device)
 
-                logits = model(conditioning, body_region, input_seq)
-                loss = model.compute_loss(logits, target_seq)
+                logits, duration_mu, duration_sigma = model(conditioning, body_region, input_seq)
+                token_loss = model.compute_loss(logits, target_seq)
+                pad_mask = (target_seq == PAD_TOKEN_ID)
+                dur_loss = model.compute_duration_loss(
+                    duration_mu, duration_sigma, target_durations, ignore_mask=pad_mask
+                )
+                duration_weight = training_config.get('duration_loss_weight', 0.1)
+                loss = token_loss + duration_weight * dur_loss
                 val_loss += loss.item()
 
         val_loss /= len(val_loader)
@@ -341,10 +356,12 @@ def train_examination_model(data_path=None, config=None, training_config=None,
         history['train_loss'].append(train_loss)
         history['val_loss'].append(val_loss)
         history['val_perplexity'].append(val_perplexity)
+        history['train_duration_loss'].append(train_dur_loss)
 
         if verbose:
             print(f"Epoch {epoch+1}: train_loss={train_loss:.4f}, "
-                  f"val_loss={val_loss:.4f}, perplexity={val_perplexity:.2f}")
+                  f"val_loss={val_loss:.4f}, perplexity={val_perplexity:.2f}, "
+                  f"dur_loss={train_dur_loss:.4f}")
 
         # Early stopping
         if val_loss < best_val_loss:

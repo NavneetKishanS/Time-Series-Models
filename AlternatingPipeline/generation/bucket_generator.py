@@ -14,6 +14,7 @@ import os
 import pickle
 import torch
 import numpy as np
+from collections import defaultdict
 from tqdm import tqdm
 import sys
 
@@ -27,6 +28,9 @@ from config import (
     EXAMINATION_DURATION_SHAPE, EXAMINATION_DURATION_SCALE,
     EXCLUDED_BODY_REGION_IDS, VALID_BODY_REGION_IDS
 )
+
+# Maximum exchange duration cap (2 hours) to filter overnight gaps
+MAX_EXCHANGE_DURATION = 7200
 
 
 class BucketGenerator:
@@ -115,14 +119,60 @@ class BucketGenerator:
             conditioning.get('is_morning', 0),
         ], dtype=torch.float32)
 
-    def generate_exchange_bucket(self, body_from, body_to, num_samples=None):
+    def load_exchange_data_from_preprocessed(self, preprocessed_path=None):
+        """
+        Load real exchange sequences from preprocessed data, grouped by (body_from, body_to).
+        These are used as exchange buckets instead of model-generated stubs.
+
+        Args:
+            preprocessed_path: Path to preprocessed_data.pkl
+
+        Returns:
+            Dict of {(body_from, body_to): [sample_dicts]}
+        """
+        if preprocessed_path is None:
+            preprocessed_path = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                'data', 'preprocessed', 'preprocessed_data.pkl'
+            )
+
+        with open(preprocessed_path, 'rb') as f:
+            data = pickle.load(f)
+
+        grouped = defaultdict(list)
+        for seq in data['exchange']:
+            # Cap outlier durations (overnight gaps etc.)
+            total_dur = seq.get('total_duration', sum(seq.get('durations', [])))
+            if total_dur > MAX_EXCHANGE_DURATION:
+                continue
+
+            key = (seq['body_from'], seq['body_to'])
+            grouped[key].append({
+                'body_from': seq['body_from'],
+                'body_to': seq['body_to'],
+                'conditioning': seq['conditioning'],
+                'sequence': seq['sequence'],
+                'durations': seq['durations'],
+                'duration': total_dur,
+                'total_duration': total_dur,
+                'transition_prob': 1.0,
+            })
+
+        return dict(grouped)
+
+    def generate_exchange_bucket(self, body_from, body_to, num_samples=None,
+                                  real_exchange_data=None):
         """
         Generate samples for a specific exchange (body region transition).
+
+        Uses real exchange sequences from preprocessed data when available,
+        falls back to model-based generation otherwise.
 
         Args:
             body_from: Source body region ID
             body_to: Target body region ID
             num_samples: Number of samples (default: BUCKET_SIZE)
+            real_exchange_data: Dict from load_exchange_data_from_preprocessed()
 
         Returns:
             List of sample dicts
@@ -130,33 +180,36 @@ class BucketGenerator:
         if num_samples is None:
             num_samples = BUCKET_SIZE
 
+        key = (body_from, body_to)
+
+        # Use real data when available (preferred - gives realistic durations and sequences)
+        if real_exchange_data and key in real_exchange_data:
+            real_samples = real_exchange_data[key]
+            indices = np.random.choice(len(real_samples), size=num_samples, replace=True)
+            return [real_samples[i] for i in indices]
+
+        # Fallback: generate synthetic samples using exchange model
         if self.exchange_model is None:
-            raise ValueError("Exchange model not loaded")
+            return []
 
         samples = []
-
         for _ in range(num_samples):
             conditioning = self._sample_conditioning()
             cond_tensor = self._conditioning_to_tensor(conditioning).unsqueeze(0).to(self.device)
             current_region = torch.tensor([body_from], device=self.device)
 
-            # Predict next region (should be body_to if model is well-trained)
-            # For bucket generation, we force the transition to the target
             with torch.no_grad():
-                # Get the model's prediction for the transition
                 logits = self.exchange_model(cond_tensor, current_region)
                 probs = torch.softmax(logits, dim=-1)
 
-            # Create sample with the forced transition
-            # TODO: When duration prediction head is implemented, use:
-            # duration = self.exchange_model.predict_duration(cond_tensor, current_region)
-            # For now, using Gamma sampling (DURATION_MULTIPLIER is now 1.0)
+            # Fallback gamma sampling for duration
             sample = {
                 'body_from': body_from,
                 'body_to': body_to,
                 'conditioning': conditioning,
-                'transition_prob': probs[0, body_to].item(),
-                'sequence': [START_REGION_ID, body_to],  # Simplified sequence
+                'transition_prob': probs[0, body_to].item() if body_to < probs.shape[1] else 0.0,
+                'sequence': [START_REGION_ID, body_to],
+                'durations': [np.random.gamma(EXCHANGE_DURATION_SHAPE, EXCHANGE_DURATION_SCALE) * DURATION_MULTIPLIER],
                 'duration': np.random.gamma(EXCHANGE_DURATION_SHAPE, EXCHANGE_DURATION_SCALE) * DURATION_MULTIPLIER
             }
 
@@ -167,6 +220,8 @@ class BucketGenerator:
     def generate_examination_bucket(self, body_region, num_samples=None):
         """
         Generate samples for a specific body region examination.
+
+        Uses model-predicted durations from the examination model's duration head.
 
         Args:
             body_region: Body region ID (0-10)
@@ -189,9 +244,9 @@ class BucketGenerator:
             cond_tensor = self._conditioning_to_tensor(conditioning).unsqueeze(0).to(self.device)
             region_tensor = torch.tensor([body_region], device=self.device)
 
-            # Generate sequence
+            # Generate sequence and durations together
             with torch.no_grad():
-                generated = self.examination_model.generate(
+                generated, predicted_durations = self.examination_model.generate(
                     cond_tensor,
                     region_tensor,
                     max_length=config['max_length'],
@@ -200,18 +255,12 @@ class BucketGenerator:
                     top_p=config['top_p']
                 )
 
-            # Convert to list and decode
+            # Convert to lists
             sequence = generated[0].cpu().tolist()
+            durations = predicted_durations[0].cpu().tolist()
 
             # Convert token IDs to sourceIDs
             sequence_sourceids = [ID_TO_SOURCEID.get(t, 'UNK') for t in sequence]
-
-            # Generate durations for each token
-            # TODO: When duration prediction head is implemented, use:
-            # durations = self.examination_model.predict_durations(cond_tensor, region_tensor, sequence)
-            # For now, using Gamma sampling (DURATION_MULTIPLIER is now 1.0)
-            durations = [np.random.gamma(EXAMINATION_DURATION_SHAPE, EXAMINATION_DURATION_SCALE) * DURATION_MULTIPLIER
-                         for _ in sequence]
 
             sample = {
                 'body_region': body_region,
@@ -230,6 +279,9 @@ class BucketGenerator:
         """
         Generate all exchange and examination buckets.
 
+        Exchange buckets use real sequences from preprocessed data (data-driven).
+        Examination buckets use model-generated sequences with learned durations.
+
         Args:
             num_samples: Samples per bucket (default: BUCKET_SIZE)
             verbose: Show progress
@@ -237,9 +289,22 @@ class BucketGenerator:
         if num_samples is None:
             num_samples = BUCKET_SIZE
 
+        # Load real exchange data from preprocessed pickle
+        if verbose:
+            print("Loading real exchange data from preprocessed data...")
+        try:
+            real_exchange_data = self.load_exchange_data_from_preprocessed()
+            if verbose:
+                total_real = sum(len(v) for v in real_exchange_data.values())
+                print(f"  Loaded {total_real} real exchange sequences across {len(real_exchange_data)} transition types")
+        except FileNotFoundError:
+            if verbose:
+                print("  No preprocessed data found, using model-generated exchanges")
+            real_exchange_data = None
+
         # Generate exchange buckets for all valid transitions
         if verbose:
-            print("Generating exchange buckets...")
+            print("Generating exchange buckets (data-driven)...")
             if EXCLUDED_BODY_REGION_IDS:
                 excluded_names = [BODY_REGIONS[i] for i in EXCLUDED_BODY_REGION_IDS]
                 print(f"  Excluding body regions: {excluded_names}")
@@ -259,16 +324,24 @@ class BucketGenerator:
         for from_region in VALID_BODY_REGION_IDS:
             exchange_transitions.append((from_region, END_REGION_ID))
 
-        if self.exchange_model is not None:
-            for body_from, body_to in tqdm(exchange_transitions, disable=not verbose):
-                key = (body_from, body_to)
-                self.exchange_buckets[key] = self.generate_exchange_bucket(
-                    body_from, body_to, num_samples
-                )
+        data_driven_count = 0
+        fallback_count = 0
+        for body_from, body_to in tqdm(exchange_transitions, disable=not verbose):
+            key = (body_from, body_to)
+            self.exchange_buckets[key] = self.generate_exchange_bucket(
+                body_from, body_to, num_samples, real_exchange_data=real_exchange_data
+            )
+            if real_exchange_data and key in real_exchange_data:
+                data_driven_count += 1
+            else:
+                fallback_count += 1
+
+        if verbose:
+            print(f"  Data-driven: {data_driven_count}, Fallback: {fallback_count}")
 
         # Generate examination buckets for each valid body region
         if verbose:
-            print("\nGenerating examination buckets...")
+            print("\nGenerating examination buckets (model-predicted durations)...")
 
         if self.examination_model is not None:
             for body_region in tqdm(VALID_BODY_REGION_IDS, disable=not verbose):

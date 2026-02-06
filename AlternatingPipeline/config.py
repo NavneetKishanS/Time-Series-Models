@@ -57,11 +57,12 @@ BUCKET_SIZE = 1000  # Number of samples per body region transition
 # With temporal features and learned durations, this should be 1.0
 DURATION_MULTIPLIER = 1.0  # Changed from 7.0 - duration now learned, not hacked
 
-# Base duration parameters (before multiplier)
-EXCHANGE_DURATION_SHAPE = 5.0   # Gamma shape for exchange
-EXCHANGE_DURATION_SCALE = 10.0  # Gamma scale for exchange (base mean ~50s -> scaled ~350s)
-EXAMINATION_DURATION_SHAPE = 2.0  # Gamma shape for examination events
-EXAMINATION_DURATION_SCALE = 5.0  # Gamma scale (base mean ~10s -> scaled ~70s per event)
+# Base duration parameters - FALLBACK only (used when model duration prediction unavailable)
+# With learned duration prediction, these are only used as fallback for missing data
+EXCHANGE_DURATION_SHAPE = 5.0   # Gamma shape for exchange (fallback)
+EXCHANGE_DURATION_SCALE = 10.0  # Gamma scale for exchange (fallback)
+EXAMINATION_DURATION_SHAPE = 2.0  # Gamma shape for examination events (fallback)
+EXAMINATION_DURATION_SCALE = 5.0  # Gamma scale (fallback)
 
 # ============================================================================
 # BODY REGION FILTERING
@@ -225,7 +226,8 @@ EXAMINATION_TRAINING_CONFIG = {
     'label_smoothing': 0.1,
     'gradient_clip': 1.0,
     'early_stopping_patience': 15,
-    'validation_split': 0.2
+    'validation_split': 0.2,
+    'duration_loss_weight': 0.1,  # Weight for duration prediction loss
 }
 
 # ============================================================================
