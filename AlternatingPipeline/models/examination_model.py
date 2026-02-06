@@ -21,7 +21,7 @@ from config import (
     PAD_TOKEN_ID, NUM_BODY_REGIONS, BODY_REGIONS
 )
 from models.layers import (
-    PositionalEncoding, create_attention_mask, create_key_padding_mask
+    PositionalEncoding, GammaOutputHead, create_attention_mask, create_key_padding_mask
 )
 
 
@@ -107,6 +107,9 @@ class ExaminationModel(nn.Module):
         # Output projection to vocabulary
         self.output_projection = nn.Linear(self.d_model, self.vocab_size)
 
+        # Duration prediction head (predicts mu, sigma for each token's duration)
+        self.duration_head = GammaOutputHead(self.d_model, min_sigma=1.0)
+
         self._init_weights()
 
     def _init_weights(self):
@@ -146,6 +149,8 @@ class ExaminationModel(nn.Module):
 
         Returns:
             logits: [batch_size, seq_len, vocab_size] - token logits
+            duration_mu: [batch_size, seq_len] - predicted duration means
+            duration_sigma: [batch_size, seq_len] - predicted duration stds
         """
         batch_size, seq_len = target_tokens.shape
 
@@ -166,8 +171,9 @@ class ExaminationModel(nn.Module):
         )
 
         logits = self.output_projection(decoder_output)
+        duration_mu, duration_sigma = self.duration_head(decoder_output)
 
-        return logits
+        return logits, duration_mu, duration_sigma
 
     @torch.no_grad()
     def generate(self, conditioning, body_region, max_length=None,
@@ -185,6 +191,7 @@ class ExaminationModel(nn.Module):
 
         Returns:
             generated_sequences: [batch_size, seq_len] - generated token IDs
+            generated_durations: [batch_size, seq_len] - predicted durations per token
         """
         self.eval()
 
@@ -206,6 +213,7 @@ class ExaminationModel(nn.Module):
 
         # Initialize with START token
         generated = torch.full((batch_size, 1), START_TOKEN_ID, dtype=torch.long, device=device)
+        generated_durations = [torch.zeros(batch_size, device=device)]  # 0 duration for START
 
         for _ in range(max_length - 1):
             tgt_emb = self.token_embedding(generated)
@@ -217,8 +225,15 @@ class ExaminationModel(nn.Module):
 
             decoder_output = self.transformer_decoder(tgt_emb, memory, tgt_mask=tgt_mask)
 
+            # Token prediction
             logits = self.output_projection(decoder_output)
             next_token_logits = logits[:, -1, :] / temperature
+
+            # Duration prediction for the last position
+            dur_mu, dur_sigma = self.duration_head(decoder_output)
+            last_mu = dur_mu[:, -1]
+            last_sigma = dur_sigma[:, -1]
+            sampled_duration = torch.normal(last_mu, last_sigma).clamp(min=1.0)
 
             # Apply top-k filtering
             if top_k > 0:
@@ -239,11 +254,12 @@ class ExaminationModel(nn.Module):
             next_token = torch.multinomial(probs, num_samples=1)
 
             generated = torch.cat([generated, next_token], dim=1)
+            generated_durations.append(sampled_duration)
 
             if (next_token == END_TOKEN_ID).all():
                 break
 
-        return generated
+        return generated, torch.stack(generated_durations, dim=1)
 
     def compute_loss(self, logits, targets, ignore_index=None, label_smoothing=0.0):
         """
@@ -272,6 +288,30 @@ class ExaminationModel(nn.Module):
         )
 
         return loss
+
+    def compute_duration_loss(self, mu, sigma, target_durations, ignore_mask=None):
+        """
+        Compute Gaussian NLL loss for duration prediction.
+
+        Args:
+            mu: [batch_size, seq_len] predicted duration means
+            sigma: [batch_size, seq_len] predicted duration stds
+            target_durations: [batch_size, seq_len] actual durations in seconds
+            ignore_mask: [batch_size, seq_len] True for positions to ignore (padding)
+
+        Returns:
+            loss: Scalar loss value
+        """
+        # Gaussian NLL: 0.5 * (log(sigma^2) + (target - mu)^2 / sigma^2)
+        variance = sigma ** 2 + 1e-8
+        nll = 0.5 * (torch.log(variance) + (target_durations - mu) ** 2 / variance)
+
+        if ignore_mask is not None:
+            nll = nll.masked_fill(ignore_mask, 0.0)
+            num_valid = (~ignore_mask).sum().clamp(min=1)
+            return nll.sum() / num_valid
+
+        return nll.mean()
 
 
 def create_examination_model(config=None):
@@ -309,24 +349,32 @@ if __name__ == "__main__":
 
     # Forward pass
     print(f"\nTesting forward pass...")
-    logits = model(conditioning, body_region, target_tokens)
+    logits, dur_mu, dur_sigma = model(conditioning, body_region, target_tokens)
     print(f"  Conditioning shape: {conditioning.shape}")
     print(f"  Body region shape: {body_region.shape}")
     print(f"  Target tokens shape: {target_tokens.shape}")
     print(f"  Output logits shape: {logits.shape}")
+    print(f"  Duration mu shape: {dur_mu.shape}")
+    print(f"  Duration sigma shape: {dur_sigma.shape}")
 
     # Test loss
     loss = model.compute_loss(logits, target_tokens, label_smoothing=0.1)
-    print(f"\nLoss computed: {loss.item():.4f}")
+    print(f"\nToken loss: {loss.item():.4f}")
+
+    # Test duration loss
+    dummy_durations = torch.rand(batch_size, seq_len) * 300  # Random durations 0-300s
+    dur_loss = model.compute_duration_loss(dur_mu, dur_sigma, dummy_durations)
+    print(f"Duration loss: {dur_loss.item():.4f}")
 
     # Test generation
     print(f"\nTesting generation for each body region...")
     single_cond = torch.randn(base_conditioning_dim)
 
     for region_id in [0, 2, 5]:  # HEAD, CHEST, SPINE
-        generated = model.generate(single_cond, region_id, max_length=30,
-                                   temperature=1.0, top_k=10)
+        generated, durations = model.generate(single_cond, region_id, max_length=30,
+                                              temperature=1.0, top_k=10)
         print(f"  {BODY_REGIONS[region_id]}: generated {generated.shape[1]} tokens")
         print(f"    Tokens: {generated[0, :10].tolist()}...")
+        print(f"    Durations: {durations[0, :10].tolist()}")
 
     print("\nAll tests passed!")
