@@ -513,6 +513,49 @@ def step_6_visualize(schedule=None):
     return viz_dir
 
 
+def step_7_customer_simulation(customer_id=None):
+    """Step 7: Run per-customer day simulation."""
+    print("\n" + "=" * 70)
+    print("STEP 7: PER-CUSTOMER DAY SIMULATION")
+    print("=" * 70)
+
+    from generation.customer_simulator import CustomerSimulator
+    from config import CUSTOMER_OUTPUT_DIR
+
+    print("Initializing customer simulator...")
+    simulator = CustomerSimulator()
+
+    customers = simulator.list_customers()
+    print(f"Available customers: {len(customers)}")
+
+    if not customers:
+        print("No customer schedules found. Run step 1 (preprocessing) first.")
+        return None
+
+    if customer_id and customer_id != 'all':
+        # Simulate specific customer
+        if customer_id not in customers:
+            print(f"Customer '{customer_id}' not found. Available: {customers}")
+            return None
+        result = simulator.simulate_customer_day(customer_id, verbose=True)
+        if result and result['schedule']:
+            import pandas as pd
+            customer_dir = os.path.join(CUSTOMER_OUTPUT_DIR, customer_id)
+            os.makedirs(customer_dir, exist_ok=True)
+            df = pd.DataFrame(result['schedule'])
+            csv_path = os.path.join(customer_dir, f"simulated_{result['date']}.csv")
+            df.to_csv(csv_path, index=False)
+            print(f"\nSaved to: {csv_path}")
+        return {customer_id: result}
+    else:
+        # Simulate all customers
+        results = simulator.simulate_all_customers(
+            verbose=True,
+            output_dir=CUSTOMER_OUTPUT_DIR
+        )
+        return results
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Run the AlternatingPipeline end-to-end",
@@ -525,13 +568,16 @@ Steps:
   4. Generate buckets
   5. Run day simulation
   6. Generate visualizations
+  7. Per-customer day simulation
 
 Examples:
-  python run_all.py                    # Run all steps
+  python run_all.py                    # Run steps 1-6
   python run_all.py --skip-preprocess  # Skip step 1
   python run_all.py --skip-training    # Skip steps 2 and 3
   python run_all.py --steps 4,5,6      # Only run steps 4, 5, and 6
-  python run_all.py --steps 6          # Only generate visualizations (uses latest schedule)
+  python run_all.py --steps 7          # Only run customer simulation
+  python run_all.py --customer 141049  # Simulate a specific customer
+  python run_all.py --customer all     # Simulate all customers
         """
     )
 
@@ -543,11 +589,19 @@ Examples:
                         help='Skip visualization generation')
     parser.add_argument('--steps', type=str, default=None,
                         help='Comma-separated list of steps to run (e.g., "1,2,3")')
+    parser.add_argument('--customer', type=str, default=None,
+                        help='Customer ID to simulate (or "all" for all customers)')
 
     args = parser.parse_args()
 
     # Determine which steps to run
-    if args.steps:
+    if args.customer:
+        # --customer implies step 7 only (unless --steps also specified)
+        if args.steps:
+            steps_to_run = set(int(s.strip()) for s in args.steps.split(','))
+        else:
+            steps_to_run = {7}
+    elif args.steps:
         steps_to_run = set(int(s.strip()) for s in args.steps.split(','))
     else:
         steps_to_run = {1, 2, 3, 4, 5, 6}
@@ -590,6 +644,9 @@ Examples:
 
         if 6 in steps_to_run:
             step_6_visualize(schedule)
+
+        if 7 in steps_to_run:
+            step_7_customer_simulation(customer_id=args.customer)
 
         elapsed = time.time() - start_time
         print("\n" + "=" * 70)
