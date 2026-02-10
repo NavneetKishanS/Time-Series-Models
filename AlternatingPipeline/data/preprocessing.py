@@ -196,7 +196,12 @@ def extract_exchange_events(df, verbose=False):
 
         # Extract sequence
         sequence = exchange_segment['sourceID_token'].tolist()
-        durations = exchange_segment['timediff'].tolist()
+
+        # Convert cumulative timediff to inter-event durations
+        # timediff is cumulative seconds from session start, NOT per-event duration
+        timediffs = exchange_segment['timediff'].values.astype(float)
+        durations = np.diff(timediffs, prepend=timediffs[0]).tolist()
+        durations[0] = 0.0  # first event has no prior reference
 
         # Get conditioning from the target (next) patient/examination
         row = segment.iloc[0]  # First row has the target info
@@ -228,13 +233,16 @@ def extract_exchange_events(df, verbose=False):
         # Store start datetime for temporal splitting
         start_datetime = exchange_segment.iloc[0]['datetime'] if len(exchange_segment) > 0 else row['datetime']
 
+        # Total duration is the time span of the exchange (last - first timediff)
+        total_duration = float(timediffs[-1] - timediffs[0]) if len(timediffs) > 1 else 0.0
+
         exchange_sequences.append({
             'sequence': sequence,
             'durations': durations,
             'conditioning': conditioning,
             'body_from': body_from,
             'body_to': body_to,
-            'total_duration': sum(durations),
+            'total_duration': total_duration,
             'start_datetime': start_datetime,  # NEW: for temporal train/val split
         })
 
@@ -302,7 +310,11 @@ def extract_examination_events(df, verbose=False):
 
         # Extract sequence
         sequence = segment['sourceID_token'].tolist()
-        durations = segment['timediff'].tolist()
+
+        # Convert cumulative timediff to inter-event durations
+        timediffs = segment['timediff'].values.astype(float)
+        durations = np.diff(timediffs, prepend=timediffs[0]).tolist()
+        durations[0] = 0.0  # first event has no prior reference
 
         # Get conditioning
         row = segment.iloc[0]
@@ -332,13 +344,16 @@ def extract_examination_events(df, verbose=False):
             if coil in row:
                 coil_config[coil] = int(row[coil]) if pd.notna(row[coil]) else 0
 
+        # Total duration is the time span of the examination (last - first timediff)
+        total_duration = float(timediffs[-1] - timediffs[0]) if len(timediffs) > 1 else 0.0
+
         examination_sequences.append({
             'sequence': sequence,
             'durations': durations,
             'conditioning': conditioning,
             'body_region': body_region,
             'coil_config': coil_config,
-            'total_duration': sum(durations),
+            'total_duration': total_duration,
             'start_datetime': row['datetime'],  # NEW: for temporal train/val split
         })
 
@@ -384,6 +399,83 @@ def aggregate_by_day(df):
         daily_summaries.append(summary)
 
     return sorted(daily_summaries, key=lambda x: x['date'])
+
+
+def extract_customer_daily_schedules(data_dir=None, verbose=True):
+    """
+    Extract real daily patient sequences per customer (MRI scanner).
+
+    Each CSV file represents one customer/scanner. For each file, we group
+    events by date and extract the ordered patient list for that day.
+
+    Args:
+        data_dir: Directory containing raw CSVs (default: config.DATA_DIR)
+        verbose: Print progress
+
+    Returns:
+        Dict of {customer_id: {date_str: [patient_dicts]}}
+        Each patient_dict has: patient_id, body_region, age, weight, height,
+        direction, hour_of_day, day_of_week
+    """
+    if data_dir is None:
+        data_dir = DATA_DIR
+
+    csv_files = glob(os.path.join(data_dir, '*.csv'))
+
+    if verbose:
+        print(f"Extracting customer daily schedules from {len(csv_files)} files...")
+
+    customer_schedules = {}
+
+    for csv_path in csv_files:
+        customer_id = os.path.splitext(os.path.basename(csv_path))[0]
+
+        try:
+            df = load_raw_csv(csv_path)
+        except Exception as e:
+            if verbose:
+                print(f"  Error loading {customer_id}: {e}")
+            continue
+
+        customer_schedules[customer_id] = {}
+
+        for date, day_group in df.groupby('date'):
+            date_str = str(date)
+            patients = []
+            seen_patients = set()
+
+            # Walk through the day's events in order
+            for _, row in day_group.iterrows():
+                patient_id = row.get('PatientId', '')
+                if not patient_id or patient_id in seen_patients:
+                    continue
+
+                seen_patients.add(patient_id)
+
+                body_region_str = row.get('BodyGroup_to', 'UNKNOWN')
+                body_region_id = BODY_REGION_TO_ID.get(body_region_str, 10)
+
+                patients.append({
+                    'patient_id': patient_id,
+                    'body_region': body_region_str,
+                    'body_region_id': body_region_id,
+                    'age': float(row.get('Age', 0)),
+                    'weight': float(row.get('Weight', 0)),
+                    'height': float(row.get('Height', 0)),
+                    'direction': row.get('Direction', 'Head First'),
+                    'hour_of_day': int(row.get('hour_of_day', 8)),
+                    'day_of_week': int(row.get('day_of_week', 0)),
+                })
+
+            if patients:
+                customer_schedules[customer_id][date_str] = patients
+
+        if verbose:
+            num_days = len(customer_schedules[customer_id])
+            total_patients = sum(len(p) for p in customer_schedules[customer_id].values())
+            print(f"  {customer_id}: {num_days} days, {total_patients} total patients")
+
+    return customer_schedules
 
 
 def preprocess_all_data(data_dir=None, output_dir=None, verbose=True):
@@ -444,11 +536,17 @@ def preprocess_all_data(data_dir=None, output_dir=None, verbose=True):
         print(f"Total examination sequences: {len(all_examination)}")
         print(f"Total daily summaries: {len(all_daily_summaries)}")
 
+    # Extract per-customer daily schedules
+    if verbose:
+        print(f"\nExtracting per-customer daily schedules...")
+    customer_schedules = extract_customer_daily_schedules(data_dir, verbose=verbose)
+
     # Save preprocessed data
     result = {
         'exchange': all_exchange,
         'examination': all_examination,
-        'daily_summaries': all_daily_summaries,  # NEW: for temporal forecasting
+        'daily_summaries': all_daily_summaries,
+        'customer_schedules': customer_schedules,
     }
 
     output_path = os.path.join(output_dir, 'preprocessed_data.pkl')
@@ -457,6 +555,7 @@ def preprocess_all_data(data_dir=None, output_dir=None, verbose=True):
 
     if verbose:
         print(f"\nSaved preprocessed data to {output_path}")
+        print(f"Customer schedules: {len(customer_schedules)} customers")
 
     return result
 

@@ -20,11 +20,13 @@ DATA_DIR = os.path.join(PROJECT_ROOT, 'PXChange_Refactored', 'data')
 OUTPUT_DIR = os.path.join(BASE_DIR, 'outputs')
 MODEL_SAVE_DIR = os.path.join(BASE_DIR, 'saved_models')
 BUCKETS_DIR = os.path.join(BASE_DIR, 'buckets')
+CUSTOMER_OUTPUT_DIR = os.path.join(OUTPUT_DIR, 'customers')
 
 # Create directories if they don't exist
 for directory in [OUTPUT_DIR, MODEL_SAVE_DIR, BUCKETS_DIR,
                   os.path.join(BUCKETS_DIR, 'exchange'),
-                  os.path.join(BUCKETS_DIR, 'examination')]:
+                  os.path.join(BUCKETS_DIR, 'examination'),
+                  CUSTOMER_OUTPUT_DIR]:
     os.makedirs(directory, exist_ok=True)
 
 # ============================================================================
