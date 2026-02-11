@@ -139,6 +139,11 @@ class BucketGenerator:
         with open(preprocessed_path, 'rb') as f:
             data = pickle.load(f)
 
+        if data.get('version', 1) < 2:
+            print("WARNING: Preprocessed data is outdated (version < 2). "
+                  "Durations may be cumulative instead of inter-event. "
+                  "Re-run step 1: python run_all.py --steps 1")
+
         grouped = defaultdict(list)
         for seq in data['exchange']:
             # Cap outlier durations (overnight gaps etc.)
@@ -187,6 +192,28 @@ class BucketGenerator:
             real_samples = real_exchange_data[key]
             indices = np.random.choice(len(real_samples), size=num_samples, replace=True)
             return [real_samples[i] for i in indices]
+
+        # Nearest-neighbor fallback: find real data for similar transition
+        if real_exchange_data:
+            # Try same body_to with any body_from
+            for alt_from in range(NUM_REGION_CLASSES):
+                alt_key = (alt_from, body_to)
+                if alt_key in real_exchange_data:
+                    real_samples = real_exchange_data[alt_key]
+                    indices = np.random.choice(len(real_samples), size=num_samples, replace=True)
+                    return [real_samples[i] for i in indices]
+            # Try same body_from with any body_to
+            for alt_to in range(NUM_REGION_CLASSES):
+                alt_key = (body_from, alt_to)
+                if alt_key in real_exchange_data:
+                    real_samples = real_exchange_data[alt_key]
+                    indices = np.random.choice(len(real_samples), size=num_samples, replace=True)
+                    return [real_samples[i] for i in indices]
+            # Last resort: use any available real exchange data
+            all_real = [s for samples in real_exchange_data.values() for s in samples]
+            if all_real:
+                indices = np.random.choice(len(all_real), size=num_samples, replace=True)
+                return [all_real[i] for i in indices]
 
         # Fallback: generate synthetic samples using exchange model
         if self.exchange_model is None:

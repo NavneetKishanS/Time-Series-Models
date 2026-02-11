@@ -21,7 +21,7 @@ from config import (
     PAD_TOKEN_ID, NUM_BODY_REGIONS, BODY_REGIONS
 )
 from models.layers import (
-    PositionalEncoding, GammaOutputHead, create_attention_mask, create_key_padding_mask
+    PositionalEncoding, DurationHead, create_attention_mask, create_key_padding_mask
 )
 
 
@@ -108,7 +108,7 @@ class ExaminationModel(nn.Module):
         self.output_projection = nn.Linear(self.d_model, self.vocab_size)
 
         # Duration prediction head (predicts mu, sigma for each token's duration)
-        self.duration_head = GammaOutputHead(self.d_model, min_sigma=1.0)
+        self.duration_head = DurationHead(self.d_model, min_sigma=0.1)
 
         self._init_weights()
 
@@ -233,7 +233,7 @@ class ExaminationModel(nn.Module):
             dur_mu, dur_sigma = self.duration_head(decoder_output)
             last_mu = dur_mu[:, -1]
             last_sigma = dur_sigma[:, -1]
-            sampled_duration = torch.normal(last_mu, last_sigma).clamp(min=1.0)
+            sampled_duration = torch.normal(last_mu, last_sigma).clamp(min=0.0)
 
             # Apply top-k filtering
             if top_k > 0:
