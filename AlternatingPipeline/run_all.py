@@ -207,55 +207,31 @@ def step_5_simulate_day():
     return schedule
 
 
-def step_6_visualize(schedule=None):
-    """Step 6: Generate visualizations for evaluation."""
-    print("\n" + "=" * 70)
-    print("STEP 6: GENERATING VISUALIZATIONS")
-    print("=" * 70)
 
+def _generate_visualizations_for_dataframe(schedule_df, output_viz_dir, title_prefix=""):
+    """
+    Helper function to generate a set of standard visualizations for a given schedule DataFrame.
+    """
     import pandas as pd
     import numpy as np
-    from glob import glob
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+    from config import DURATION_MULTIPLIER
 
-    try:
-        import plotly.graph_objects as go
-        from plotly.subplots import make_subplots
-    except ImportError:
-        print("Warning: plotly not installed. Skipping visualizations.")
-        print("Install with: pip install plotly")
-        return None
+    # Ensure output directory exists
+    os.makedirs(output_viz_dir, exist_ok=True)
 
-    # Load the most recent schedule if not provided
-    if schedule is None:
-        print("Loading most recent simulated schedule...")
-        schedule_files = glob(os.path.join(OUTPUT_DIR, 'simulated_day_*.csv'))
-        if not schedule_files:
-            print("  No schedule files found. Run step 5 first.")
-            return None
-        latest_file = max(schedule_files, key=os.path.getmtime)
-        print(f"  Loading: {latest_file}")
-        schedule_df = pd.read_csv(latest_file)
-    else:
-        schedule_df = pd.DataFrame(schedule)
-
-    print(f"  Loaded {len(schedule_df)} events")
-
-    # Create output directory for visualizations
-    viz_dir = os.path.join(OUTPUT_DIR, 'visualizations')
-    os.makedirs(viz_dir, exist_ok=True)
+    # Filter events
+    exchange_events = schedule_df[schedule_df['event_type'] == 'exchange']
+    exam_events = schedule_df[schedule_df['event_type'] == 'examination']
 
     # =========================================================================
     # Visualization 1: Duration Distribution by Event Type
     # =========================================================================
-    print("\nCreating duration distribution chart...")
-
     fig1 = make_subplots(
         rows=1, cols=2,
         subplot_titles=("Exchange Durations", "Examination Durations")
     )
-
-    exchange_events = schedule_df[schedule_df['event_type'] == 'exchange']
-    exam_events = schedule_df[schedule_df['event_type'] == 'examination']
 
     if len(exchange_events) > 0:
         fig1.add_trace(
@@ -280,7 +256,7 @@ def step_6_visualize(schedule=None):
         )
 
     fig1.update_layout(
-        title_text=f"Duration Distribution (Multiplier: {DURATION_MULTIPLIER}x)",
+        title_text=f"{title_prefix}Duration Distribution (Multiplier: {DURATION_MULTIPLIER}x)",
         showlegend=False
     )
     fig1.update_xaxes(title_text="Duration (seconds)", row=1, col=1)
@@ -288,21 +264,17 @@ def step_6_visualize(schedule=None):
     fig1.update_yaxes(title_text="Count", row=1, col=1)
     fig1.update_yaxes(title_text="Count", row=1, col=2)
 
-    duration_path = os.path.join(viz_dir, 'duration_distribution.html')
+    duration_path = os.path.join(output_viz_dir, 'duration_distribution.html')
     fig1.write_html(duration_path)
     print(f"  Saved: {duration_path}")
 
     # =========================================================================
     # Visualization 2: Body Region Distribution
     # =========================================================================
-    print("Creating body region distribution chart...")
-
-    # Count events per body region (for examination events)
     if 'body_region' in schedule_df.columns:
         body_counts = exam_events['body_region'].value_counts().reset_index()
         body_counts.columns = ['body_region', 'count']
 
-        # Calculate average duration per body region
         avg_duration = exam_events.groupby('body_region')['duration'].mean().reset_index()
         avg_duration.columns = ['body_region', 'avg_duration']
 
@@ -333,24 +305,20 @@ def step_6_visualize(schedule=None):
             row=1, col=2
         )
 
-        fig2.update_layout(title_text="Body Region Analysis", showlegend=False)
+        fig2.update_layout(title_text=f"{title_prefix}Body Region Analysis", showlegend=False)
         fig2.update_xaxes(title_text="Body Region", row=1, col=1)
         fig2.update_xaxes(title_text="Body Region", row=1, col=2)
         fig2.update_yaxes(title_text="Event Count", row=1, col=1)
         fig2.update_yaxes(title_text="Avg Duration (seconds)", row=1, col=2)
 
-        body_region_path = os.path.join(viz_dir, 'body_region_analysis.html')
+        body_region_path = os.path.join(output_viz_dir, 'body_region_analysis.html')
         fig2.write_html(body_region_path)
         print(f"  Saved: {body_region_path}")
 
     # =========================================================================
     # Visualization 3: Timeline / Gantt Chart
     # =========================================================================
-    print("Creating timeline chart...")
-
-    # Create a timeline showing patient flow
     if 'patient_id' in schedule_df.columns and 'timestamp' in schedule_df.columns:
-        # Aggregate by patient
         patient_summary = schedule_df.groupby('patient_id').agg({
             'timestamp': 'min',
             'cumulative_time': 'max',
@@ -359,7 +327,6 @@ def step_6_visualize(schedule=None):
         patient_summary.columns = ['patient_id', 'start_time', 'end_time', 'num_events']
         patient_summary['duration'] = patient_summary['end_time'] - patient_summary['start_time']
 
-        # Convert to minutes for readability
         patient_summary['start_min'] = patient_summary['start_time'] / 60
         patient_summary['duration_min'] = patient_summary['duration'] / 60
 
@@ -387,23 +354,20 @@ def step_6_visualize(schedule=None):
             ))
 
         fig3.update_layout(
-            title_text="Patient Timeline (Gantt Chart)",
+            title_text=f"{title_prefix}Patient Timeline (Gantt Chart)",
             xaxis_title="Time (minutes from start)",
             yaxis_title="Patient ID",
             showlegend=False,
             barmode='stack'
         )
 
-        timeline_path = os.path.join(viz_dir, 'patient_timeline.html')
+        timeline_path = os.path.join(output_viz_dir, 'patient_timeline.html')
         fig3.write_html(timeline_path)
         print(f"  Saved: {timeline_path}")
 
     # =========================================================================
     # Visualization 4: Summary Statistics Dashboard
     # =========================================================================
-    print("Creating summary dashboard...")
-
-    # Calculate summary statistics
     total_duration_sec = schedule_df['duration'].sum()
     total_duration_min = total_duration_sec / 60
     total_duration_hr = total_duration_sec / 3600
@@ -416,7 +380,6 @@ def step_6_visualize(schedule=None):
     avg_exam_duration = exam_events['duration'].mean() if len(exam_events) > 0 else 0
     avg_per_patient = total_duration_min / num_patients if num_patients > 0 else 0
 
-    # Create summary figure
     fig4 = make_subplots(
         rows=2, cols=2,
         specs=[
@@ -465,17 +428,15 @@ def step_6_visualize(schedule=None):
         row=2, col=2
     )
 
-    fig4.update_layout(title_text="Simulation Summary")
+    fig4.update_layout(title_text=f"{title_prefix}Simulation Summary")
 
-    summary_path = os.path.join(viz_dir, 'summary_dashboard.html')
+    summary_path = os.path.join(output_viz_dir, 'summary_dashboard.html')
     fig4.write_html(summary_path)
     print(f"  Saved: {summary_path}")
 
     # =========================================================================
     # Visualization 5: Event Type Breakdown Pie Chart
     # =========================================================================
-    print("Creating event breakdown chart...")
-
     event_counts = schedule_df['event_type'].value_counts()
 
     fig5 = go.Figure(data=[go.Pie(
@@ -486,19 +447,17 @@ def step_6_visualize(schedule=None):
     )])
 
     fig5.update_layout(
-        title_text="Event Type Breakdown",
+        title_text=f"{title_prefix}Event Type Breakdown",
         annotations=[dict(text='Events', x=0.5, y=0.5, font_size=20, showarrow=False)]
     )
 
-    event_breakdown_path = os.path.join(viz_dir, 'event_breakdown.html')
+    event_breakdown_path = os.path.join(output_viz_dir, 'event_breakdown.html')
     fig5.write_html(event_breakdown_path)
     print(f"  Saved: {event_breakdown_path}")
 
-    # =========================================================================
     # Print Summary to Console
-    # =========================================================================
     print("\n" + "-" * 50)
-    print("SIMULATION SUMMARY")
+    print(f"{title_prefix} SIMULATION SUMMARY")
     print("-" * 50)
     print(f"  Total Duration:      {total_duration_hr:.2f} hours ({total_duration_min:.0f} minutes)")
     print(f"  Number of Patients:  {num_patients}")
@@ -508,9 +467,57 @@ def step_6_visualize(schedule=None):
     print(f"  Avg Examination:     {avg_exam_duration:.0f} seconds ({avg_exam_duration/60:.1f} min)")
     print(f"  Avg per Patient:     {avg_per_patient:.1f} minutes")
     print("-" * 50)
-    print(f"\nVisualizations saved to: {viz_dir}")
+    print(f"\nVisualizations saved to: {output_viz_dir}")
 
-    return viz_dir
+    return output_viz_dir
+
+
+def step_6_visualize(schedule=None):
+    """Step 6: Generate visualizations for evaluation."""
+    print("\n" + "=" * 70)
+    print("STEP 6: GENERATING VISUALIZATIONS")
+    print("=" * 70)
+
+    import pandas as pd
+    from glob import glob
+
+    try:
+        import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
+    except ImportError:
+        print("Warning: plotly not installed. Skipping visualizations.")
+        print("Install with: pip install plotly")
+        return None
+
+    # Load the most recent schedule if not provided
+    if schedule is None:
+        print("Loading most recent simulated schedule...")
+        schedule_files = glob(os.path.join(OUTPUT_DIR, 'simulated_day_*.csv'))
+        if not schedule_files:
+            print("  No schedule files found. Run step 5 first.")
+            return None
+        latest_file = max(schedule_files, key=os.path.getmtime)
+        print(f"  Loading: {latest_file}")
+        schedule_df = pd.read_csv(latest_file)
+    else:
+        schedule_df = pd.DataFrame(schedule)
+
+    print(f"  Loaded {len(schedule_df)} events")
+
+    viz_dir = os.path.join(OUTPUT_DIR, 'visualizations')
+    print("Creating visualizations for overall simulation...")
+    return _generate_visualizations_for_dataframe(schedule_df, viz_dir, title_prefix="Overall Simulation: ")
+
+
+
+
+def _visualize_customer_simulation(customer_id, schedule_df, output_dir):
+    """Generates visualizations for a single customer's simulated data."""
+    print(f"\n  Generating visualizations for customer {customer_id}...")
+    customer_viz_dir = os.path.join(output_dir, customer_id, 'visualizations')
+    os.makedirs(customer_viz_dir, exist_ok=True)
+    _generate_visualizations_for_dataframe(schedule_df, customer_viz_dir, title_prefix=f"Customer {customer_id}: ")
+    return customer_viz_dir
 
 
 def step_7_customer_simulation(customer_id=None):
@@ -521,6 +528,7 @@ def step_7_customer_simulation(customer_id=None):
 
     from generation.customer_simulator import CustomerSimulator
     from config import CUSTOMER_OUTPUT_DIR
+    import pandas as pd # Import pandas here
 
     print("Initializing customer simulator...")
     simulator = CustomerSimulator()
@@ -539,13 +547,13 @@ def step_7_customer_simulation(customer_id=None):
             return None
         result = simulator.simulate_customer_day(customer_id, verbose=True)
         if result and result['schedule']:
-            import pandas as pd
             customer_dir = os.path.join(CUSTOMER_OUTPUT_DIR, customer_id)
             os.makedirs(customer_dir, exist_ok=True)
             df = pd.DataFrame(result['schedule'])
             csv_path = os.path.join(customer_dir, f"simulated_{result['date']}.csv")
             df.to_csv(csv_path, index=False)
             print(f"\nSaved to: {csv_path}")
+            _visualize_customer_simulation(customer_id, df, CUSTOMER_OUTPUT_DIR) # Call visualization
         return {customer_id: result}
     else:
         # Simulate all customers
@@ -553,7 +561,15 @@ def step_7_customer_simulation(customer_id=None):
             verbose=True,
             output_dir=CUSTOMER_OUTPUT_DIR
         )
+        # Generate visualizations for all simulated customers
+        if results:
+            print("\nGenerating visualizations for all customers...")
+            for cust_id, cust_data in results.items():
+                if cust_data and cust_data['schedule']:
+                    df = pd.DataFrame(cust_data['schedule'])
+                    _visualize_customer_simulation(cust_id, df, CUSTOMER_OUTPUT_DIR) # Call visualization
         return results
+
 
 
 def main():
