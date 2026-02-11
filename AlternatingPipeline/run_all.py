@@ -469,7 +469,20 @@ def _generate_visualizations_for_dataframe(schedule_df, output_viz_dir, title_pr
     print("-" * 50)
     print(f"\nVisualizations saved to: {output_viz_dir}")
 
-    return output_viz_dir
+    summary_metrics = {
+        'total_duration_hr': total_duration_hr,
+        'total_duration_min': total_duration_min,
+        'num_patients': num_patients,
+        'num_exchanges': num_exchanges,
+        'num_exams': num_exams,
+        'avg_exchange_duration_sec': avg_exchange_duration,
+        'avg_exchange_duration_min': avg_exchange_duration / 60,
+        'avg_exam_duration_sec': avg_exam_duration,
+        'avg_exam_duration_min': avg_exam_duration / 60,
+        'avg_per_patient_min': avg_per_patient
+    }
+
+    return output_viz_dir, summary_metrics
 
 
 def step_6_visualize(schedule=None):
@@ -516,8 +529,8 @@ def _visualize_customer_simulation(customer_id, schedule_df, output_dir):
     print(f"\n  Generating visualizations for customer {customer_id}...")
     customer_viz_dir = os.path.join(output_dir, customer_id, 'visualizations')
     os.makedirs(customer_viz_dir, exist_ok=True)
-    _generate_visualizations_for_dataframe(schedule_df, customer_viz_dir, title_prefix=f"Customer {customer_id}: ")
-    return customer_viz_dir
+    _, summary_metrics = _generate_visualizations_for_dataframe(schedule_df, customer_viz_dir, title_prefix=f"Customer {customer_id}: ")
+    return customer_viz_dir, summary_metrics
 
 
 def step_7_customer_simulation(customer_id=None):
@@ -540,6 +553,8 @@ def step_7_customer_simulation(customer_id=None):
         print("No customer schedules found. Run step 1 (preprocessing) first.")
         return None
 
+    all_customer_summaries = [] # Initialize list to store summaries
+
     if customer_id and customer_id != 'all':
         # Simulate specific customer
         if customer_id not in customers:
@@ -553,8 +568,9 @@ def step_7_customer_simulation(customer_id=None):
             csv_path = os.path.join(customer_dir, f"simulated_{result['date']}.csv")
             df.to_csv(csv_path, index=False)
             print(f"\nSaved to: {csv_path}")
-            _visualize_customer_simulation(customer_id, df, CUSTOMER_OUTPUT_DIR) # Call visualization
-        return {customer_id: result}
+            _, summary_metrics = _visualize_customer_simulation(customer_id, df, CUSTOMER_OUTPUT_DIR) # Call visualization
+            all_customer_summaries.append({'customer_id': customer_id, **summary_metrics})
+        return {customer_id: result, 'all_customer_summaries': all_customer_summaries} # Changed 'summary' to 'all_customer_summaries' for consistency
     else:
         # Simulate all customers
         results = simulator.simulate_all_customers(
@@ -567,9 +583,105 @@ def step_7_customer_simulation(customer_id=None):
             for cust_id, cust_data in results.items():
                 if cust_data and cust_data['schedule']:
                     df = pd.DataFrame(cust_data['schedule'])
-                    _visualize_customer_simulation(cust_id, df, CUSTOMER_OUTPUT_DIR) # Call visualization
-        return results
+                    _, summary_metrics = _visualize_customer_simulation(cust_id, df, CUSTOMER_OUTPUT_DIR) # Call visualization
+                    all_customer_summaries.append({'customer_id': cust_id, **summary_metrics})
+        return {'results': results, 'all_customer_summaries': all_customer_summaries}
 
+
+def step_8_general_visualizations(customer_summaries):
+    """Step 8: Generate general visualizations across all customers."""
+    print("\n" + "=" * 70)
+    print("STEP 8: GENERATING GENERAL VISUALIZATIONS")
+    print("=" * 70)
+
+    import pandas as pd
+    import plotly.express as px
+    import plotly.graph_objects as go
+    from config import OUTPUT_DIR
+
+    if not customer_summaries:
+        print("No customer summaries provided for general visualizations.")
+        return None
+
+    df_summaries = pd.DataFrame(customer_summaries)
+
+    general_viz_dir = os.path.join(OUTPUT_DIR, 'general_visualizations')
+    os.makedirs(general_viz_dir, exist_ok=True)
+
+    print(f"Generating general visualizations in: {general_viz_dir}")
+
+    # =========================================================================
+    # Visualization 1: Total Duration per Customer (Bar Chart)
+    # =========================================================================
+    fig1 = px.bar(
+        df_summaries.sort_values('total_duration_hr', ascending=False),
+        x='customer_id',
+        y='total_duration_hr',
+        title='Total Simulation Duration per Customer',
+        labels={'total_duration_hr': 'Total Duration (hours)', 'customer_id': 'Customer ID'},
+        hover_data=['num_patients', 'num_exchanges', 'num_exams', 'avg_per_patient_min']
+    )
+    fig1.update_xaxes(tickangle=45)
+    fig1.write_html(os.path.join(general_viz_dir, 'total_duration_per_customer.html'))
+    print(f"  Saved: {os.path.join(general_viz_dir, 'total_duration_per_customer.html')}")
+
+    # =========================================================================
+    # Visualization 2: Average Duration per Patient per Customer (Bar Chart)
+    # =========================================================================
+    fig2 = px.bar(
+        df_summaries.sort_values('avg_per_patient_min', ascending=False),
+        x='customer_id',
+        y='avg_per_patient_min',
+        title='Average Duration per Patient per Customer',
+        labels={'avg_per_patient_min': 'Avg Duration per Patient (minutes)', 'customer_id': 'Customer ID'},
+        hover_data=['total_duration_hr', 'num_patients', 'num_exchanges', 'num_exams']
+    )
+    fig2.update_xaxes(tickangle=45)
+    fig2.write_html(os.path.join(general_viz_dir, 'avg_duration_per_patient_per_customer.html'))
+    print(f"  Saved: {os.path.join(general_viz_dir, 'avg_duration_per_patient_per_customer.html')}")
+
+    # =========================================================================
+    # Visualization 3: Total Duration vs Number of Patients (Scatter Plot)
+    # =========================================================================
+    fig3 = px.scatter(
+        df_summaries,
+        x='num_patients',
+        y='total_duration_hr',
+        color='avg_per_patient_min', # Color points by average time per patient
+        size='num_exchanges',       # Size points by number of exchanges
+        hover_name='customer_id',
+        title='Total Duration vs Number of Patients (Colored by Avg Time per Patient)',
+        labels={'num_patients': 'Number of Patients', 'total_duration_hr': 'Total Duration (hours)'},
+        log_x=True, # Log scale might be useful if patient numbers vary widely
+        log_y=True, # Log scale for duration too
+    )
+    fig3.write_html(os.path.join(general_viz_dir, 'duration_vs_patients_scatter.html'))
+    print(f"  Saved: {os.path.join(general_viz_dir, 'duration_vs_patients_scatter.html')}")
+
+    # =========================================================================
+    # Visualization 4: Distribution of Key Metrics (Histograms/Box Plots)
+    # =========================================================================
+    print("Generating distribution plots...")
+    metrics_to_plot = [
+        ('total_duration_hr', 'Total Duration (Hours)'),
+        ('num_patients', 'Number of Patients'),
+        ('num_exchanges', 'Number of Exchange Events'),
+        ('num_exams', 'Number of Examination Events'),
+        ('avg_per_patient_min', 'Average Duration per Patient (Minutes)')
+    ]
+
+    for metric_col, metric_title in metrics_to_plot:
+        if metric_col in df_summaries.columns and not df_summaries[metric_col].isnull().all():
+            fig = px.histogram(
+                df_summaries,
+                x=metric_col,
+                title=f'Distribution of {metric_title} Across Customers',
+                nbins=20,
+                hover_name='customer_id',
+                labels={metric_col: metric_title}
+            )
+            fig.write_html(os.path.join(general_viz_dir, f'distribution_{metric_col}.html'))
+            print(f"  Saved: {os.path.join(general_viz_dir, f'distribution_{metric_col}.html')}")
 
 
 def main():
@@ -583,8 +695,9 @@ Steps:
   3. Train Examination model
   4. Generate buckets
   5. Run day simulation
-  6. Generate visualizations
-  7. Per-customer day simulation
+  6. Generate visualizations (overall)
+  7. Per-customer day simulation (generates individual customer visualizations)
+  8. Generate general visualizations (aggregates customer data)
 
 Examples:
   python run_all.py                    # Run steps 1-6
@@ -592,8 +705,9 @@ Examples:
   python run_all.py --skip-training    # Skip steps 2 and 3
   python run_all.py --steps 4,5,6      # Only run steps 4, 5, and 6
   python run_all.py --steps 7          # Only run customer simulation
-  python run_all.py --customer 141049  # Simulate a specific customer
-  python run_all.py --customer all     # Simulate all customers
+  python run_all.py --steps 7,8        # Run customer simulation and general visualizations
+  python run_all.py --customer 141049  # Simulate a specific customer (runs step 7 for one customer)
+  python run_all.py --customer all     # Simulate all customers (runs step 7 for all, then step 8)
         """
     )
 
@@ -611,15 +725,25 @@ Examples:
     args = parser.parse_args()
 
     # Determine which steps to run
-    if args.customer:
-        # --customer implies step 7 only (unless --steps also specified)
+    if args.customer == 'all':
+        # If simulating all customers, imply step 7 and 8
         if args.steps:
             steps_to_run = set(int(s.strip()) for s in args.steps.split(','))
+            steps_to_run.add(7)
+            steps_to_run.add(8)
+        else:
+            steps_to_run = {7, 8}
+    elif args.customer:
+        # If simulating a specific customer, imply step 7 only
+        if args.steps:
+            steps_to_run = set(int(s.strip()) for s in args.steps.split(','))
+            steps_to_run.add(7)
         else:
             steps_to_run = {7}
     elif args.steps:
         steps_to_run = set(int(s.strip()) for s in args.steps.split(','))
     else:
+        # Default run: 1-6
         steps_to_run = {1, 2, 3, 4, 5, 6}
         if args.skip_preprocess:
             steps_to_run.discard(1)
@@ -640,7 +764,8 @@ Examples:
 
     start_time = time.time()
 
-    schedule = None  # Will hold the schedule for visualization
+    schedule = None  # Will hold the schedule for overall simulation visualization
+    customer_sim_results = None # Will hold results from step 7
 
     try:
         if 1 in steps_to_run:
@@ -659,10 +784,19 @@ Examples:
             schedule = step_5_simulate_day()
 
         if 6 in steps_to_run:
-            step_6_visualize(schedule)
+            # Ensure not to run step 6 if --no-viz was passed
+            if not args.no_viz:
+                step_6_visualize(schedule)
 
         if 7 in steps_to_run:
-            step_7_customer_simulation(customer_id=args.customer)
+            customer_sim_results = step_7_customer_simulation(customer_id=args.customer)
+
+        if 8 in steps_to_run and customer_sim_results and 'all_customer_summaries' in customer_sim_results:
+            step_8_general_visualizations(customer_sim_results['all_customer_summaries'])
+        elif 8 in steps_to_run and args.customer == 'all' and (not customer_sim_results or 'all_customer_summaries' not in customer_sim_results):
+            print("\nWarning: Step 8 (general visualizations) was requested, but no customer summaries were available. "
+                  "Ensure step 7 runs for 'all' customers before step 8, or provide valid customer simulations.")
+
 
         elapsed = time.time() - start_time
         print("\n" + "=" * 70)
