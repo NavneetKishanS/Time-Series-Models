@@ -20,7 +20,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import (
     START_REGION_ID, END_REGION_ID, BODY_REGIONS, ID_TO_SOURCEID,
-    BODY_REGION_TO_ID, OUTPUT_DIR
+    BODY_REGION_TO_ID, OUTPUT_DIR,
+    START_TOKEN_ID, END_TOKEN_ID, PAD_TOKEN_ID
 )
 from generation.bucket_generator import BucketGenerator
 
@@ -175,8 +176,10 @@ class DaySimulator:
             durations = durations + [5.0] * (len(sequence) - len(durations))
 
         for i, token in enumerate(sequence):
-            # Skip START/END tokens in output
-            if token in [START_REGION_ID, END_REGION_ID]:
+            # Skip START/END/PAD sourceID tokens in output
+            # Use sourceID token IDs (not body region IDs) to avoid collision:
+            # END_REGION_ID=12 collides with MRI_MSR_104 (sourceID token 12)
+            if token in [START_TOKEN_ID, END_TOKEN_ID, PAD_TOKEN_ID]:
                 continue
 
             source_id = ID_TO_SOURCEID.get(token, 'UNK') if isinstance(token, int) else token

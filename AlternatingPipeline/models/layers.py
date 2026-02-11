@@ -38,14 +38,14 @@ class PositionalEncoding(nn.Module):
         return self.dropout(x)
 
 
-class GammaOutputHead(nn.Module):
+class DurationHead(nn.Module):
     """
-    Output head that predicts parameters (mu, sigma) for Gamma distribution.
-    Used for duration prediction.
+    Output head that predicts duration parameters (mu, sigma) using Gaussian distribution.
+    Used for per-token duration prediction in examination model.
     """
 
     def __init__(self, d_model, min_sigma=0.1):
-        super(GammaOutputHead, self).__init__()
+        super(DurationHead, self).__init__()
         self.min_sigma = min_sigma
 
         self.mu_head = nn.Linear(d_model, 1)

@@ -543,6 +543,7 @@ def preprocess_all_data(data_dir=None, output_dir=None, verbose=True):
 
     # Save preprocessed data
     result = {
+        'version': 2,  # Increment when preprocessing logic changes
         'exchange': all_exchange,
         'examination': all_examination,
         'daily_summaries': all_daily_summaries,
