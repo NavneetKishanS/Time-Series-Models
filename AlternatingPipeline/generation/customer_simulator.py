@@ -4,6 +4,8 @@ Customer Simulator: Simulate a day for each customer (MRI scanner).
 Each raw CSV file represents one customer/scanner. This module uses real
 daily patient sequences from each customer as ground truth, then runs
 the day simulator to generate a synthetic version for comparison.
+
+Uses on-the-fly model inference (no bucket dependency).
 """
 import os
 import pickle
@@ -14,11 +16,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import (
-    BUCKETS_DIR, OUTPUT_DIR, BODY_REGIONS, BODY_REGION_TO_ID
-)
+from config import OUTPUT_DIR, BODY_REGIONS, BODY_REGION_TO_ID
 from generation.day_simulator import DaySimulator
-from validation.metrics import compare_real_vs_predicted, print_comparison_report
 
 
 class CustomerSimulator:
@@ -26,25 +25,25 @@ class CustomerSimulator:
     Simulates days for specific customers using their real patient sequences.
 
     Usage:
-        simulator = CustomerSimulator()
+        simulator = CustomerSimulator(exchange_model, examination_model, device)
         schedule = simulator.simulate_customer_day('141049')
         simulator.simulate_all_customers()
     """
 
-    def __init__(self, buckets_dir=None, customer_schedules=None,
-                 preprocessed_path=None):
+    def __init__(self, exchange_model, examination_model, device=None,
+                 customer_schedules=None, preprocessed_path=None):
         """
         Initialize the customer simulator.
 
         Args:
-            buckets_dir: Directory containing pre-generated buckets
+            exchange_model: Trained SequenceGeneratorModel (exchange config)
+            examination_model: Trained SequenceGeneratorModel (examination config)
+            device: torch device
             customer_schedules: Dict of {customer_id: {date: [patients]}}
-            preprocessed_path: Path to preprocessed_data.pkl (loads customer_schedules from it)
+            preprocessed_path: Path to preprocessed_data.pkl
         """
-        # Load buckets via DaySimulator
-        self.day_simulator = DaySimulator(buckets_dir=buckets_dir or BUCKETS_DIR)
+        self.day_simulator = DaySimulator(exchange_model, examination_model, device)
 
-        # Load customer schedules
         if customer_schedules is not None:
             self.customer_schedules = customer_schedules
         else:
@@ -68,40 +67,18 @@ class CustomerSimulator:
         return schedules
 
     def list_customers(self):
-        """
-        List all available customer IDs.
-
-        Returns:
-            List of customer ID strings (scanner serial numbers)
-        """
+        """List all available customer IDs."""
         return sorted(self.customer_schedules.keys())
 
     def list_days(self, customer_id):
-        """
-        List available days for a customer.
-
-        Args:
-            customer_id: Customer/scanner ID string
-
-        Returns:
-            List of date strings sorted chronologically
-        """
+        """List available days for a customer."""
         if customer_id not in self.customer_schedules:
             print(f"Customer '{customer_id}' not found.")
             return []
         return sorted(self.customer_schedules[customer_id].keys())
 
     def get_real_day(self, customer_id, date=None):
-        """
-        Get a real day's patient sequence for a customer.
-
-        Args:
-            customer_id: Customer/scanner ID string
-            date: Specific date string, or None for a random day
-
-        Returns:
-            Tuple of (date_str, patient_list) or (None, None) if not found
-        """
+        """Get a real day's patient sequence for a customer."""
         if customer_id not in self.customer_schedules:
             print(f"Customer '{customer_id}' not found.")
             return None, None
@@ -117,7 +94,6 @@ class CustomerSimulator:
                 return None, None
             return date, days[date]
 
-        # Pick a random day
         date_str = np.random.choice(list(days.keys()))
         return date_str, days[date_str]
 
@@ -145,7 +121,6 @@ class CustomerSimulator:
             if len(patients) > 10:
                 print(f"    ... and {len(patients) - 10} more")
 
-        # Build ground truth in the format DaySimulator expects
         ground_truth = []
         for p in patients:
             ground_truth.append({
@@ -157,14 +132,10 @@ class CustomerSimulator:
                 'direction': p.get('direction', 'Head First'),
             })
 
-        # Simulate the day
         start_time = datetime.now().replace(
-            hour=p.get('hour_of_day', 8) if patients else 8,
+            hour=patients[0].get('hour_of_day', 8) if patients else 8,
             minute=0, second=0, microsecond=0
         )
-        # Use first patient's hour as start time
-        if patients and 'hour_of_day' in patients[0]:
-            start_time = start_time.replace(hour=patients[0]['hour_of_day'])
 
         schedule = self.day_simulator.simulate_day(ground_truth, start_time=start_time)
 
@@ -228,7 +199,6 @@ class CustomerSimulator:
             print(f"Simulated {len(results)} customers")
             print(f"Outputs saved to: {output_dir}")
 
-            # Print summary table
             print(f"\n{'Customer':<12} {'Date':<12} {'Patients':<10} "
                   f"{'Events':<10} {'Duration':<12}")
             print("-" * 56)
@@ -244,24 +214,8 @@ class CustomerSimulator:
 
 
 if __name__ == "__main__":
-    print("Customer Simulator")
+    print("Customer Simulator (on-the-fly generation)")
     print("=" * 60)
-
-    try:
-        sim = CustomerSimulator()
-    except FileNotFoundError as e:
-        print(f"Error: {e}")
-        print("Run preprocessing first: python run_all.py --steps 1")
-        sys.exit(1)
-
-    customers = sim.list_customers()
-    print(f"\nAvailable customers: {len(customers)}")
-    for cid in customers[:5]:
-        days = sim.list_days(cid)
-        print(f"  {cid}: {len(days)} days")
-
-    if customers:
-        print(f"\nSimulating a day for first customer ({customers[0]})...")
-        result = sim.simulate_customer_day(customers[0])
-        if result and result['schedule']:
-            print(f"\nDone! Generated {len(result['schedule'])} events")
+    print("\nTo use, load trained models and create a CustomerSimulator:")
+    print("  simulator = CustomerSimulator(exchange_model, exam_model, device)")
+    print("  result = simulator.simulate_customer_day(customer_id)")

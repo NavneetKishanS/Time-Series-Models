@@ -4,6 +4,7 @@ Data preprocessing for the Alternating Pipeline.
 Extracts exchange and examination events from raw MRI event log CSVs.
 
 Exchange events: Events that occur during body region transitions (patient setup/breakdown)
+  Now includes phase_type (startup/between/shutdown) and shutdown sequence extraction.
 Examination events: Events that occur during MRI scans (MRI_EXU_95 markers)
 """
 import os
@@ -19,7 +20,7 @@ from config import (
     DATA_DIR, BODY_REGION_TO_ID, SOURCEID_VOCAB,
     START_REGION_ID, END_REGION_ID, COIL_COLUMNS,
     EXCHANGE_CONDITIONING_FEATURES, EXAMINATION_CONDITIONING_FEATURES,
-    TEMPORAL_FEATURES
+    TEMPORAL_FEATURES, PHASE_TYPES
 )
 
 
@@ -71,7 +72,7 @@ def load_raw_csv(filepath):
     # Parse datetime
     df['datetime'] = pd.to_datetime(df['datetime'])
 
-    # Extract temporal features (NEW: enables time-aware modeling)
+    # Extract temporal features (enables time-aware modeling)
     df = extract_temporal_features(df)
 
     # Clean numeric columns - convert errors to NaN then fill with 0
@@ -132,6 +133,54 @@ def detect_patient_changes(df):
     return change_indices
 
 
+def _detect_day_boundaries(df):
+    """
+    Detect day boundaries based on date changes.
+
+    Args:
+        df: DataFrame with 'date' column
+
+    Returns:
+        List of (day_start_idx, day_end_idx) tuples for each day
+    """
+    days = []
+    current_date = None
+    day_start = 0
+
+    for idx, row in df.iterrows():
+        if current_date is None:
+            current_date = row['date']
+            day_start = idx
+        elif row['date'] != current_date:
+            days.append((day_start, idx))
+            current_date = row['date']
+            day_start = idx
+
+    # Add the last day
+    if current_date is not None:
+        days.append((day_start, df.index[-1] + 1))
+
+    return days
+
+
+def _get_conditioning_from_row(row):
+    """Extract conditioning features dict from a DataFrame row."""
+    return {
+        'Age': row.get('Age', 0),
+        'Weight': row.get('Weight', 0),
+        'Height': row.get('Height', 0),
+        'PTAB': row.get('PTAB', 0),
+        'Direction_encoded': row.get('Direction_encoded', 0),
+        'hour_of_day': row.get('hour_of_day', 0),
+        'day_of_week': row.get('day_of_week', 0),
+        'is_morning': row.get('is_morning', 0),
+        'hour_sin': row.get('hour_sin', 0.0),
+        'hour_cos': row.get('hour_cos', 1.0),
+        'dow_sin': row.get('dow_sin', 0.0),
+        'dow_cos': row.get('dow_cos', 1.0),
+    }
+
+
 def extract_exchange_events(df, verbose=False):
     """
     Extract exchange (transition) event sequences from data.
@@ -140,10 +189,9 @@ def extract_exchange_events(df, verbose=False):
     - Patient ID changes (new patient)
     - Body region changes (different examination on same/different patient)
 
-    For each exchange, we extract:
-    - The event sequence during the transition
-    - Conditioning features (from the NEW patient/examination)
-    - Body region from/to
+    Now includes:
+    - phase_type labeling (startup=0, between=1, shutdown=2)
+    - Shutdown sequence extraction (events after last examination)
 
     Args:
         df: DataFrame from load_raw_csv
@@ -156,8 +204,20 @@ def extract_exchange_events(df, verbose=False):
         - 'conditioning': Dict of conditioning features
         - 'body_from': Source body region ID
         - 'body_to': Target body region ID
+        - 'phase_type': 0 (startup), 1 (between), 2 (shutdown)
     """
     exchange_sequences = []
+
+    # Detect day boundaries for shutdown detection and startup labeling
+    day_boundaries = _detect_day_boundaries(df)
+
+    # Build a set of row indices that start each day (for startup detection)
+    day_start_indices = set()
+    for day_start, day_end in day_boundaries:
+        day_start_indices.add(day_start)
+
+    # Find all examination markers for shutdown detection
+    exam_marker_indices = set(df[df['sourceID'] == 'MRI_EXU_95'].index.tolist())
 
     # Find change points
     change_indices = detect_patient_changes(df)
@@ -167,6 +227,16 @@ def extract_exchange_events(df, verbose=False):
 
     # Add start and end boundaries
     boundaries = [0] + change_indices + [len(df)]
+
+    # Track which segments are the first in their respective day
+    # A segment is "first of day" if it contains or starts at a day boundary
+    first_segment_of_day = set()
+    for day_start_idx, _ in day_boundaries:
+        # Find which segment index contains this day start
+        for seg_i in range(len(boundaries) - 1):
+            if boundaries[seg_i] <= day_start_idx < boundaries[seg_i + 1]:
+                first_segment_of_day.add(seg_i)
+                break
 
     for i in range(len(boundaries) - 1):
         start_idx = boundaries[i]
@@ -198,37 +268,25 @@ def extract_exchange_events(df, verbose=False):
         sequence = exchange_segment['sourceID_token'].tolist()
 
         # Convert cumulative timediff to inter-event durations
-        # timediff is cumulative seconds from session start, NOT per-event duration
         timediffs = exchange_segment['timediff'].values.astype(float)
         durations = np.diff(timediffs, prepend=timediffs[0]).tolist()
         durations[0] = 0.0  # first event has no prior reference
 
         # Get conditioning from the target (next) patient/examination
         row = segment.iloc[0]  # First row has the target info
-        conditioning = {
-            # Patient demographics
-            'Age': row.get('Age', 0),
-            'Weight': row.get('Weight', 0),
-            'Height': row.get('Height', 0),
-            'PTAB': row.get('PTAB', 0),
-            'Direction_encoded': row.get('Direction_encoded', 0),
-            # Temporal features (NEW: enables time-aware modeling)
-            'hour_of_day': row.get('hour_of_day', 0),
-            'day_of_week': row.get('day_of_week', 0),
-            'is_morning': row.get('is_morning', 0),
-            'hour_sin': row.get('hour_sin', 0.0),
-            'hour_cos': row.get('hour_cos', 1.0),
-            'dow_sin': row.get('dow_sin', 0.0),
-            'dow_cos': row.get('dow_cos', 1.0),
-        }
+        conditioning = _get_conditioning_from_row(row)
 
         # Body region transition
         body_from = row.get('BodyGroup_from_id', START_REGION_ID)
         body_to = row.get('BodyGroup_to_id', 10)  # UNKNOWN if not specified
 
-        # Handle first segment (START -> first body region)
-        if i == 0:
+        # Determine phase_type
+        if i in first_segment_of_day or body_from == START_REGION_ID:
+            # First segment of a day -> startup
+            phase_type = PHASE_TYPES['startup']
             body_from = START_REGION_ID
+        else:
+            phase_type = PHASE_TYPES['between']
 
         # Store start datetime for temporal splitting
         start_datetime = exchange_segment.iloc[0]['datetime'] if len(exchange_segment) > 0 else row['datetime']
@@ -242,12 +300,76 @@ def extract_exchange_events(df, verbose=False):
             'conditioning': conditioning,
             'body_from': body_from,
             'body_to': body_to,
+            'phase_type': phase_type,
             'total_duration': total_duration,
-            'start_datetime': start_datetime,  # NEW: for temporal train/val split
+            'start_datetime': start_datetime,
+        })
+
+    # Extract shutdown sequences: events after the last examination of each day
+    for day_start, day_end in day_boundaries:
+        day_df = df.iloc[day_start:day_end]
+        if len(day_df) == 0:
+            continue
+
+        # Find last examination marker in this day
+        day_exam_indices = [idx for idx in exam_marker_indices
+                           if day_start <= idx < day_end]
+
+        if not day_exam_indices:
+            continue
+
+        last_exam_idx = max(day_exam_indices)
+
+        # Find the boundary after the last examination
+        # Look for the next change point after the last exam
+        post_exam_changes = [ci for ci in change_indices if ci > last_exam_idx and ci < day_end]
+
+        if post_exam_changes:
+            shutdown_start = post_exam_changes[-1]
+        else:
+            # Events after last exam marker within the day
+            # Find next segment boundary after last exam
+            shutdown_start = last_exam_idx + 1
+
+        if shutdown_start >= day_end:
+            continue
+
+        shutdown_segment = df.iloc[shutdown_start:day_end]
+        # Filter out examination events from shutdown
+        shutdown_segment = shutdown_segment[shutdown_segment['sourceID'] != 'MRI_EXU_95']
+
+        if len(shutdown_segment) < 2:
+            continue
+
+        sequence = shutdown_segment['sourceID_token'].tolist()
+        timediffs = shutdown_segment['timediff'].values.astype(float)
+        durations = np.diff(timediffs, prepend=timediffs[0]).tolist()
+        durations[0] = 0.0
+
+        row = shutdown_segment.iloc[0]
+        conditioning = _get_conditioning_from_row(row)
+        body_from = row.get('BodyGroup_to_id', 10)
+        total_duration = float(timediffs[-1] - timediffs[0]) if len(timediffs) > 1 else 0.0
+
+        exchange_sequences.append({
+            'sequence': sequence,
+            'durations': durations,
+            'conditioning': conditioning,
+            'body_from': body_from,
+            'body_to': END_REGION_ID,
+            'phase_type': PHASE_TYPES['shutdown'],
+            'total_duration': total_duration,
+            'start_datetime': shutdown_segment.iloc[0]['datetime'],
         })
 
     if verbose:
+        phase_counts = {}
+        for seq in exchange_sequences:
+            pt = seq['phase_type']
+            phase_counts[pt] = phase_counts.get(pt, 0) + 1
         print(f"Extracted {len(exchange_sequences)} exchange sequences")
+        print(f"  Phase types: startup={phase_counts.get(0, 0)}, "
+              f"between={phase_counts.get(1, 0)}, shutdown={phase_counts.get(2, 0)}")
 
     return exchange_sequences
 
@@ -258,12 +380,6 @@ def extract_examination_events(df, verbose=False):
 
     Examination events are marked by MRI_EXU_95 (measurement start).
     We extract sequences from MRI_EXU_95 until the next patient/body change.
-
-    For each examination, we extract:
-    - The event sequence during the examination
-    - Conditioning features
-    - Body region being examined
-    - Coil configuration
 
     Args:
         df: DataFrame from load_raw_csv
@@ -290,7 +406,6 @@ def extract_examination_events(df, verbose=False):
 
     for i, exam_start in enumerate(exam_markers):
         # Find the end of this examination
-        # Either: next examination marker, or next patient/body change
         exam_end = len(df)
 
         # Check for next exam marker
@@ -318,25 +433,10 @@ def extract_examination_events(df, verbose=False):
 
         # Get conditioning
         row = segment.iloc[0]
-        conditioning = {
-            # Patient demographics
-            'Age': row.get('Age', 0),
-            'Weight': row.get('Weight', 0),
-            'Height': row.get('Height', 0),
-            'PTAB': row.get('PTAB', 0),
-            'Direction_encoded': row.get('Direction_encoded', 0),
-            # Temporal features (NEW: enables time-aware modeling)
-            'hour_of_day': row.get('hour_of_day', 0),
-            'day_of_week': row.get('day_of_week', 0),
-            'is_morning': row.get('is_morning', 0),
-            'hour_sin': row.get('hour_sin', 0.0),
-            'hour_cos': row.get('hour_cos', 1.0),
-            'dow_sin': row.get('dow_sin', 0.0),
-            'dow_cos': row.get('dow_cos', 1.0),
-        }
+        conditioning = _get_conditioning_from_row(row)
 
         # Body region being examined
-        body_region = row.get('BodyGroup_to_id', 10)  # Use BodyGroup_to as current region
+        body_region = row.get('BodyGroup_to_id', 10)
 
         # Coil configuration
         coil_config = {}
@@ -354,7 +454,7 @@ def extract_examination_events(df, verbose=False):
             'body_region': body_region,
             'coil_config': coil_config,
             'total_duration': total_duration,
-            'start_datetime': row['datetime'],  # NEW: for temporal train/val split
+            'start_datetime': row['datetime'],
         })
 
     if verbose:
@@ -366,9 +466,6 @@ def extract_examination_events(df, verbose=False):
 def aggregate_by_day(df):
     """
     Group events by day and create daily summaries.
-
-    This is useful for understanding daily patterns and for the temporal
-    forecasting model that predicts 1 day based on 2-week history.
 
     Args:
         df: DataFrame from load_raw_csv with temporal features
@@ -414,8 +511,6 @@ def extract_customer_daily_schedules(data_dir=None, verbose=True):
 
     Returns:
         Dict of {customer_id: {date_str: [patient_dicts]}}
-        Each patient_dict has: patient_id, body_region, age, weight, height,
-        direction, hour_of_day, day_of_week
     """
     if data_dir is None:
         data_dir = DATA_DIR
@@ -484,7 +579,7 @@ def preprocess_all_data(data_dir=None, output_dir=None, verbose=True):
 
     Args:
         data_dir: Directory containing raw CSVs (default: config.DATA_DIR)
-        output_dir: Directory to save preprocessed data (default: AlternatingPipeline/data/preprocessed)
+        output_dir: Directory to save preprocessed data
         verbose: Print progress
 
     Returns:
@@ -536,6 +631,14 @@ def preprocess_all_data(data_dir=None, output_dir=None, verbose=True):
         print(f"Total examination sequences: {len(all_examination)}")
         print(f"Total daily summaries: {len(all_daily_summaries)}")
 
+        # Phase type distribution
+        phase_counts = {}
+        for seq in all_exchange:
+            pt = seq.get('phase_type', -1)
+            phase_counts[pt] = phase_counts.get(pt, 0) + 1
+        print(f"Exchange phase types: startup={phase_counts.get(0, 0)}, "
+              f"between={phase_counts.get(1, 0)}, shutdown={phase_counts.get(2, 0)}")
+
     # Extract per-customer daily schedules
     if verbose:
         print(f"\nExtracting per-customer daily schedules...")
@@ -543,7 +646,7 @@ def preprocess_all_data(data_dir=None, output_dir=None, verbose=True):
 
     # Save preprocessed data
     result = {
-        'version': 2,  # Increment when preprocessing logic changes
+        'version': 3,  # v3: added phase_type + shutdown sequences
         'exchange': all_exchange,
         'examination': all_examination,
         'daily_summaries': all_daily_summaries,
@@ -566,7 +669,7 @@ def load_preprocessed_data(path=None):
     Load preprocessed data from pickle file.
 
     Args:
-        path: Path to pickle file (default: AlternatingPipeline/data/preprocessed/preprocessed_data.pkl)
+        path: Path to pickle file
 
     Returns:
         Dict with 'exchange' and 'examination' lists
@@ -601,6 +704,7 @@ if __name__ == "__main__":
             print(f"\nSample exchange event:")
             print(f"  Sequence length: {len(exchange[0]['sequence'])}")
             print(f"  Body: {exchange[0]['body_from']} -> {exchange[0]['body_to']}")
+            print(f"  Phase type: {exchange[0]['phase_type']}")
             print(f"  Conditioning: {exchange[0]['conditioning']}")
 
         if examination:

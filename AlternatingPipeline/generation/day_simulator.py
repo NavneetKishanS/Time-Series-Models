@@ -1,18 +1,18 @@
 """
-Day Simulator: Generate a full day schedule by sampling from pre-generated buckets.
+Day Simulator: Generate a full day schedule using on-the-fly model inference.
 
-From the meeting transcript:
-"To generate a day of data for a given ground truth patient sequence,
-you just go through the transitions: start to brain, brain to knee, knee to head...
-And for any of these transitions, take either the examination sample or exchange sample
-depending on whether there is currently an exchange phase or an examination."
+No bucket dependency. Both exchange and examination models generate sequences
+directly during simulation.
 
-This implements the sequential alternating approach:
-Exchange -> Examination -> Exchange -> Examination -> ... -> Exchange (final)
+Flow for each patient:
+  1. EXCHANGE: model.generate(cond, {body_from, body_to}, phase_type)
+  2. EXAMINATION: model.generate(cond, {body_region})
+Final: EXCHANGE shutdown (phase_type=2, body_to=END)
 """
 import os
-import pandas as pd
+import torch
 import numpy as np
+import pandas as pd
 from datetime import datetime, timedelta
 import sys
 
@@ -20,36 +20,81 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import (
     START_REGION_ID, END_REGION_ID, BODY_REGIONS, ID_TO_SOURCEID,
-    BODY_REGION_TO_ID, OUTPUT_DIR,
+    BODY_REGION_TO_ID, OUTPUT_DIR, GENERATION_CONFIG, PHASE_TYPES,
     START_TOKEN_ID, END_TOKEN_ID, PAD_TOKEN_ID
 )
-from generation.bucket_generator import BucketGenerator
+
+
+def build_conditioning_tensor(patient_info, current_time, day_start):
+    """
+    Build a 10-dim conditioning tensor from patient info and current simulation time.
+
+    Args:
+        patient_info: Dict with patient features (age, weight, height, direction, etc.)
+        current_time: Current time offset in seconds from day_start
+        day_start: datetime of day start
+
+    Returns:
+        torch.Tensor of shape [10]
+    """
+    # Calculate current datetime
+    current_dt = day_start + timedelta(seconds=current_time)
+    hour = current_dt.hour + current_dt.minute / 60.0
+    dow = current_dt.weekday()
+
+    hour_sin = np.sin(2 * np.pi * hour / 24)
+    hour_cos = np.cos(2 * np.pi * hour / 24)
+    dow_sin = np.sin(2 * np.pi * dow / 7)
+    dow_cos = np.cos(2 * np.pi * dow / 7)
+    is_morning = 1.0 if hour < 12 else 0.0
+
+    direction = patient_info.get('direction', 'Head First')
+    if isinstance(direction, str):
+        direction_encoded = 0.0 if direction == 'Head First' else 1.0
+    else:
+        direction_encoded = float(direction)
+
+    return torch.tensor([
+        float(patient_info.get('age', 50)),
+        float(patient_info.get('weight', 75)),
+        float(patient_info.get('height', 1.75)),
+        float(patient_info.get('ptab', patient_info.get('PTAB', 0))),
+        direction_encoded,
+        hour_sin,
+        hour_cos,
+        dow_sin,
+        dow_cos,
+        is_morning,
+    ], dtype=torch.float32)
 
 
 class DaySimulator:
     """
-    Simulates a complete day by sampling from pre-generated buckets.
+    Simulates a complete day using on-the-fly model inference.
 
     Usage:
-        simulator = DaySimulator(bucket_generator)
+        simulator = DaySimulator(exchange_model, examination_model, device)
         schedule = simulator.simulate_day(ground_truth_patients)
-        simulator.save_schedule(schedule, 'generated_day.csv')
     """
 
-    def __init__(self, bucket_generator=None, buckets_dir=None):
+    def __init__(self, exchange_model, examination_model, device=None):
         """
-        Initialize the day simulator.
-
         Args:
-            bucket_generator: BucketGenerator instance with loaded buckets
-            buckets_dir: Directory to load buckets from (if bucket_generator is None)
+            exchange_model: Trained SequenceGeneratorModel (exchange config)
+            examination_model: Trained SequenceGeneratorModel (examination config)
+            device: torch device
         """
-        if bucket_generator is not None:
-            self.buckets = bucket_generator
-        else:
-            self.buckets = BucketGenerator()
-            if buckets_dir is not None:
-                self.buckets.load_buckets(buckets_dir)
+        if device is None:
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = device
+
+        self.exchange_model = exchange_model.to(device)
+        self.exchange_model.eval()
+
+        self.examination_model = examination_model.to(device)
+        self.examination_model.eval()
+
+        self.gen_config = GENERATION_CONFIG
 
     def simulate_day(self, ground_truth_patients, start_time=None):
         """
@@ -57,8 +102,7 @@ class DaySimulator:
 
         Args:
             ground_truth_patients: List of patient dicts with keys:
-                - 'patient_id': Unique patient identifier
-                - 'body_region': Body region to be examined (str or int)
+                - 'patient_id', 'body_region' (str or int)
                 - Optional: 'age', 'weight', 'height', 'direction'
             start_time: Start datetime (default: today 07:00)
 
@@ -70,12 +114,11 @@ class DaySimulator:
             start_time = today
 
         schedule = []
-        current_time = 0.0  # Time in seconds from start
+        current_time = 0.0
         previous_body_region = START_REGION_ID
         event_id = 0
 
         for patient_idx, patient in enumerate(ground_truth_patients):
-            # Parse patient info
             patient_id = patient.get('patient_id', f'PAT{patient_idx:03d}')
 
             # Get body region ID
@@ -86,103 +129,96 @@ class DaySimulator:
                 body_region_id = body_region
 
             # === EXCHANGE PHASE ===
-            # Transition from previous body region to current patient's body region
-            exchange_sample = self.buckets.get_exchange_sample(previous_body_region, body_region_id)
+            phase_type = PHASE_TYPES['startup'] if patient_idx == 0 else PHASE_TYPES['between']
 
-            if exchange_sample is not None:
-                # Add exchange events to schedule
-                exchange_events = self._create_exchange_events(
-                    exchange_sample,
-                    event_id,
-                    current_time,
-                    start_time,
-                    patient_id,
-                    patient_idx,
-                    previous_body_region,
-                    body_region_id
+            cond = build_conditioning_tensor(patient, current_time, start_time).to(self.device)
+
+            with torch.no_grad():
+                exchange_tokens, exchange_durations = self.exchange_model.generate(
+                    cond,
+                    {'body_from': previous_body_region, 'body_to': body_region_id},
+                    phase_type=phase_type,
+                    max_length=self.gen_config['max_length'],
+                    temperature=self.gen_config['temperature'],
+                    top_k=self.gen_config['top_k'],
+                    top_p=self.gen_config['top_p'],
                 )
-                schedule.extend(exchange_events)
-                event_id += len(exchange_events)
-                # Use sum of per-token durations (from real data), fall back to total duration
-                exchange_duration = sum(exchange_sample.get('durations', []))
-                if exchange_duration == 0:
-                    exchange_duration = exchange_sample.get('duration', 60)
-                current_time += exchange_duration
+
+            exchange_events = self._create_exchange_events(
+                exchange_tokens[0], exchange_durations[0],
+                event_id, current_time, start_time,
+                patient_id, patient_idx,
+                previous_body_region, body_region_id
+            )
+            schedule.extend(exchange_events)
+            event_id += len(exchange_events)
+            current_time += exchange_durations[0].sum().item()
 
             # === EXAMINATION PHASE ===
-            # Generate examination events for this body region
-            examination_sample = self.buckets.get_examination_sample(body_region_id)
+            cond = build_conditioning_tensor(patient, current_time, start_time).to(self.device)
 
-            if examination_sample is not None:
-                # Add examination events to schedule
-                exam_events = self._create_examination_events(
-                    examination_sample,
-                    event_id,
-                    current_time,
-                    start_time,
-                    patient_id,
-                    patient_idx,
-                    body_region_id
+            with torch.no_grad():
+                exam_tokens, exam_durations = self.examination_model.generate(
+                    cond,
+                    {'body_region': body_region_id},
+                    max_length=self.gen_config['max_length'],
+                    temperature=self.gen_config['temperature'],
+                    top_k=self.gen_config['top_k'],
+                    top_p=self.gen_config['top_p'],
                 )
-                schedule.extend(exam_events)
-                event_id += len(exam_events)
-                # Use sum of per-token durations, fall back to total_duration
-                exam_duration = sum(examination_sample.get('durations', []))
-                if exam_duration == 0:
-                    exam_duration = examination_sample.get('total_duration', 300)
-                current_time += exam_duration
 
-            # Update previous body region for next exchange
+            exam_events = self._create_examination_events(
+                exam_tokens[0], exam_durations[0],
+                event_id, current_time, start_time,
+                patient_id, patient_idx, body_region_id
+            )
+            schedule.extend(exam_events)
+            event_id += len(exam_events)
+            current_time += exam_durations[0].sum().item()
+
             previous_body_region = body_region_id
 
-        # === FINAL EXCHANGE ===
-        # Transition from last patient's body region to END
-        final_exchange = self.buckets.get_exchange_sample(previous_body_region, END_REGION_ID)
+        # === FINAL EXCHANGE (shutdown) ===
+        if ground_truth_patients:
+            last_patient = ground_truth_patients[-1]
+            cond = build_conditioning_tensor(last_patient, current_time, start_time).to(self.device)
 
-        if final_exchange is not None:
-            final_events = self._create_exchange_events(
-                final_exchange,
-                event_id,
-                current_time,
-                start_time,
-                None,  # No patient for final exchange
-                len(ground_truth_patients),
-                previous_body_region,
-                END_REGION_ID
+            with torch.no_grad():
+                shutdown_tokens, shutdown_durations = self.exchange_model.generate(
+                    cond,
+                    {'body_from': previous_body_region, 'body_to': END_REGION_ID},
+                    phase_type=PHASE_TYPES['shutdown'],
+                    max_length=self.gen_config['max_length'],
+                    temperature=self.gen_config['temperature'],
+                    top_k=self.gen_config['top_k'],
+                    top_p=self.gen_config['top_p'],
+                )
+
+            shutdown_events = self._create_exchange_events(
+                shutdown_tokens[0], shutdown_durations[0],
+                event_id, current_time, start_time,
+                None, len(ground_truth_patients),
+                previous_body_region, END_REGION_ID
             )
-            schedule.extend(final_events)
+            schedule.extend(shutdown_events)
 
         return schedule
 
-    def _create_exchange_events(self, sample, start_event_id, start_time_offset,
-                                 day_start, patient_id, session_id,
-                                 body_from, body_to):
+    def _create_exchange_events(self, tokens, durations, start_event_id,
+                                start_time_offset, day_start,
+                                patient_id, session_id, body_from, body_to):
         """Create event dicts for an exchange phase."""
         events = []
         current_offset = start_time_offset
 
-        # Use sample sequence if available, otherwise create placeholder
-        sequence = sample.get('sequence', [])
-        durations = sample.get('durations', [])
+        tokens = tokens.cpu().tolist()
+        durations = durations.cpu().tolist()
 
-        # If no per-token durations, distribute total duration evenly
-        if not durations or len(durations) == 0:
-            total = sample.get('duration', 60)
-            seq_len = max(len(sequence), 1)
-            durations = [total / seq_len] * seq_len
-
-        # Ensure durations match sequence length
-        if len(durations) < len(sequence):
-            durations = durations + [5.0] * (len(sequence) - len(durations))
-
-        for i, token in enumerate(sequence):
-            # Skip START/END/PAD sourceID tokens in output
-            # Use sourceID token IDs (not body region IDs) to avoid collision:
-            # END_REGION_ID=12 collides with MRI_MSR_104 (sourceID token 12)
+        for i, token in enumerate(tokens):
             if token in [START_TOKEN_ID, END_TOKEN_ID, PAD_TOKEN_ID]:
                 continue
 
-            source_id = ID_TO_SOURCEID.get(token, 'UNK') if isinstance(token, int) else token
+            source_id = ID_TO_SOURCEID.get(token, 'UNK')
             duration = durations[i] if i < len(durations) else 5.0
 
             event = {
@@ -198,7 +234,7 @@ class DaySimulator:
                 'body_from': self._region_id_to_name(body_from),
                 'body_to': self._region_id_to_name(body_to),
                 'duration': duration,
-                'cumulative_time': current_offset + duration
+                'cumulative_time': current_offset + duration,
             }
 
             events.append(event)
@@ -206,29 +242,21 @@ class DaySimulator:
 
         return events
 
-    def _create_examination_events(self, sample, start_event_id, start_time_offset,
-                                    day_start, patient_id, session_id, body_region):
+    def _create_examination_events(self, tokens, durations, start_event_id,
+                                    start_time_offset, day_start,
+                                    patient_id, session_id, body_region):
         """Create event dicts for an examination phase."""
         events = []
         current_offset = start_time_offset
 
-        sequence = sample.get('sequence', [])
-        sequence_sourceids = sample.get('sequence_sourceids', [])
-        durations = sample.get('durations', [])
+        tokens = tokens.cpu().tolist()
+        durations = durations.cpu().tolist()
 
-        # Ensure we have source IDs
-        if not sequence_sourceids and sequence:
-            sequence_sourceids = [ID_TO_SOURCEID.get(t, 'UNK') for t in sequence]
-
-        # Ensure durations match
-        if len(durations) < len(sequence_sourceids):
-            durations = durations + [30.0] * (len(sequence_sourceids) - len(durations))
-
-        for i, source_id in enumerate(sequence_sourceids):
-            # Skip padding and special tokens
-            if source_id in ['PAD', 'START', 'END', 'UNK']:
+        for i, token in enumerate(tokens):
+            if token in [START_TOKEN_ID, END_TOKEN_ID, PAD_TOKEN_ID]:
                 continue
 
+            source_id = ID_TO_SOURCEID.get(token, 'UNK')
             duration = durations[i] if i < len(durations) else 30.0
 
             event = {
@@ -244,7 +272,7 @@ class DaySimulator:
                 'body_from': None,
                 'body_to': None,
                 'duration': duration,
-                'cumulative_time': current_offset + duration
+                'cumulative_time': current_offset + duration,
             }
 
             events.append(event)
@@ -264,14 +292,7 @@ class DaySimulator:
             return f'UNKNOWN_{region_id}'
 
     def save_schedule(self, schedule, filename=None, output_dir=None):
-        """
-        Save generated schedule to CSV.
-
-        Args:
-            schedule: List of event dicts from simulate_day()
-            filename: Output filename (default: generated_schedule_TIMESTAMP.csv)
-            output_dir: Output directory (default: OUTPUT_DIR)
-        """
+        """Save generated schedule to CSV."""
         if output_dir is None:
             output_dir = OUTPUT_DIR
 
@@ -291,51 +312,29 @@ class DaySimulator:
         return filepath
 
     def create_sample_ground_truth(self, num_patients=10):
-        """
-        Create a sample ground truth patient sequence for testing.
-
-        Args:
-            num_patients: Number of patients to generate
-
-        Returns:
-            List of patient dicts
-        """
+        """Create a sample ground truth patient sequence for testing."""
         patients = []
 
         for i in range(num_patients):
-            # Random body region
-            body_region = np.random.choice(BODY_REGIONS[:6])  # Most common regions
-
+            body_region = np.random.choice(BODY_REGIONS[:6])
             patient = {
                 'patient_id': f'PAT{i:03d}',
                 'body_region': body_region,
                 'age': np.random.randint(20, 80),
                 'weight': np.random.uniform(50, 120),
                 'height': np.random.uniform(1.5, 2.0),
-                'direction': np.random.choice(['Head First', 'Feet First'])
+                'direction': np.random.choice(['Head First', 'Feet First']),
             }
-
             patients.append(patient)
 
         return patients
 
 
 if __name__ == "__main__":
-    print("Testing Day Simulator...")
+    print("Testing Day Simulator (on-the-fly generation)...")
     print("=" * 60)
-
-    # Initialize simulator (without loaded buckets for testing)
-    simulator = DaySimulator()
-
-    # Create sample ground truth
-    ground_truth = simulator.create_sample_ground_truth(num_patients=5)
-
-    print("\nSample ground truth patients:")
-    for i, patient in enumerate(ground_truth):
-        print(f"  {i+1}. {patient['patient_id']}: {patient['body_region']} "
-              f"(age={patient['age']}, weight={patient['weight']:.1f}kg)")
-
-    print("\nTo simulate a day, load pre-generated buckets first:")
+    print("\nTo simulate a day, load trained models first:")
     print("  1. Train Exchange and Examination models")
-    print("  2. Generate buckets with BucketGenerator")
-    print("  3. Call simulator.simulate_day(ground_truth)")
+    print("  2. Load both models")
+    print("  3. simulator = DaySimulator(exchange_model, exam_model, device)")
+    print("  4. schedule = simulator.simulate_day(ground_truth)")

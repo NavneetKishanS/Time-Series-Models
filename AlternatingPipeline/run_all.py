@@ -2,12 +2,13 @@
 Unified Pipeline Runner for AlternatingPipeline.
 
 Executes the full pipeline in sequence:
-1. Preprocess raw data -> extract exchange/examination sequences
-2. Train Exchange model -> body region transitions
-3. Train Examination model -> MRI event sequences
-4. Generate buckets -> pre-compute 1000 samples per transition
-5. Run day simulation -> generate a sample day schedule
-6. Generate visualizations -> evaluate results with charts
+1. Preprocess raw data -> extract exchange/examination sequences (with phase_type)
+2. Train Exchange model -> unified Transformer for exchange sequences
+3. Train Examination model -> unified Transformer for examination sequences
+4. Run day simulation -> on-the-fly generation (no buckets)
+5. Generate visualizations -> evaluate results with charts
+6. Per-customer day simulation (generates individual customer visualizations)
+7. General visualizations (aggregates customer data)
 
 Usage:
     python run_all.py                    # Run all steps
@@ -25,9 +26,52 @@ from datetime import datetime
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config import (
-    DATA_DIR, MODEL_SAVE_DIR, BUCKETS_DIR, OUTPUT_DIR,
+    DATA_DIR, MODEL_SAVE_DIR, OUTPUT_DIR,
     EXCLUDED_BODY_REGIONS, DURATION_MULTIPLIER
 )
+
+
+def _load_models(device):
+    """
+    Load trained exchange and examination models.
+
+    Args:
+        device: torch device
+
+    Returns:
+        (exchange_model, examination_model)
+    """
+    import torch
+    from models.exchange_model import create_exchange_model
+    from models.examination_model import create_examination_model
+
+    # Load Exchange Model
+    print("Loading Exchange Model...")
+    exchange_model = create_exchange_model()
+    exchange_path = os.path.join(MODEL_SAVE_DIR, 'exchange', 'exchange_model_best.pt')
+    if not os.path.exists(exchange_path):
+        exchange_path = os.path.join(MODEL_SAVE_DIR, 'exchange', 'exchange_model_final.pt')
+
+    if os.path.exists(exchange_path):
+        exchange_model.load_state_dict(torch.load(exchange_path, map_location=device, weights_only=True))
+        print(f"  Loaded: {exchange_path}")
+    else:
+        raise FileNotFoundError(f"Exchange model not found at {exchange_path}")
+
+    # Load Examination Model
+    print("Loading Examination Model...")
+    examination_model = create_examination_model()
+    examination_path = os.path.join(MODEL_SAVE_DIR, 'examination', 'examination_model_best.pt')
+    if not os.path.exists(examination_path):
+        examination_path = os.path.join(MODEL_SAVE_DIR, 'examination', 'examination_model_final.pt')
+
+    if os.path.exists(examination_path):
+        examination_model.load_state_dict(torch.load(examination_path, map_location=device, weights_only=True))
+        print(f"  Loaded: {examination_path}")
+    else:
+        raise FileNotFoundError(f"Examination model not found at {examination_path}")
+
+    return exchange_model, examination_model
 
 
 def step_1_preprocess():
@@ -60,7 +104,7 @@ def step_2_train_exchange():
 
     print(f"\nExchange model training complete:")
     print(f"  Best validation loss: {min(history['val_loss']):.4f}")
-    print(f"  Best validation accuracy: {max(history['val_acc']):.4f}")
+    print(f"  Best validation perplexity: {min(history['val_perplexity']):.2f}")
 
     return model, history
 
@@ -82,93 +126,26 @@ def step_3_train_examination():
     return model, history
 
 
-def step_4_generate_buckets():
-    """Step 4: Generate all buckets using trained models."""
+def step_4_simulate_day():
+    """Step 4: Run a day simulation with on-the-fly generation."""
     print("\n" + "=" * 70)
-    print("STEP 4: GENERATING BUCKETS")
+    print("STEP 4: RUNNING DAY SIMULATION (ON-THE-FLY)")
     print("=" * 70)
 
     import torch
-    from models.exchange_model import create_exchange_model
-    from models.examination_model import create_examination_model
-    from generation.bucket_generator import BucketGenerator
-    from config import BUCKET_SIZE
+    import numpy as np
+    from generation.day_simulator import DaySimulator
+    from config import VALID_BODY_REGIONS
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
-    print(f"Duration multiplier: {DURATION_MULTIPLIER}x")
 
-    # Load Exchange Model
-    print("\nLoading Exchange Model...")
-    exchange_model = create_exchange_model()
-    exchange_path = os.path.join(MODEL_SAVE_DIR, 'exchange', 'exchange_model_best.pt')
-    if not os.path.exists(exchange_path):
-        exchange_path = os.path.join(MODEL_SAVE_DIR, 'exchange', 'exchange_model_final.pt')
+    exchange_model, examination_model = _load_models(device)
+    simulator = DaySimulator(exchange_model, examination_model, device)
 
-    if os.path.exists(exchange_path):
-        exchange_model.load_state_dict(torch.load(exchange_path, map_location=device, weights_only=True))
-        print(f"  Loaded: {exchange_path}")
-    else:
-        raise FileNotFoundError(f"Exchange model not found at {exchange_path}")
-
-    # Load Examination Model
-    print("\nLoading Examination Model...")
-    examination_model = create_examination_model()
-    examination_path = os.path.join(MODEL_SAVE_DIR, 'examination', 'examination_model_best.pt')
-    if not os.path.exists(examination_path):
-        examination_path = os.path.join(MODEL_SAVE_DIR, 'examination', 'examination_model_final.pt')
-
-    if os.path.exists(examination_path):
-        examination_model.load_state_dict(torch.load(examination_path, map_location=device, weights_only=True))
-        print(f"  Loaded: {examination_path}")
-    else:
-        raise FileNotFoundError(f"Examination model not found at {examination_path}")
-
-    # Generate buckets
-    print(f"\nGenerating buckets ({BUCKET_SIZE} samples each)...")
-    if EXCLUDED_BODY_REGIONS:
-        print(f"  Excluding body regions: {EXCLUDED_BODY_REGIONS}")
-
-    generator = BucketGenerator(
-        exchange_model=exchange_model,
-        examination_model=examination_model,
-        device=device
-    )
-
-    generator.generate_all_buckets(num_samples=BUCKET_SIZE)
-    generator.save_buckets()
-
-    print(f"\nBucket generation complete:")
-    print(f"  Exchange buckets: {len(generator.exchange_buckets)}")
-    print(f"  Examination buckets: {len(generator.examination_buckets)}")
-    print(f"  Saved to: {BUCKETS_DIR}")
-
-    return generator
-
-
-def step_5_simulate_day():
-    """Step 5: Run a day simulation."""
-    print("\n" + "=" * 70)
-    print("STEP 5: RUNNING DAY SIMULATION")
-    print("=" * 70)
-
-    from generation.day_simulator import DaySimulator
-    from config import VALID_BODY_REGIONS
-    import numpy as np
-
-    # Load buckets
-    print("Loading pre-generated buckets...")
-    simulator = DaySimulator(buckets_dir=BUCKETS_DIR)
-
-    if len(simulator.buckets.exchange_buckets) == 0:
-        raise RuntimeError("No buckets loaded. Run step 4 first.")
-
-    print(f"  Loaded {len(simulator.buckets.exchange_buckets)} exchange buckets")
-    print(f"  Loaded {len(simulator.buckets.examination_buckets)} examination buckets")
-
-    # Create ground truth patient sequence (using only valid body regions)
+    # Create ground truth patient sequence
     print("\nCreating ground truth patient sequence...")
-    np.random.seed(42)  # For reproducibility
+    np.random.seed(42)
 
     num_patients = 10
     ground_truth = []
@@ -176,7 +153,7 @@ def step_5_simulate_day():
         body_region = np.random.choice(VALID_BODY_REGIONS)
         ground_truth.append({
             'patient_id': f'PAT{i+1:03d}',
-            'body_region': body_region
+            'body_region': body_region,
         })
 
     print(f"  Generated {num_patients} patients:")
@@ -207,7 +184,6 @@ def step_5_simulate_day():
     return schedule
 
 
-
 def _generate_visualizations_for_dataframe(schedule_df, output_viz_dir, title_prefix=""):
     """
     Helper function to generate a set of standard visualizations for a given schedule DataFrame.
@@ -218,16 +194,12 @@ def _generate_visualizations_for_dataframe(schedule_df, output_viz_dir, title_pr
     from plotly.subplots import make_subplots
     from config import DURATION_MULTIPLIER
 
-    # Ensure output directory exists
     os.makedirs(output_viz_dir, exist_ok=True)
 
-    # Filter events
     exchange_events = schedule_df[schedule_df['event_type'] == 'exchange']
     exam_events = schedule_df[schedule_df['event_type'] == 'examination']
 
-    # =========================================================================
-    # Visualization 1: Duration Distribution by Event Type
-    # =========================================================================
+    # Duration Distribution
     fig1 = make_subplots(
         rows=1, cols=2,
         subplot_titles=("Exchange Durations", "Examination Durations")
@@ -235,23 +207,15 @@ def _generate_visualizations_for_dataframe(schedule_df, output_viz_dir, title_pr
 
     if len(exchange_events) > 0:
         fig1.add_trace(
-            go.Histogram(
-                x=exchange_events['duration'],
-                name='Exchange',
-                marker_color='#636EFA',
-                nbinsx=30
-            ),
+            go.Histogram(x=exchange_events['duration'], name='Exchange',
+                        marker_color='#636EFA', nbinsx=30),
             row=1, col=1
         )
 
     if len(exam_events) > 0:
         fig1.add_trace(
-            go.Histogram(
-                x=exam_events['duration'],
-                name='Examination',
-                marker_color='#EF553B',
-                nbinsx=30
-            ),
+            go.Histogram(x=exam_events['duration'], name='Examination',
+                        marker_color='#EF553B', nbinsx=30),
             row=1, col=2
         )
 
@@ -268,9 +232,7 @@ def _generate_visualizations_for_dataframe(schedule_df, output_viz_dir, title_pr
     fig1.write_html(duration_path)
     print(f"  Saved: {duration_path}")
 
-    # =========================================================================
-    # Visualization 2: Body Region Distribution
-    # =========================================================================
+    # Body Region Distribution
     if 'body_region' in schedule_df.columns:
         body_counts = exam_events['body_region'].value_counts().reset_index()
         body_counts.columns = ['body_region', 'count']
@@ -286,38 +248,23 @@ def _generate_visualizations_for_dataframe(schedule_df, output_viz_dir, title_pr
         )
 
         fig2.add_trace(
-            go.Bar(
-                x=body_stats['body_region'],
-                y=body_stats['count'],
-                name='Count',
-                marker_color='#00CC96'
-            ),
+            go.Bar(x=body_stats['body_region'], y=body_stats['count'],
+                   name='Count', marker_color='#00CC96'),
             row=1, col=1
         )
 
         fig2.add_trace(
-            go.Bar(
-                x=body_stats['body_region'],
-                y=body_stats['avg_duration'],
-                name='Avg Duration',
-                marker_color='#AB63FA'
-            ),
+            go.Bar(x=body_stats['body_region'], y=body_stats['avg_duration'],
+                   name='Avg Duration', marker_color='#AB63FA'),
             row=1, col=2
         )
 
         fig2.update_layout(title_text=f"{title_prefix}Body Region Analysis", showlegend=False)
-        fig2.update_xaxes(title_text="Body Region", row=1, col=1)
-        fig2.update_xaxes(title_text="Body Region", row=1, col=2)
-        fig2.update_yaxes(title_text="Event Count", row=1, col=1)
-        fig2.update_yaxes(title_text="Avg Duration (seconds)", row=1, col=2)
-
         body_region_path = os.path.join(output_viz_dir, 'body_region_analysis.html')
         fig2.write_html(body_region_path)
         print(f"  Saved: {body_region_path}")
 
-    # =========================================================================
-    # Visualization 3: Timeline / Gantt Chart
-    # =========================================================================
+    # Timeline / Gantt Chart
     if 'patient_id' in schedule_df.columns and 'timestamp' in schedule_df.columns:
         patient_summary = schedule_df.groupby('patient_id').agg({
             'timestamp': 'min',
@@ -326,25 +273,19 @@ def _generate_visualizations_for_dataframe(schedule_df, output_viz_dir, title_pr
         }).reset_index()
         patient_summary.columns = ['patient_id', 'start_time', 'end_time', 'num_events']
         patient_summary['duration'] = patient_summary['end_time'] - patient_summary['start_time']
-
         patient_summary['start_min'] = patient_summary['start_time'] / 60
         patient_summary['duration_min'] = patient_summary['duration'] / 60
 
         fig3 = go.Figure()
-
         colors = ['#636EFA', '#EF553B', '#00CC96', '#AB63FA', '#FFA15A',
                   '#19D3F3', '#FF6692', '#B6E880', '#FF97FF', '#FECB52']
 
         for i, row in patient_summary.iterrows():
             fig3.add_trace(go.Bar(
-                x=[row['duration_min']],
-                y=[row['patient_id']],
-                base=[row['start_min']],
-                orientation='h',
-                name=row['patient_id'],
-                marker_color=colors[i % len(colors)],
-                text=f"{row['duration_min']:.1f} min",
-                textposition='inside',
+                x=[row['duration_min']], y=[row['patient_id']],
+                base=[row['start_min']], orientation='h',
+                name=row['patient_id'], marker_color=colors[i % len(colors)],
+                text=f"{row['duration_min']:.1f} min", textposition='inside',
                 hovertemplate=(
                     f"<b>{row['patient_id']}</b><br>"
                     f"Start: {row['start_min']:.1f} min<br>"
@@ -357,17 +298,14 @@ def _generate_visualizations_for_dataframe(schedule_df, output_viz_dir, title_pr
             title_text=f"{title_prefix}Patient Timeline (Gantt Chart)",
             xaxis_title="Time (minutes from start)",
             yaxis_title="Patient ID",
-            showlegend=False,
-            barmode='stack'
+            showlegend=False, barmode='stack'
         )
 
         timeline_path = os.path.join(output_viz_dir, 'patient_timeline.html')
         fig3.write_html(timeline_path)
         print(f"  Saved: {timeline_path}")
 
-    # =========================================================================
-    # Visualization 4: Summary Statistics Dashboard
-    # =========================================================================
+    # Summary Statistics
     total_duration_sec = schedule_df['duration'].sum()
     total_duration_min = total_duration_sec / 60
     total_duration_hr = total_duration_sec / 3600
@@ -382,80 +320,42 @@ def _generate_visualizations_for_dataframe(schedule_df, output_viz_dir, title_pr
 
     fig4 = make_subplots(
         rows=2, cols=2,
-        specs=[
-            [{"type": "indicator"}, {"type": "indicator"}],
-            [{"type": "indicator"}, {"type": "indicator"}]
-        ],
+        specs=[[{"type": "indicator"}, {"type": "indicator"}],
+               [{"type": "indicator"}, {"type": "indicator"}]],
         subplot_titles=("Total Duration", "Patients", "Avg Exchange", "Avg per Patient")
     )
-
-    fig4.add_trace(
-        go.Indicator(
-            mode="number",
-            value=total_duration_hr,
-            number={"suffix": " hours", "valueformat": ".1f"},
-            title={"text": "Total Duration"}
-        ),
-        row=1, col=1
-    )
-
-    fig4.add_trace(
-        go.Indicator(
-            mode="number",
-            value=num_patients,
-            title={"text": "Patients"}
-        ),
-        row=1, col=2
-    )
-
-    fig4.add_trace(
-        go.Indicator(
-            mode="number",
-            value=avg_exchange_duration,
-            number={"suffix": " sec", "valueformat": ".0f"},
-            title={"text": "Avg Exchange Duration"}
-        ),
-        row=2, col=1
-    )
-
-    fig4.add_trace(
-        go.Indicator(
-            mode="number",
-            value=avg_per_patient,
-            number={"suffix": " min", "valueformat": ".1f"},
-            title={"text": "Avg per Patient"}
-        ),
-        row=2, col=2
-    )
+    fig4.add_trace(go.Indicator(mode="number", value=total_duration_hr,
+                                number={"suffix": " hours", "valueformat": ".1f"},
+                                title={"text": "Total Duration"}), row=1, col=1)
+    fig4.add_trace(go.Indicator(mode="number", value=num_patients,
+                                title={"text": "Patients"}), row=1, col=2)
+    fig4.add_trace(go.Indicator(mode="number", value=avg_exchange_duration,
+                                number={"suffix": " sec", "valueformat": ".0f"},
+                                title={"text": "Avg Exchange Duration"}), row=2, col=1)
+    fig4.add_trace(go.Indicator(mode="number", value=avg_per_patient,
+                                number={"suffix": " min", "valueformat": ".1f"},
+                                title={"text": "Avg per Patient"}), row=2, col=2)
 
     fig4.update_layout(title_text=f"{title_prefix}Simulation Summary")
-
     summary_path = os.path.join(output_viz_dir, 'summary_dashboard.html')
     fig4.write_html(summary_path)
     print(f"  Saved: {summary_path}")
 
-    # =========================================================================
-    # Visualization 5: Event Type Breakdown Pie Chart
-    # =========================================================================
+    # Event Breakdown Pie
     event_counts = schedule_df['event_type'].value_counts()
-
     fig5 = go.Figure(data=[go.Pie(
-        labels=event_counts.index,
-        values=event_counts.values,
-        hole=0.4,
-        marker_colors=['#636EFA', '#EF553B']
+        labels=event_counts.index, values=event_counts.values,
+        hole=0.4, marker_colors=['#636EFA', '#EF553B']
     )])
-
     fig5.update_layout(
         title_text=f"{title_prefix}Event Type Breakdown",
         annotations=[dict(text='Events', x=0.5, y=0.5, font_size=20, showarrow=False)]
     )
-
     event_breakdown_path = os.path.join(output_viz_dir, 'event_breakdown.html')
     fig5.write_html(event_breakdown_path)
     print(f"  Saved: {event_breakdown_path}")
 
-    # Print Summary to Console
+    # Console Summary
     print("\n" + "-" * 50)
     print(f"{title_prefix} SIMULATION SUMMARY")
     print("-" * 50)
@@ -467,7 +367,6 @@ def _generate_visualizations_for_dataframe(schedule_df, output_viz_dir, title_pr
     print(f"  Avg Examination:     {avg_exam_duration:.0f} seconds ({avg_exam_duration/60:.1f} min)")
     print(f"  Avg per Patient:     {avg_per_patient:.1f} minutes")
     print("-" * 50)
-    print(f"\nVisualizations saved to: {output_viz_dir}")
 
     summary_metrics = {
         'total_duration_hr': total_duration_hr,
@@ -485,10 +384,10 @@ def _generate_visualizations_for_dataframe(schedule_df, output_viz_dir, title_pr
     return output_viz_dir, summary_metrics
 
 
-def step_6_visualize(schedule=None):
-    """Step 6: Generate visualizations for evaluation."""
+def step_5_visualize(schedule=None):
+    """Step 5: Generate visualizations for evaluation."""
     print("\n" + "=" * 70)
-    print("STEP 6: GENERATING VISUALIZATIONS")
+    print("STEP 5: GENERATING VISUALIZATIONS")
     print("=" * 70)
 
     import pandas as pd
@@ -502,12 +401,11 @@ def step_6_visualize(schedule=None):
         print("Install with: pip install plotly")
         return None
 
-    # Load the most recent schedule if not provided
     if schedule is None:
         print("Loading most recent simulated schedule...")
         schedule_files = glob(os.path.join(OUTPUT_DIR, 'simulated_day_*.csv'))
         if not schedule_files:
-            print("  No schedule files found. Run step 5 first.")
+            print("  No schedule files found. Run step 4 first.")
             return None
         latest_file = max(schedule_files, key=os.path.getmtime)
         print(f"  Loading: {latest_file}")
@@ -522,29 +420,35 @@ def step_6_visualize(schedule=None):
     return _generate_visualizations_for_dataframe(schedule_df, viz_dir, title_prefix="Overall Simulation: ")
 
 
-
-
 def _visualize_customer_simulation(customer_id, schedule_df, output_dir):
     """Generates visualizations for a single customer's simulated data."""
     print(f"\n  Generating visualizations for customer {customer_id}...")
     customer_viz_dir = os.path.join(output_dir, customer_id, 'visualizations')
     os.makedirs(customer_viz_dir, exist_ok=True)
-    _, summary_metrics = _generate_visualizations_for_dataframe(schedule_df, customer_viz_dir, title_prefix=f"Customer {customer_id}: ")
+    _, summary_metrics = _generate_visualizations_for_dataframe(
+        schedule_df, customer_viz_dir, title_prefix=f"Customer {customer_id}: "
+    )
     return customer_viz_dir, summary_metrics
 
 
-def step_7_customer_simulation(customer_id=None):
-    """Step 7: Run per-customer day simulation."""
+def step_6_customer_simulation(customer_id=None):
+    """Step 6: Run per-customer day simulation."""
     print("\n" + "=" * 70)
-    print("STEP 7: PER-CUSTOMER DAY SIMULATION")
+    print("STEP 6: PER-CUSTOMER DAY SIMULATION")
     print("=" * 70)
 
+    import torch
+    import pandas as pd
     from generation.customer_simulator import CustomerSimulator
     from config import CUSTOMER_OUTPUT_DIR
-    import pandas as pd # Import pandas here
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    print("Loading models...")
+    exchange_model, examination_model = _load_models(device)
 
     print("Initializing customer simulator...")
-    simulator = CustomerSimulator()
+    simulator = CustomerSimulator(exchange_model, examination_model, device)
 
     customers = simulator.list_customers()
     print(f"Available customers: {len(customers)}")
@@ -553,7 +457,7 @@ def step_7_customer_simulation(customer_id=None):
         print("No customer schedules found. Run step 1 (preprocessing) first.")
         return None
 
-    all_customer_summaries = [] # Initialize list to store summaries
+    all_customer_summaries = []
 
     if customer_id and customer_id != 'all':
         # Simulate specific customer
@@ -568,35 +472,33 @@ def step_7_customer_simulation(customer_id=None):
             csv_path = os.path.join(customer_dir, f"simulated_{result['date']}.csv")
             df.to_csv(csv_path, index=False)
             print(f"\nSaved to: {csv_path}")
-            _, summary_metrics = _visualize_customer_simulation(customer_id, df, CUSTOMER_OUTPUT_DIR) # Call visualization
+            _, summary_metrics = _visualize_customer_simulation(customer_id, df, CUSTOMER_OUTPUT_DIR)
             all_customer_summaries.append({'customer_id': customer_id, **summary_metrics})
-        return {customer_id: result, 'all_customer_summaries': all_customer_summaries} # Changed 'summary' to 'all_customer_summaries' for consistency
+        return {customer_id: result, 'all_customer_summaries': all_customer_summaries}
     else:
         # Simulate all customers
         results = simulator.simulate_all_customers(
             verbose=True,
             output_dir=CUSTOMER_OUTPUT_DIR
         )
-        # Generate visualizations for all simulated customers
         if results:
             print("\nGenerating visualizations for all customers...")
             for cust_id, cust_data in results.items():
                 if cust_data and cust_data['schedule']:
                     df = pd.DataFrame(cust_data['schedule'])
-                    _, summary_metrics = _visualize_customer_simulation(cust_id, df, CUSTOMER_OUTPUT_DIR) # Call visualization
+                    _, summary_metrics = _visualize_customer_simulation(cust_id, df, CUSTOMER_OUTPUT_DIR)
                     all_customer_summaries.append({'customer_id': cust_id, **summary_metrics})
         return {'results': results, 'all_customer_summaries': all_customer_summaries}
 
 
-def step_8_general_visualizations(customer_summaries):
-    """Step 8: Generate general visualizations across all customers."""
+def step_7_general_visualizations(customer_summaries):
+    """Step 7: Generate general visualizations across all customers."""
     print("\n" + "=" * 70)
-    print("STEP 8: GENERATING GENERAL VISUALIZATIONS")
+    print("STEP 7: GENERATING GENERAL VISUALIZATIONS")
     print("=" * 70)
 
     import pandas as pd
     import plotly.express as px
-    import plotly.graph_objects as go
     from config import OUTPUT_DIR
 
     if not customer_summaries:
@@ -610,58 +512,38 @@ def step_8_general_visualizations(customer_summaries):
 
     print(f"Generating general visualizations in: {general_viz_dir}")
 
-    # =========================================================================
-    # Visualization 1: Total Duration per Customer (Bar Chart)
-    # =========================================================================
+    # Total Duration per Customer
     fig1 = px.bar(
         df_summaries.sort_values('total_duration_hr', ascending=False),
-        x='customer_id',
-        y='total_duration_hr',
+        x='customer_id', y='total_duration_hr',
         title='Total Simulation Duration per Customer',
         labels={'total_duration_hr': 'Total Duration (hours)', 'customer_id': 'Customer ID'},
         hover_data=['num_patients', 'num_exchanges', 'num_exams', 'avg_per_patient_min']
     )
     fig1.update_xaxes(tickangle=45)
     fig1.write_html(os.path.join(general_viz_dir, 'total_duration_per_customer.html'))
-    print(f"  Saved: {os.path.join(general_viz_dir, 'total_duration_per_customer.html')}")
 
-    # =========================================================================
-    # Visualization 2: Average Duration per Patient per Customer (Bar Chart)
-    # =========================================================================
+    # Average Duration per Patient
     fig2 = px.bar(
         df_summaries.sort_values('avg_per_patient_min', ascending=False),
-        x='customer_id',
-        y='avg_per_patient_min',
+        x='customer_id', y='avg_per_patient_min',
         title='Average Duration per Patient per Customer',
         labels={'avg_per_patient_min': 'Avg Duration per Patient (minutes)', 'customer_id': 'Customer ID'},
-        hover_data=['total_duration_hr', 'num_patients', 'num_exchanges', 'num_exams']
     )
     fig2.update_xaxes(tickangle=45)
     fig2.write_html(os.path.join(general_viz_dir, 'avg_duration_per_patient_per_customer.html'))
-    print(f"  Saved: {os.path.join(general_viz_dir, 'avg_duration_per_patient_per_customer.html')}")
 
-    # =========================================================================
-    # Visualization 3: Total Duration vs Number of Patients (Scatter Plot)
-    # =========================================================================
+    # Scatter: Duration vs Patients
     fig3 = px.scatter(
-        df_summaries,
-        x='num_patients',
-        y='total_duration_hr',
-        color='avg_per_patient_min', # Color points by average time per patient
-        size='num_exchanges',       # Size points by number of exchanges
+        df_summaries, x='num_patients', y='total_duration_hr',
+        color='avg_per_patient_min', size='num_exchanges',
         hover_name='customer_id',
-        title='Total Duration vs Number of Patients (Colored by Avg Time per Patient)',
+        title='Total Duration vs Number of Patients',
         labels={'num_patients': 'Number of Patients', 'total_duration_hr': 'Total Duration (hours)'},
-        log_x=True, # Log scale might be useful if patient numbers vary widely
-        log_y=True, # Log scale for duration too
     )
     fig3.write_html(os.path.join(general_viz_dir, 'duration_vs_patients_scatter.html'))
-    print(f"  Saved: {os.path.join(general_viz_dir, 'duration_vs_patients_scatter.html')}")
 
-    # =========================================================================
-    # Visualization 4: Distribution of Key Metrics (Histograms/Box Plots)
-    # =========================================================================
-    print("Generating distribution plots...")
+    # Distribution histograms
     metrics_to_plot = [
         ('total_duration_hr', 'Total Duration (Hours)'),
         ('num_patients', 'Number of Patients'),
@@ -673,15 +555,14 @@ def step_8_general_visualizations(customer_summaries):
     for metric_col, metric_title in metrics_to_plot:
         if metric_col in df_summaries.columns and not df_summaries[metric_col].isnull().all():
             fig = px.histogram(
-                df_summaries,
-                x=metric_col,
+                df_summaries, x=metric_col,
                 title=f'Distribution of {metric_title} Across Customers',
-                nbins=20,
-                hover_name='customer_id',
+                nbins=20, hover_name='customer_id',
                 labels={metric_col: metric_title}
             )
             fig.write_html(os.path.join(general_viz_dir, f'distribution_{metric_col}.html'))
-            print(f"  Saved: {os.path.join(general_viz_dir, f'distribution_{metric_col}.html')}")
+
+    print(f"Saved general visualizations to: {general_viz_dir}")
 
 
 def main():
@@ -690,24 +571,22 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Steps:
-  1. Preprocess raw data
-  2. Train Exchange model
-  3. Train Examination model
-  4. Generate buckets
-  5. Run day simulation
-  6. Generate visualizations (overall)
-  7. Per-customer day simulation (generates individual customer visualizations)
-  8. Generate general visualizations (aggregates customer data)
+  1. Preprocess raw data (with phase_type + shutdown extraction)
+  2. Train Exchange model (unified Transformer)
+  3. Train Examination model (unified Transformer)
+  4. Run day simulation (on-the-fly, no buckets)
+  5. Generate visualizations (overall)
+  6. Per-customer day simulation
+  7. Generate general visualizations
 
 Examples:
-  python run_all.py                    # Run steps 1-6
+  python run_all.py                    # Run steps 1-5
   python run_all.py --skip-preprocess  # Skip step 1
   python run_all.py --skip-training    # Skip steps 2 and 3
-  python run_all.py --steps 4,5,6      # Only run steps 4, 5, and 6
-  python run_all.py --steps 7          # Only run customer simulation
-  python run_all.py --steps 7,8        # Run customer simulation and general visualizations
-  python run_all.py --customer 141049  # Simulate a specific customer (runs step 7 for one customer)
-  python run_all.py --customer all     # Simulate all customers (runs step 7 for all, then step 8)
+  python run_all.py --steps 4,5        # Only run steps 4 and 5
+  python run_all.py --steps 6          # Only run customer simulation
+  python run_all.py --customer all     # Simulate all customers (steps 6+7)
+  python run_all.py --customer 141049  # Simulate specific customer
         """
     )
 
@@ -726,46 +605,43 @@ Examples:
 
     # Determine which steps to run
     if args.customer == 'all':
-        # If simulating all customers, imply step 7 and 8
         if args.steps:
             steps_to_run = set(int(s.strip()) for s in args.steps.split(','))
+            steps_to_run.add(6)
             steps_to_run.add(7)
-            steps_to_run.add(8)
         else:
-            steps_to_run = {7, 8}
+            steps_to_run = {6, 7}
     elif args.customer:
-        # If simulating a specific customer, imply step 7 only
         if args.steps:
             steps_to_run = set(int(s.strip()) for s in args.steps.split(','))
-            steps_to_run.add(7)
+            steps_to_run.add(6)
         else:
-            steps_to_run = {7}
+            steps_to_run = {6}
     elif args.steps:
         steps_to_run = set(int(s.strip()) for s in args.steps.split(','))
     else:
-        # Default run: 1-6
-        steps_to_run = {1, 2, 3, 4, 5, 6}
+        # Default run: 1-5
+        steps_to_run = {1, 2, 3, 4, 5}
         if args.skip_preprocess:
             steps_to_run.discard(1)
         if args.skip_training:
             steps_to_run.discard(2)
             steps_to_run.discard(3)
         if args.no_viz:
-            steps_to_run.discard(6)
+            steps_to_run.discard(5)
 
     print("=" * 70)
     print("ALTERNATING PIPELINE - FULL EXECUTION")
     print("=" * 70)
     print(f"Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"Steps to run: {sorted(steps_to_run)}")
-    print(f"Duration multiplier: {DURATION_MULTIPLIER}x (corrects for time compression)")
     if EXCLUDED_BODY_REGIONS:
         print(f"Excluded body regions: {EXCLUDED_BODY_REGIONS}")
 
     start_time = time.time()
 
-    schedule = None  # Will hold the schedule for overall simulation visualization
-    customer_sim_results = None # Will hold results from step 7
+    schedule = None
+    customer_sim_results = None
 
     try:
         if 1 in steps_to_run:
@@ -778,25 +654,20 @@ Examples:
             step_3_train_examination()
 
         if 4 in steps_to_run:
-            step_4_generate_buckets()
+            schedule = step_4_simulate_day()
 
         if 5 in steps_to_run:
-            schedule = step_5_simulate_day()
+            if not args.no_viz:
+                step_5_visualize(schedule)
 
         if 6 in steps_to_run:
-            # Ensure not to run step 6 if --no-viz was passed
-            if not args.no_viz:
-                step_6_visualize(schedule)
+            customer_sim_results = step_6_customer_simulation(customer_id=args.customer)
 
-        if 7 in steps_to_run:
-            customer_sim_results = step_7_customer_simulation(customer_id=args.customer)
-
-        if 8 in steps_to_run and customer_sim_results and 'all_customer_summaries' in customer_sim_results:
-            step_8_general_visualizations(customer_sim_results['all_customer_summaries'])
-        elif 8 in steps_to_run and args.customer == 'all' and (not customer_sim_results or 'all_customer_summaries' not in customer_sim_results):
-            print("\nWarning: Step 8 (general visualizations) was requested, but no customer summaries were available. "
-                  "Ensure step 7 runs for 'all' customers before step 8, or provide valid customer simulations.")
-
+        if 7 in steps_to_run and customer_sim_results and 'all_customer_summaries' in customer_sim_results:
+            step_7_general_visualizations(customer_sim_results['all_customer_summaries'])
+        elif 7 in steps_to_run and args.customer == 'all' and (not customer_sim_results or 'all_customer_summaries' not in customer_sim_results):
+            print("\nWarning: Step 7 requested, but no customer summaries available. "
+                  "Ensure step 6 runs for 'all' customers before step 7.")
 
         elapsed = time.time() - start_time
         print("\n" + "=" * 70)
