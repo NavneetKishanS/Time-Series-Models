@@ -2,19 +2,24 @@
 Unified Pipeline Runner for AlternatingPipeline.
 
 Executes the full pipeline in sequence:
-1. Preprocess raw data -> extract exchange/examination sequences (with phase_type)
-2. Train Exchange model -> unified Transformer for exchange sequences
-3. Train Examination model -> unified Transformer for examination sequences
-4. Run day simulation -> on-the-fly generation (no buckets)
-5. Generate visualizations -> evaluate results with charts
-6. Per-customer day simulation (generates individual customer visualizations)
-7. General visualizations (aggregates customer data)
+1.  Preprocess raw data -> extract exchange/examination sequences (with phase_type)
+1b. Extract orchestration training data from customer schedules
+2.  Train Exchange model -> unified Transformer for exchange sequences
+3.  Train Examination model -> unified Transformer for examination sequences
+2c. Train Orchestration model -> day-level body region sequencing
+4.  Run day simulation -> on-the-fly generation (no buckets, ground truth patients)
+4b. Run day simulation using orchestration model (fully autonomous, no ground truth)
+5.  Generate visualizations -> evaluate results with charts
+6.  Per-customer day simulation (generates individual customer visualizations)
+7.  General visualizations (aggregates customer data)
 
 Usage:
-    python run_all.py                    # Run all steps
-    python run_all.py --skip-preprocess  # Skip preprocessing (use existing data)
-    python run_all.py --skip-training    # Skip training (use existing models)
-    python run_all.py --steps 1,2,3      # Run specific steps only
+    python run_all.py                       # Run all steps (1-5)
+    python run_all.py --skip-preprocess     # Skip preprocessing (use existing data)
+    python run_all.py --skip-training       # Skip training (use existing models)
+    python run_all.py --steps 1,2,3         # Run specific steps only
+    python run_all.py --steps 1b,2c         # Orchestration preprocessing + training
+    python run_all.py --steps 4b            # Orchestrated day simulation (autonomous)
 """
 import os
 import sys
@@ -74,6 +79,45 @@ def _load_models(device):
     return exchange_model, examination_model
 
 
+def _load_orchestration_model(device):
+    """
+    Load trained orchestration model and scanner mapping.
+
+    Args:
+        device: torch device
+
+    Returns:
+        (orchestration_model, scanner_to_idx)
+    """
+    import torch
+    import pickle
+    from models.orchestration_model import create_orchestration_model
+
+    print("Loading Orchestration Model...")
+    model = create_orchestration_model()
+    orch_path = os.path.join(MODEL_SAVE_DIR, 'orchestration', 'orchestration_model_best.pt')
+    if not os.path.exists(orch_path):
+        orch_path = os.path.join(MODEL_SAVE_DIR, 'orchestration', 'orchestration_model_final.pt')
+
+    if os.path.exists(orch_path):
+        model.load_state_dict(torch.load(orch_path, map_location=device, weights_only=True))
+        print(f"  Loaded: {orch_path}")
+    else:
+        raise FileNotFoundError(f"Orchestration model not found at {orch_path}")
+
+    # Load scanner mapping
+    scanner_path = os.path.join(MODEL_SAVE_DIR, 'orchestration', 'scanner_to_idx.pkl')
+    if os.path.exists(scanner_path):
+        with open(scanner_path, 'rb') as f:
+            scanner_to_idx = pickle.load(f)
+        print(f"  Loaded scanner mapping: {len(scanner_to_idx)} scanners")
+    else:
+        scanner_to_idx = {}
+        print("  Warning: scanner_to_idx.pkl not found, using empty mapping")
+
+    return model, scanner_to_idx
+
+
 def step_1_preprocess():
     """Step 1: Preprocess raw CSV data."""
     print("\n" + "=" * 70)
@@ -90,6 +134,51 @@ def step_1_preprocess():
     print(f"  Examination sequences: {len(result['examination'])}")
 
     return result
+
+
+def step_1b_orchestration_preprocessing():
+    """Step 1b: Extract orchestration training data from customer schedules."""
+    print("\n" + "=" * 70)
+    print("STEP 1b: ORCHESTRATION PREPROCESSING")
+    print("=" * 70)
+
+    import pickle
+    import numpy as np
+    from data.preprocessing import load_preprocessed_data
+    from data.orchestration_preprocessing import (
+        extract_orchestration_samples, build_demographic_distributions
+    )
+    from config import BREAK_TOKEN_ID, NUM_BODY_REGIONS, BODY_REGIONS
+
+    preprocessed = load_preprocessed_data()
+
+    samples, scanner_to_idx = extract_orchestration_samples(preprocessed)
+    demographics = build_demographic_distributions(preprocessed)
+
+    print(f"\nOrchestration samples: {len(samples)}")
+    print(f"Scanners: {len(scanner_to_idx)}")
+
+    if samples:
+        seq_lengths = [len(s['tokens']) for s in samples]
+        patient_counts = [s['num_patients'] for s in samples]
+        break_counts = [s['tokens'].count(BREAK_TOKEN_ID) for s in samples]
+
+        print(f"Sequence lengths: min={min(seq_lengths)}, max={max(seq_lengths)}, "
+              f"avg={np.mean(seq_lengths):.1f}")
+        print(f"Patients per day: min={min(patient_counts)}, max={max(patient_counts)}, "
+              f"avg={np.mean(patient_counts):.1f}")
+        print(f"BREAKs per day: avg={np.mean(break_counts):.1f}")
+
+    print(f"Demographic distributions: {len(demographics)} body regions")
+
+    # Save demographics for use during orchestrated simulation
+    demo_path = os.path.join(MODEL_SAVE_DIR, 'orchestration')
+    os.makedirs(demo_path, exist_ok=True)
+    with open(os.path.join(demo_path, 'demographic_distributions.pkl'), 'wb') as f:
+        pickle.dump(demographics, f)
+    print(f"Saved demographic distributions to {demo_path}")
+
+    return samples, scanner_to_idx, demographics
 
 
 def step_2_train_exchange():
@@ -120,6 +209,23 @@ def step_3_train_examination():
     model, history = train_examination_model(verbose=True)
 
     print(f"\nExamination model training complete:")
+    print(f"  Best validation loss: {min(history['val_loss']):.4f}")
+    print(f"  Best validation perplexity: {min(history['val_perplexity']):.2f}")
+
+    return model, history
+
+
+def step_2c_train_orchestration():
+    """Step 2c: Train the Orchestration Model."""
+    print("\n" + "=" * 70)
+    print("STEP 2c: TRAINING ORCHESTRATION MODEL")
+    print("=" * 70)
+
+    from training.train_orchestration import train_orchestration_model
+
+    model, history = train_orchestration_model(verbose=True)
+
+    print(f"\nOrchestration model training complete:")
     print(f"  Best validation loss: {min(history['val_loss']):.4f}")
     print(f"  Best validation perplexity: {min(history['val_perplexity']):.2f}")
 
@@ -179,6 +285,136 @@ def step_4_simulate_day():
         print(f"  Total events: {len(schedule)}")
         print(f"  Total duration: {total_hours:.2f} hours ({total_duration_secs:.0f} seconds)")
         print(f"  Average per patient: {total_duration_secs / num_patients / 60:.1f} minutes")
+        print(f"  Output saved to: {output_path}")
+
+    return schedule
+
+
+def step_4b_simulate_day_orchestrated():
+    """Step 4b: Run a day simulation using the orchestration model (fully autonomous)."""
+    print("\n" + "=" * 70)
+    print("STEP 4b: ORCHESTRATED DAY SIMULATION (NO GROUND TRUTH)")
+    print("=" * 70)
+
+    import torch
+    import pickle
+    import numpy as np
+    from generation.day_simulator import DaySimulator
+    from config import (
+        ORCHESTRATION_MODEL_CONFIG, ORCH_BASE_CONDITIONING_DIM,
+        BODY_REGIONS, NUM_BODY_REGIONS, BREAK_TOKEN_ID,
+        START_REGION_ID, END_REGION_ID,
+    )
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Using device: {device}")
+
+    # Load all three models
+    exchange_model, examination_model = _load_models(device)
+    orchestration_model, scanner_to_idx = _load_orchestration_model(device)
+    orchestration_model = orchestration_model.to(device)
+    orchestration_model.eval()
+
+    # Load demographic distributions
+    demo_path = os.path.join(MODEL_SAVE_DIR, 'orchestration', 'demographic_distributions.pkl')
+    if os.path.exists(demo_path):
+        with open(demo_path, 'rb') as f:
+            demographics = pickle.load(f)
+        print(f"Loaded demographic distributions")
+    else:
+        print("Warning: demographic distributions not found, using defaults")
+        demographics = {}
+
+    simulator = DaySimulator(exchange_model, examination_model, device)
+
+    # Build conditioning for orchestration model
+    # Use a sample scanner and current day features
+    np.random.seed(42)
+
+    if scanner_to_idx:
+        sample_scanner_id = list(scanner_to_idx.keys())[0]
+        scanner_idx = scanner_to_idx[sample_scanner_id]
+    else:
+        sample_scanner_id = 'unknown'
+        scanner_idx = 0
+
+    print(f"\nGenerating day schedule for scanner: {sample_scanner_id}")
+
+    # Build orchestration conditioning (17-dim)
+    now = datetime.now()
+    dow = now.weekday()
+    month = now.month
+
+    dow_sin = np.sin(2 * np.pi * dow / 7)
+    dow_cos = np.cos(2 * np.pi * dow / 7)
+    month_sin = np.sin(2 * np.pi * (month - 1) / 12)
+    month_cos = np.cos(2 * np.pi * (month - 1) / 12)
+    is_weekend = 1.0 if dow >= 5 else 0.0
+    avg_patients = 10.0  # reasonable default
+
+    # Uniform region distribution as default
+    region_dist = np.ones(NUM_BODY_REGIONS) / NUM_BODY_REGIONS
+
+    conditioning = torch.tensor([
+        dow_sin, dow_cos, month_sin, month_cos, is_weekend,
+        avg_patients, *region_dist
+    ], dtype=torch.float32).to(device)
+
+    scanner_id_tensor = torch.tensor([scanner_idx], dtype=torch.long).to(device)
+
+    # Generate body region sequence with orchestration model
+    print("Generating patient sequence with orchestration model...")
+    with torch.no_grad():
+        orch_tokens = orchestration_model.generate(
+            conditioning, scanner_id_tensor,
+            max_length=ORCHESTRATION_MODEL_CONFIG['max_seq_len'],
+            temperature=1.0, top_k=10, top_p=0.9,
+        )
+
+    token_list = orch_tokens[0].cpu().tolist()
+    print(f"  Raw orchestration tokens: {token_list}")
+
+    # Decode for display
+    readable = []
+    for t in token_list:
+        if t == START_REGION_ID:
+            readable.append('START')
+        elif t == END_REGION_ID:
+            readable.append('END')
+        elif t == BREAK_TOKEN_ID:
+            readable.append('BREAK')
+        elif 0 <= t < NUM_BODY_REGIONS:
+            readable.append(BODY_REGIONS[t])
+        else:
+            readable.append(f'?{t}')
+    print(f"  Decoded: {' -> '.join(readable)}")
+
+    num_patients = sum(1 for t in token_list if 0 <= t < NUM_BODY_REGIONS)
+    num_breaks = sum(1 for t in token_list if t == BREAK_TOKEN_ID)
+    print(f"  Patients: {num_patients}, Breaks: {num_breaks}")
+
+    # Simulate the day from orchestration output
+    print(f"\nSimulating day from orchestration output...")
+    start_time = datetime.now().replace(hour=8, minute=0, second=0, microsecond=0)
+    schedule = simulator.simulate_day_from_orchestration(
+        token_list, demographics, start_time=start_time
+    )
+
+    # Save the schedule
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    filename = f'orchestrated_day_{timestamp}.csv'
+    output_path = simulator.save_schedule(schedule, filename)
+
+    # Print statistics
+    if schedule:
+        total_duration_secs = schedule[-1]['cumulative_time'] - schedule[0]['timestamp']
+        total_hours = total_duration_secs / 3600
+
+        print(f"\nOrchestrated Simulation Results:")
+        print(f"  Total events: {len(schedule)}")
+        print(f"  Total duration: {total_hours:.2f} hours ({total_duration_secs:.0f} seconds)")
+        if num_patients > 0:
+            print(f"  Average per patient: {total_duration_secs / num_patients / 60:.1f} minutes")
         print(f"  Output saved to: {output_path}")
 
     return schedule
@@ -571,22 +807,27 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Steps:
-  1. Preprocess raw data (with phase_type + shutdown extraction)
-  2. Train Exchange model (unified Transformer)
-  3. Train Examination model (unified Transformer)
-  4. Run day simulation (on-the-fly, no buckets)
-  5. Generate visualizations (overall)
-  6. Per-customer day simulation
-  7. Generate general visualizations
+  1.  Preprocess raw data (with phase_type + shutdown extraction)
+  1b. Extract orchestration training data
+  2.  Train Exchange model (unified Transformer)
+  3.  Train Examination model (unified Transformer)
+  2c. Train Orchestration model (day-level scheduling)
+  4.  Run day simulation (on-the-fly, ground truth patients)
+  4b. Run day simulation using orchestration model (fully autonomous)
+  5.  Generate visualizations (overall)
+  6.  Per-customer day simulation
+  7.  Generate general visualizations
 
 Examples:
-  python run_all.py                    # Run steps 1-5
-  python run_all.py --skip-preprocess  # Skip step 1
-  python run_all.py --skip-training    # Skip steps 2 and 3
-  python run_all.py --steps 4,5        # Only run steps 4 and 5
-  python run_all.py --steps 6          # Only run customer simulation
-  python run_all.py --customer all     # Simulate all customers (steps 6+7)
-  python run_all.py --customer 141049  # Simulate specific customer
+  python run_all.py                       # Run steps 1-5
+  python run_all.py --skip-preprocess     # Skip step 1
+  python run_all.py --skip-training       # Skip steps 2 and 3
+  python run_all.py --steps 4,5           # Only run steps 4 and 5
+  python run_all.py --steps 1b,2c         # Orchestration preprocessing + training
+  python run_all.py --steps 4b            # Orchestrated day simulation
+  python run_all.py --steps 6             # Only run customer simulation
+  python run_all.py --customer all        # Simulate all customers (steps 6+7)
+  python run_all.py --customer 141049     # Simulate specific customer
         """
     )
 
@@ -597,38 +838,46 @@ Examples:
     parser.add_argument('--no-viz', action='store_true',
                         help='Skip visualization generation')
     parser.add_argument('--steps', type=str, default=None,
-                        help='Comma-separated list of steps to run (e.g., "1,2,3")')
+                        help='Comma-separated list of steps to run (e.g., "1,2,3" or "1b,2c,4b")')
     parser.add_argument('--customer', type=str, default=None,
                         help='Customer ID to simulate (or "all" for all customers)')
 
     args = parser.parse_args()
 
+    # Valid step identifiers (strings to support 1b, 2c, 4b)
+    VALID_STEPS = {'1', '1b', '2', '3', '2c', '4', '4b', '5', '6', '7'}
+
     # Determine which steps to run
     if args.customer == 'all':
         if args.steps:
-            steps_to_run = set(int(s.strip()) for s in args.steps.split(','))
-            steps_to_run.add(6)
-            steps_to_run.add(7)
+            steps_to_run = set(s.strip() for s in args.steps.split(','))
+            steps_to_run.add('6')
+            steps_to_run.add('7')
         else:
-            steps_to_run = {6, 7}
+            steps_to_run = {'6', '7'}
     elif args.customer:
         if args.steps:
-            steps_to_run = set(int(s.strip()) for s in args.steps.split(','))
-            steps_to_run.add(6)
+            steps_to_run = set(s.strip() for s in args.steps.split(','))
+            steps_to_run.add('6')
         else:
-            steps_to_run = {6}
+            steps_to_run = {'6'}
     elif args.steps:
-        steps_to_run = set(int(s.strip()) for s in args.steps.split(','))
+        steps_to_run = set(s.strip() for s in args.steps.split(','))
     else:
-        # Default run: 1-5
-        steps_to_run = {1, 2, 3, 4, 5}
+        # Default run: full pipeline including orchestration
+        steps_to_run = {'1', '1b', '2', '3', '2c', '4', '4b', '5'}
         if args.skip_preprocess:
-            steps_to_run.discard(1)
+            steps_to_run.discard('1')
         if args.skip_training:
-            steps_to_run.discard(2)
-            steps_to_run.discard(3)
+            steps_to_run.discard('2')
+            steps_to_run.discard('3')
         if args.no_viz:
-            steps_to_run.discard(5)
+            steps_to_run.discard('5')
+
+    # Validate steps
+    invalid = steps_to_run - VALID_STEPS
+    if invalid:
+        print(f"Warning: Unknown steps: {invalid}. Valid steps: {sorted(VALID_STEPS)}")
 
     print("=" * 70)
     print("ALTERNATING PIPELINE - FULL EXECUTION")
@@ -644,28 +893,37 @@ Examples:
     customer_sim_results = None
 
     try:
-        if 1 in steps_to_run:
+        if '1' in steps_to_run:
             step_1_preprocess()
 
-        if 2 in steps_to_run:
+        if '1b' in steps_to_run:
+            step_1b_orchestration_preprocessing()
+
+        if '2' in steps_to_run:
             step_2_train_exchange()
 
-        if 3 in steps_to_run:
+        if '3' in steps_to_run:
             step_3_train_examination()
 
-        if 4 in steps_to_run:
+        if '2c' in steps_to_run:
+            step_2c_train_orchestration()
+
+        if '4' in steps_to_run:
             schedule = step_4_simulate_day()
 
-        if 5 in steps_to_run:
+        if '4b' in steps_to_run:
+            step_4b_simulate_day_orchestrated()
+
+        if '5' in steps_to_run:
             if not args.no_viz:
                 step_5_visualize(schedule)
 
-        if 6 in steps_to_run:
+        if '6' in steps_to_run:
             customer_sim_results = step_6_customer_simulation(customer_id=args.customer)
 
-        if 7 in steps_to_run and customer_sim_results and 'all_customer_summaries' in customer_sim_results:
+        if '7' in steps_to_run and customer_sim_results and 'all_customer_summaries' in customer_sim_results:
             step_7_general_visualizations(customer_sim_results['all_customer_summaries'])
-        elif 7 in steps_to_run and args.customer == 'all' and (not customer_sim_results or 'all_customer_summaries' not in customer_sim_results):
+        elif '7' in steps_to_run and args.customer == 'all' and (not customer_sim_results or 'all_customer_summaries' not in customer_sim_results):
             print("\nWarning: Step 7 requested, but no customer summaries available. "
                   "Ensure step 6 runs for 'all' customers before step 7.")
 

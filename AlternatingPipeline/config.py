@@ -243,6 +243,54 @@ EXAMINATION_TRAINING_CONFIG = {
 }
 
 # ============================================================================
+# ORCHESTRATION MODEL VOCABULARY
+# ============================================================================
+
+BREAK_TOKEN_ID = 13
+ORCH_PAD_TOKEN_ID = 14
+ORCH_VOCAB_SIZE = 15           # 11 regions + START + END + BREAK + PAD
+ORCH_MAX_SEQ_LEN = 40          # ~12 patients + breaks + START/END
+
+# Orchestration conditioning (17-dim):
+# dow_sin, dow_cos, month_sin, month_cos, is_weekend,
+# avg_patients_per_day, body_region_distribution[11]
+ORCH_BASE_CONDITIONING_DIM = 17
+NUM_SCANNERS = 40
+ORCH_SCANNER_EMB_DIM = 32
+
+# ============================================================================
+# ORCHESTRATION MODEL CONFIGURATION
+# ============================================================================
+
+ORCHESTRATION_MODEL_CONFIG = {
+    'vocab_size': ORCH_VOCAB_SIZE,
+    'd_model': 128,
+    'nhead': 4,
+    'num_encoder_layers': 3,
+    'num_decoder_layers': 4,
+    'dim_feedforward': 512,
+    'dropout': 0.1,
+    'max_seq_len': ORCH_MAX_SEQ_LEN,
+    'base_conditioning_dim': ORCH_BASE_CONDITIONING_DIM,
+    'num_scanners': NUM_SCANNERS,
+    'scanner_emb_dim': ORCH_SCANNER_EMB_DIM,
+    'pad_token_id': ORCH_PAD_TOKEN_ID,
+    'start_token_id': START_REGION_ID,
+    'end_token_id': END_REGION_ID,
+    'break_token_id': BREAK_TOKEN_ID,
+}
+
+ORCHESTRATION_TRAINING_CONFIG = {
+    'batch_size': 64,
+    'epochs': 100,
+    'learning_rate': 0.0003,
+    'warmup_steps': 2000,
+    'label_smoothing': 0.1,
+    'gradient_clip': 1.0,
+    'early_stopping_patience': 20,
+}
+
+# ============================================================================
 # GENERATION CONFIGURATION
 # ============================================================================
 

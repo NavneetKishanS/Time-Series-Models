@@ -21,7 +21,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import (
     START_REGION_ID, END_REGION_ID, BODY_REGIONS, ID_TO_SOURCEID,
     BODY_REGION_TO_ID, OUTPUT_DIR, GENERATION_CONFIG, PHASE_TYPES,
-    START_TOKEN_ID, END_TOKEN_ID, PAD_TOKEN_ID
+    START_TOKEN_ID, END_TOKEN_ID, PAD_TOKEN_ID,
+    BREAK_TOKEN_ID, NUM_BODY_REGIONS,
 )
 
 
@@ -203,6 +204,218 @@ class DaySimulator:
             schedule.extend(shutdown_events)
 
         return schedule
+
+    def simulate_day_from_orchestration(self, orchestration_tokens,
+                                         demographic_distributions,
+                                         start_time=None):
+        """
+        Generate a full day schedule from orchestration model output.
+
+        No ground truth needed — the orchestration tokens define the patient
+        sequence and breaks.
+
+        Args:
+            orchestration_tokens: List or tensor of token IDs
+                e.g. [START, HEAD, SPINE, BREAK, PELVIS, ..., END]
+            demographic_distributions: Dict mapping body_region_id -> {
+                'age_mean', 'age_std', 'weight_mean', 'weight_std',
+                'height_mean', 'height_std', 'direction_prob'
+            }
+            start_time: Start datetime (default: today 08:00)
+
+        Returns:
+            List of event dicts representing the full day schedule
+        """
+        if start_time is None:
+            today = datetime.now().replace(hour=8, minute=0, second=0, microsecond=0)
+            start_time = today
+
+        # Convert to plain list
+        if isinstance(orchestration_tokens, torch.Tensor):
+            orchestration_tokens = orchestration_tokens.cpu().tolist()
+
+        # Strip START/END/PAD, keep only body region IDs and BREAK tokens
+        tokens = [
+            t for t in orchestration_tokens
+            if t not in (START_REGION_ID, END_REGION_ID)
+            and t != self.gen_config.get('orch_pad_token_id', 14)
+        ]
+        # Also filter out the orchestration PAD token (14)
+        tokens = [t for t in tokens if t != 14]
+
+        if not tokens:
+            return []
+
+        schedule = []
+        current_time = 0.0
+        previous_body_region = START_REGION_ID
+        event_id = 0
+        patient_idx = 0
+
+        for i, token in enumerate(tokens):
+            if token == BREAK_TOKEN_ID:
+                # === BREAK: run exchange model with phase_type='between' ===
+                # Uses previous body region for both from/to
+                patient_info = self._sample_patient_demographics(
+                    previous_body_region, demographic_distributions
+                )
+                cond = build_conditioning_tensor(
+                    patient_info, current_time, start_time
+                ).to(self.device)
+
+                with torch.no_grad():
+                    break_tokens, break_durations = self.exchange_model.generate(
+                        cond,
+                        {'body_from': previous_body_region,
+                         'body_to': previous_body_region},
+                        phase_type=PHASE_TYPES['between'],
+                        max_length=self.gen_config['max_length'],
+                        temperature=self.gen_config['temperature'],
+                        top_k=self.gen_config['top_k'],
+                        top_p=self.gen_config['top_p'],
+                    )
+
+                break_events = self._create_exchange_events(
+                    break_tokens[0], break_durations[0],
+                    event_id, current_time, start_time,
+                    None, f'BREAK_{patient_idx}',
+                    previous_body_region, previous_body_region,
+                )
+                schedule.extend(break_events)
+                event_id += len(break_events)
+                current_time += break_durations[0].sum().item()
+
+            elif 0 <= token < NUM_BODY_REGIONS:
+                # === PATIENT: exchange + examination ===
+                body_region_id = token
+                patient_id = f'PAT{patient_idx:03d}'
+
+                patient_info = self._sample_patient_demographics(
+                    body_region_id, demographic_distributions
+                )
+
+                # Exchange phase
+                phase_type = (
+                    PHASE_TYPES['startup'] if patient_idx == 0
+                    else PHASE_TYPES['between']
+                )
+                cond = build_conditioning_tensor(
+                    patient_info, current_time, start_time
+                ).to(self.device)
+
+                with torch.no_grad():
+                    exchange_tokens, exchange_durations = self.exchange_model.generate(
+                        cond,
+                        {'body_from': previous_body_region,
+                         'body_to': body_region_id},
+                        phase_type=phase_type,
+                        max_length=self.gen_config['max_length'],
+                        temperature=self.gen_config['temperature'],
+                        top_k=self.gen_config['top_k'],
+                        top_p=self.gen_config['top_p'],
+                    )
+
+                exchange_events = self._create_exchange_events(
+                    exchange_tokens[0], exchange_durations[0],
+                    event_id, current_time, start_time,
+                    patient_id, patient_idx,
+                    previous_body_region, body_region_id,
+                )
+                schedule.extend(exchange_events)
+                event_id += len(exchange_events)
+                current_time += exchange_durations[0].sum().item()
+
+                # Examination phase
+                cond = build_conditioning_tensor(
+                    patient_info, current_time, start_time
+                ).to(self.device)
+
+                with torch.no_grad():
+                    exam_tokens, exam_durations = self.examination_model.generate(
+                        cond,
+                        {'body_region': body_region_id},
+                        max_length=self.gen_config['max_length'],
+                        temperature=self.gen_config['temperature'],
+                        top_k=self.gen_config['top_k'],
+                        top_p=self.gen_config['top_p'],
+                    )
+
+                exam_events = self._create_examination_events(
+                    exam_tokens[0], exam_durations[0],
+                    event_id, current_time, start_time,
+                    patient_id, patient_idx, body_region_id,
+                )
+                schedule.extend(exam_events)
+                event_id += len(exam_events)
+                current_time += exam_durations[0].sum().item()
+
+                previous_body_region = body_region_id
+                patient_idx += 1
+
+        # === FINAL EXCHANGE (shutdown) ===
+        if patient_idx > 0:
+            patient_info = self._sample_patient_demographics(
+                previous_body_region, demographic_distributions
+            )
+            cond = build_conditioning_tensor(
+                patient_info, current_time, start_time
+            ).to(self.device)
+
+            with torch.no_grad():
+                shutdown_tokens, shutdown_durations = self.exchange_model.generate(
+                    cond,
+                    {'body_from': previous_body_region, 'body_to': END_REGION_ID},
+                    phase_type=PHASE_TYPES['shutdown'],
+                    max_length=self.gen_config['max_length'],
+                    temperature=self.gen_config['temperature'],
+                    top_k=self.gen_config['top_k'],
+                    top_p=self.gen_config['top_p'],
+                )
+
+            shutdown_events = self._create_exchange_events(
+                shutdown_tokens[0], shutdown_durations[0],
+                event_id, current_time, start_time,
+                None, patient_idx,
+                previous_body_region, END_REGION_ID,
+            )
+            schedule.extend(shutdown_events)
+
+        return schedule
+
+    def _sample_patient_demographics(self, body_region_id, demographic_distributions):
+        """
+        Sample patient demographics from distributions for a given body region.
+
+        Args:
+            body_region_id: int (0-10)
+            demographic_distributions: Dict from build_demographic_distributions()
+
+        Returns:
+            Dict with patient features for conditioning
+        """
+        if body_region_id in demographic_distributions:
+            stats = demographic_distributions[body_region_id]
+        else:
+            # Fallback defaults
+            stats = {
+                'age_mean': 50.0, 'age_std': 15.0,
+                'weight_mean': 75.0, 'weight_std': 15.0,
+                'height_mean': 1.75, 'height_std': 0.1,
+                'direction_prob': 0.8,
+            }
+
+        age = np.clip(np.random.normal(stats['age_mean'], stats['age_std']), 1, 100)
+        weight = np.clip(np.random.normal(stats['weight_mean'], stats['weight_std']), 20, 200)
+        height = np.clip(np.random.normal(stats['height_mean'], stats['height_std']), 0.5, 2.5)
+        direction = 'Head First' if np.random.random() < stats['direction_prob'] else 'Feet First'
+
+        return {
+            'age': age,
+            'weight': weight,
+            'height': height,
+            'ptab': 0,
+            'direction': direction,
+        }
 
     def _create_exchange_events(self, tokens, durations, start_event_id,
                                 start_time_offset, day_start,
