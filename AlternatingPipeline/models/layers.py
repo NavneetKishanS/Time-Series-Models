@@ -38,18 +38,26 @@ class PositionalEncoding(nn.Module):
         return self.dropout(x)
 
 
-class DurationHead(nn.Module):
+class SinglePassDurationHead(nn.Module):
     """
-    Output head that predicts duration parameters (mu, sigma) using Gaussian distribution.
-    Used for per-token duration prediction in examination model.
+    Duration head for single-pass estimation over a complete sequence.
+
+    Takes hidden states from a bidirectional encoder and predicts
+    (mu, sigma) per token position using a shared MLP trunk with
+    separate output heads.
     """
 
-    def __init__(self, d_model, min_sigma=0.1):
-        super(DurationHead, self).__init__()
+    def __init__(self, d_model, hidden_dim=128, dropout=0.1, min_sigma=0.1):
+        super(SinglePassDurationHead, self).__init__()
         self.min_sigma = min_sigma
 
-        self.mu_head = nn.Linear(d_model, 1)
-        self.sigma_head = nn.Linear(d_model, 1)
+        self.shared_mlp = nn.Sequential(
+            nn.Linear(d_model, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+        )
+        self.mu_head = nn.Linear(hidden_dim, 1)
+        self.sigma_head = nn.Linear(hidden_dim, 1)
 
     def forward(self, x):
         """
@@ -57,12 +65,12 @@ class DurationHead(nn.Module):
             x: [batch_size, seq_len, d_model]
 
         Returns:
-            mu: [batch_size, seq_len] - mean parameters
-            sigma: [batch_size, seq_len] - standard deviation parameters
+            mu: [batch_size, seq_len] - mean duration parameters
+            sigma: [batch_size, seq_len] - std deviation parameters
         """
-        mu = torch.nn.functional.softplus(self.mu_head(x)).squeeze(-1)
-        sigma = torch.nn.functional.softplus(self.sigma_head(x)).squeeze(-1) + self.min_sigma
-
+        h = self.shared_mlp(x)
+        mu = torch.nn.functional.softplus(self.mu_head(h)).squeeze(-1)
+        sigma = torch.nn.functional.softplus(self.sigma_head(h)).squeeze(-1) + self.min_sigma
         return mu, sigma
 
 

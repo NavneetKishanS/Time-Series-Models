@@ -1,14 +1,13 @@
 """
 Generation modules for the Alternating Pipeline.
 
-- bucket_generator: Pre-generate samples for each body region transition
-- day_simulator: Simulate a full day by sampling from buckets
-- orchestrator: Main entry point for generation
+- day_simulator: Simulate a full day using on-the-fly model inference
+- customer_simulator: Per-customer day simulation
 """
-from .bucket_generator import BucketGenerator
 from .day_simulator import DaySimulator
+from .customer_simulator import CustomerSimulator
 
 __all__ = [
-    'BucketGenerator',
     'DaySimulator',
+    'CustomerSimulator',
 ]

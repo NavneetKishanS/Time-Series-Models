@@ -4,10 +4,8 @@ Configuration for the Alternating Pipeline (Exchange <-> Examination)
 This pipeline implements the sequential alternating approach:
   Exchange Model -> Examination Model -> Exchange Model -> ...
 
-Based on the meeting transcript requirements:
-- Bucket-based generation (1000 samples per bucket)
-- Ground truth patient sequences for day simulation
-- Customer-specific models
+Unified Transformer architecture: both models share the same base config
+but train on different data (exchange transitions vs examination sequences).
 """
 import os
 
@@ -19,14 +17,10 @@ PROJECT_ROOT = os.path.dirname(BASE_DIR)
 DATA_DIR = os.path.join(PROJECT_ROOT, 'PXChange_Refactored', 'data')
 OUTPUT_DIR = os.path.join(BASE_DIR, 'outputs')
 MODEL_SAVE_DIR = os.path.join(BASE_DIR, 'saved_models')
-BUCKETS_DIR = os.path.join(BASE_DIR, 'buckets')
 CUSTOMER_OUTPUT_DIR = os.path.join(OUTPUT_DIR, 'customers')
 
 # Create directories if they don't exist
-for directory in [OUTPUT_DIR, MODEL_SAVE_DIR, BUCKETS_DIR,
-                  os.path.join(BUCKETS_DIR, 'exchange'),
-                  os.path.join(BUCKETS_DIR, 'examination'),
-                  CUSTOMER_OUTPUT_DIR]:
+for directory in [OUTPUT_DIR, MODEL_SAVE_DIR, CUSTOMER_OUTPUT_DIR]:
     os.makedirs(directory, exist_ok=True)
 
 # ============================================================================
@@ -47,24 +41,18 @@ START_REGION_ID = 11   # Special token for session start
 END_REGION_ID = 12     # Special token for session end
 NUM_REGION_CLASSES = 13  # Total classes including START and END
 
-# Bucket configuration for pre-generation
-BUCKET_SIZE = 1000  # Number of samples per body region transition
-
 # ============================================================================
 # DURATION SCALING CONFIGURATION
 # ============================================================================
 
-# Duration multiplier - NOW OBSOLETE with learned duration prediction
-# Previously used 7.0 to compensate for model not understanding time
-# With temporal features and learned durations, this should be 1.0
-DURATION_MULTIPLIER = 1.0  # Changed from 7.0 - duration now learned, not hacked
+# Duration multiplier - OBSOLETE with learned duration prediction
+DURATION_MULTIPLIER = 1.0
 
-# Base duration parameters - FALLBACK only (used when model duration prediction unavailable)
-# With learned duration prediction, these are only used as fallback for missing data
-EXCHANGE_DURATION_SHAPE = 5.0   # Gamma shape for exchange (fallback)
-EXCHANGE_DURATION_SCALE = 10.0  # Gamma scale for exchange (fallback)
-EXAMINATION_DURATION_SHAPE = 2.0  # Gamma shape for examination events (fallback)
-EXAMINATION_DURATION_SCALE = 5.0  # Gamma scale (fallback)
+# Base duration parameters - FALLBACK only
+EXCHANGE_DURATION_SHAPE = 5.0
+EXCHANGE_DURATION_SCALE = 10.0
+EXAMINATION_DURATION_SHAPE = 2.0
+EXAMINATION_DURATION_SCALE = 5.0
 
 # ============================================================================
 # BODY REGION FILTERING
@@ -85,7 +73,6 @@ VALID_BODY_REGION_IDS = [BODY_REGION_TO_ID[r] for r in VALID_BODY_REGIONS]
 # ============================================================================
 
 # Exchange Model conditioning (for body region transitions)
-# Base features (always included)
 EXCHANGE_CONDITIONING_FEATURES = [
     'Age',
     'Weight',
@@ -107,7 +94,6 @@ TEMPORAL_FEATURES = [
 NUM_COIL_FEATURES = 30  # Number of coil columns
 
 # Total conditioning dimension for exchange model
-# Base (5) + Temporal (5) + Coils (30) = 40
 EXCHANGE_TOTAL_CONDITIONING_DIM = (
     len(EXCHANGE_CONDITIONING_FEATURES) +
     len(TEMPORAL_FEATURES) +
@@ -179,45 +165,69 @@ COIL_COLUMNS = [
 ]
 
 # ============================================================================
-# EXCHANGE MODEL CONFIGURATION
+# PHASE TYPES (for exchange model)
+# ============================================================================
+
+PHASE_TYPES = {
+    'startup': 0,    # First exchange of the day (START -> first body region)
+    'between': 1,    # Between-patient exchanges
+    'shutdown': 2,   # Last exchange of the day (last body region -> END)
+}
+NUM_PHASE_TYPES = len(PHASE_TYPES)
+
+# ============================================================================
+# UNIFIED SEQUENCE GENERATOR BASE CONFIG
+# ============================================================================
+
+SEQUENCE_GENERATOR_BASE_CONFIG = {
+    'vocab_size': VOCAB_SIZE,
+    'd_model': 256,
+    'nhead': 8,
+    'num_encoder_layers': 6,
+    'num_decoder_layers': 6,
+    'dim_feedforward': 1024,
+    'dropout': 0.1,
+    'max_seq_len': MAX_SEQ_LEN,
+    'num_duration_encoder_layers': 4,
+    'num_body_regions': NUM_BODY_REGIONS,
+    'num_region_classes': NUM_REGION_CLASSES,
+    # Base conditioning: 5 patient + 5 temporal = 10
+    'base_conditioning_dim': len(EXCHANGE_CONDITIONING_FEATURES) + 5,
+}
+
+# ============================================================================
+# EXCHANGE MODEL CONFIGURATION (extends base)
 # ============================================================================
 
 EXCHANGE_MODEL_CONFIG = {
-    'd_model': 128,                # Model dimension
-    'hidden_dim': 256,             # Hidden layer dimension
-    'num_layers': 3,               # Number of MLP layers
-    'dropout': 0.1,
-    # Conditioning: 5 patient features + 5 temporal features = 10
-    'conditioning_dim': len(EXCHANGE_CONDITIONING_FEATURES) + 5,  # +5 for temporal features
-    'num_regions': NUM_REGION_CLASSES,  # Output: body regions + START + END
+    **SEQUENCE_GENERATOR_BASE_CONFIG,
+    'model_type': 'exchange',
+    'has_phase_type': True,
+    'body_region_mode': 'from_to',  # Uses body_from AND body_to
+    'num_phase_types': NUM_PHASE_TYPES,
 }
 
 EXCHANGE_TRAINING_CONFIG = {
-    'batch_size': 64,
+    'batch_size': 32,
     'epochs': 100,
-    'learning_rate': 0.001,
-    'weight_decay': 1e-5,
+    'learning_rate': 0.0001,
+    'warmup_steps': 4000,
+    'label_smoothing': 0.1,
     'gradient_clip': 1.0,
     'early_stopping_patience': 15,
-    'validation_split': 0.2
+    'validation_split': 0.2,
+    'duration_loss_weight': 0.1,
 }
 
 # ============================================================================
-# EXAMINATION MODEL CONFIGURATION
+# EXAMINATION MODEL CONFIGURATION (extends base)
 # ============================================================================
 
 EXAMINATION_MODEL_CONFIG = {
-    'vocab_size': VOCAB_SIZE,
-    'd_model': 256,                # Model dimension
-    'nhead': 8,                    # Number of attention heads
-    'num_encoder_layers': 6,       # Encoder depth
-    'num_decoder_layers': 6,       # Decoder depth
-    'dim_feedforward': 1024,       # FFN dimension
-    'dropout': 0.1,
-    'max_seq_len': MAX_SEQ_LEN,
-    # Conditioning: 5 patient features + 5 temporal features + 1 body region = 11
-    'conditioning_dim': len(EXAMINATION_CONDITIONING_FEATURES) + 5 + 1,  # +5 temporal, +1 body region
-    'num_body_regions': NUM_BODY_REGIONS,
+    **SEQUENCE_GENERATOR_BASE_CONFIG,
+    'model_type': 'examination',
+    'has_phase_type': False,
+    'body_region_mode': 'single',  # Uses single body_region
 }
 
 EXAMINATION_TRAINING_CONFIG = {
@@ -229,7 +239,55 @@ EXAMINATION_TRAINING_CONFIG = {
     'gradient_clip': 1.0,
     'early_stopping_patience': 15,
     'validation_split': 0.2,
-    'duration_loss_weight': 0.1,  # Weight for duration prediction loss
+    'duration_loss_weight': 0.1,
+}
+
+# ============================================================================
+# ORCHESTRATION MODEL VOCABULARY
+# ============================================================================
+
+BREAK_TOKEN_ID = 13
+ORCH_PAD_TOKEN_ID = 14
+ORCH_VOCAB_SIZE = 15           # 11 regions + START + END + BREAK + PAD
+ORCH_MAX_SEQ_LEN = 40          # ~12 patients + breaks + START/END
+
+# Orchestration conditioning (17-dim):
+# dow_sin, dow_cos, month_sin, month_cos, is_weekend,
+# avg_patients_per_day, body_region_distribution[11]
+ORCH_BASE_CONDITIONING_DIM = 17
+NUM_SCANNERS = 40
+ORCH_SCANNER_EMB_DIM = 32
+
+# ============================================================================
+# ORCHESTRATION MODEL CONFIGURATION
+# ============================================================================
+
+ORCHESTRATION_MODEL_CONFIG = {
+    'vocab_size': ORCH_VOCAB_SIZE,
+    'd_model': 128,
+    'nhead': 4,
+    'num_encoder_layers': 3,
+    'num_decoder_layers': 4,
+    'dim_feedforward': 512,
+    'dropout': 0.1,
+    'max_seq_len': ORCH_MAX_SEQ_LEN,
+    'base_conditioning_dim': ORCH_BASE_CONDITIONING_DIM,
+    'num_scanners': NUM_SCANNERS,
+    'scanner_emb_dim': ORCH_SCANNER_EMB_DIM,
+    'pad_token_id': ORCH_PAD_TOKEN_ID,
+    'start_token_id': START_REGION_ID,
+    'end_token_id': END_REGION_ID,
+    'break_token_id': BREAK_TOKEN_ID,
+}
+
+ORCHESTRATION_TRAINING_CONFIG = {
+    'batch_size': 64,
+    'epochs': 100,
+    'learning_rate': 0.0003,
+    'warmup_steps': 2000,
+    'label_smoothing': 0.1,
+    'gradient_clip': 1.0,
+    'early_stopping_patience': 20,
 }
 
 # ============================================================================
@@ -256,18 +314,15 @@ RANDOM_SEED = 42
 USE_GPU = True  # Set to False to force CPU usage
 
 # ============================================================================
-# TEMPORAL FORECASTING CONFIGURATION (NEW)
+# TEMPORAL FORECASTING CONFIGURATION
 # ============================================================================
 
-# Context and prediction horizons - explicit time windows
-CONTEXT_DAYS = 14  # How many days of history to use (2 weeks)
-PREDICTION_HORIZON = 1  # Predict 1 day of events
-
-# Validation split (temporal, not random)
-VALIDATION_DAYS = 2  # Hold out last 2 days for validation
+CONTEXT_DAYS = 14
+PREDICTION_HORIZON = 1
+VALIDATION_DAYS = 2
 
 # Conditioning dimension breakdown:
 # - Patient demographics: 5 (Age, Weight, Height, PTAB, Direction_encoded)
 # - Temporal features: 5 (hour_sin, hour_cos, dow_sin, dow_cos, is_morning)
 # - Total base conditioning: 10
-TEMPORAL_CONDITIONING_DIM = 5  # Number of temporal features actually used
+TEMPORAL_CONDITIONING_DIM = 5
