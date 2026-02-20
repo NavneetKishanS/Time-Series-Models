@@ -10,6 +10,7 @@ Executes the full pipeline in sequence:
 4.  Run day simulation -> on-the-fly generation (no buckets, ground truth patients)
 4b. Run day simulation using orchestration model (fully autonomous, no ground truth)
 5.  Generate visualizations -> evaluate results with charts
+5b. Generate orchestration visualizations (comparisons, break analysis, timeline)
 6.  Per-customer day simulation (generates individual customer visualizations)
 7.  General visualizations (aggregates customer data)
 
@@ -656,6 +657,365 @@ def step_5_visualize(schedule=None):
     return _generate_visualizations_for_dataframe(schedule_df, viz_dir, title_prefix="Overall Simulation: ")
 
 
+def step_5b_orchestration_visualizations(orch_schedule=None, gt_schedule=None):
+    """Step 5b: Generate orchestration-specific visualizations and comparisons."""
+    print("\n" + "=" * 70)
+    print("STEP 5b: ORCHESTRATION VISUALIZATIONS")
+    print("=" * 70)
+
+    import pandas as pd
+    import numpy as np
+    from glob import glob
+
+    try:
+        import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
+    except ImportError:
+        print("Warning: plotly not installed. Skipping visualizations.")
+        return None
+
+    from config import (
+        BODY_REGIONS, NUM_BODY_REGIONS, BREAK_TOKEN_ID,
+        START_REGION_ID, END_REGION_ID,
+    )
+
+    # Load orchestrated schedule
+    if orch_schedule is None:
+        orch_files = glob(os.path.join(OUTPUT_DIR, 'orchestrated_day_*.csv'))
+        if not orch_files:
+            print("  No orchestrated schedule found. Run step 4b first.")
+            return None
+        latest_orch = max(orch_files, key=os.path.getmtime)
+        print(f"  Loading orchestrated: {latest_orch}")
+        orch_df = pd.read_csv(latest_orch)
+    else:
+        orch_df = pd.DataFrame(orch_schedule)
+
+    # Load ground truth schedule
+    if gt_schedule is None:
+        gt_files = glob(os.path.join(OUTPUT_DIR, 'simulated_day_*.csv'))
+        if gt_files:
+            latest_gt = max(gt_files, key=os.path.getmtime)
+            print(f"  Loading ground truth: {latest_gt}")
+            gt_df = pd.read_csv(latest_gt)
+        else:
+            gt_df = None
+    else:
+        gt_df = pd.DataFrame(gt_schedule)
+
+    viz_dir = os.path.join(OUTPUT_DIR, 'orchestration_visualizations')
+    os.makedirs(viz_dir, exist_ok=True)
+
+    # First: generate standard charts for the orchestrated day
+    print("\nGenerating standard charts for orchestrated day...")
+    _generate_visualizations_for_dataframe(
+        orch_df, viz_dir, title_prefix="Orchestrated: "
+    )
+
+    # ===================================================================
+    # ORCHESTRATION-SPECIFIC: Body Region Sequence Flow
+    # ===================================================================
+    print("\nGenerating orchestration-specific charts...")
+
+    orch_exam = orch_df[orch_df['event_type'] == 'examination']
+    orch_exch = orch_df[orch_df['event_type'] == 'exchange']
+    orch_patients = sorted([
+        p for p in orch_df['patient_id'].unique()
+        if isinstance(p, str) and p.startswith('PAT')
+    ])
+    orch_breaks = sorted([
+        str(s) for s in orch_df['session_id'].unique()
+        if isinstance(s, str) and 'BREAK' in str(s)
+    ])
+
+    # Build patient sequence with regions
+    patient_regions = []
+    for pid in orch_patients:
+        p_exam = orch_exam[orch_exam['patient_id'] == pid]
+        if len(p_exam) > 0:
+            patient_regions.append(p_exam['body_region'].iloc[0])
+        else:
+            patient_regions.append('UNKNOWN')
+
+    # --- Chart 1: Body Region Sequence (waterfall-style) ---
+    region_colors = {
+        'HEAD': '#636EFA', 'NECK': '#EF553B', 'CHEST': '#00CC96',
+        'ABDOMEN': '#AB63FA', 'PELVIS': '#FFA15A', 'SPINE': '#19D3F3',
+        'ARM': '#FF6692', 'LEG': '#B6E880', 'HAND': '#FF97FF',
+        'FOOT': '#FECB52', 'UNKNOWN': '#999999',
+    }
+
+    fig_seq = go.Figure()
+    x_labels = []
+    colors = []
+    durations = []
+
+    for i, pid in enumerate(orch_patients):
+        p_events = orch_df[orch_df['patient_id'] == pid]
+        dur_min = p_events['duration'].sum() / 60
+        region = patient_regions[i]
+        x_labels.append(f'{pid}\n{region}')
+        colors.append(region_colors.get(region, '#999999'))
+        durations.append(dur_min)
+
+    fig_seq.add_trace(go.Bar(
+        x=x_labels, y=durations,
+        marker_color=colors,
+        text=[f'{d:.1f}m' for d in durations],
+        textposition='outside',
+    ))
+    fig_seq.update_layout(
+        title='Orchestrated Day: Patient Sequence & Duration',
+        xaxis_title='Patient (in order)',
+        yaxis_title='Total Duration (minutes)',
+        xaxis_tickangle=45,
+        showlegend=False,
+        height=500,
+    )
+    fig_seq.write_html(os.path.join(viz_dir, 'patient_sequence.html'))
+    print(f"  Saved: patient_sequence.html")
+
+    # --- Chart 2: Break Analysis ---
+    if orch_breaks:
+        break_names = []
+        break_durations = []
+        break_event_counts = []
+        break_positions = []
+
+        for bid in orch_breaks:
+            b_events = orch_df[orch_df['session_id'].astype(str) == bid]
+            b_dur = b_events['duration'].sum() / 60
+            b_start_min = b_events['timestamp'].min() / 60
+            break_names.append(bid)
+            break_durations.append(b_dur)
+            break_event_counts.append(len(b_events))
+            break_positions.append(b_start_min)
+
+        fig_breaks = make_subplots(
+            rows=1, cols=2,
+            subplot_titles=('Break Durations', 'Break Timing in Day'),
+        )
+
+        fig_breaks.add_trace(go.Bar(
+            x=break_names, y=break_durations,
+            marker_color='#FFA15A',
+            text=[f'{d:.1f}m' for d in break_durations],
+            textposition='outside',
+        ), row=1, col=1)
+
+        fig_breaks.add_trace(go.Scatter(
+            x=break_positions, y=break_durations,
+            mode='markers+text',
+            marker=dict(size=12, color='#FFA15A'),
+            text=[b.replace('BREAK_', 'B') for b in break_names],
+            textposition='top center',
+        ), row=1, col=2)
+
+        fig_breaks.update_xaxes(title_text='Break ID', row=1, col=1)
+        fig_breaks.update_yaxes(title_text='Duration (min)', row=1, col=1)
+        fig_breaks.update_xaxes(title_text='Time from start (min)', row=1, col=2)
+        fig_breaks.update_yaxes(title_text='Duration (min)', row=1, col=2)
+        fig_breaks.update_layout(
+            title='Break Analysis',
+            showlegend=False, height=450,
+        )
+        fig_breaks.write_html(os.path.join(viz_dir, 'break_analysis.html'))
+        print(f"  Saved: break_analysis.html")
+
+    # --- Chart 3: Body Region Distribution (orchestrated vs ground truth) ---
+    if gt_df is not None:
+        gt_exam = gt_df[gt_df['event_type'] == 'examination']
+        gt_patients = sorted([
+            p for p in gt_df['patient_id'].unique()
+            if str(p).startswith('PAT')
+        ])
+
+        # Count regions by patients (not events)
+        orch_region_counts = pd.Series(patient_regions).value_counts()
+
+        gt_patient_regions = []
+        for pid in gt_patients:
+            p_exam = gt_exam[gt_exam['patient_id'] == pid]
+            if len(p_exam) > 0:
+                gt_patient_regions.append(p_exam['body_region'].iloc[0])
+        gt_region_counts = pd.Series(gt_patient_regions).value_counts()
+
+        all_regions = sorted(set(
+            list(orch_region_counts.index) + list(gt_region_counts.index)
+        ))
+
+        fig_compare = make_subplots(
+            rows=2, cols=2,
+            subplot_titles=(
+                'Body Region Distribution (by patients)',
+                'Duration Distribution Comparison',
+                'Events per Patient',
+                'Summary',
+            ),
+        )
+
+        # Region distribution
+        fig_compare.add_trace(go.Bar(
+            x=all_regions,
+            y=[orch_region_counts.get(r, 0) for r in all_regions],
+            name='Orchestrated',
+            marker_color='#636EFA',
+        ), row=1, col=1)
+        fig_compare.add_trace(go.Bar(
+            x=all_regions,
+            y=[gt_region_counts.get(r, 0) for r in all_regions],
+            name='Ground Truth',
+            marker_color='#EF553B',
+        ), row=1, col=1)
+
+        # Duration distributions (overlaid histograms)
+        gt_exch = gt_df[gt_df['event_type'] == 'exchange']
+        fig_compare.add_trace(go.Histogram(
+            x=orch_exch['duration'], name='Orch Exchange',
+            marker_color='rgba(99,110,250,0.5)', nbinsx=30,
+        ), row=1, col=2)
+        fig_compare.add_trace(go.Histogram(
+            x=gt_exch['duration'], name='GT Exchange',
+            marker_color='rgba(239,85,59,0.5)', nbinsx=30,
+        ), row=1, col=2)
+
+        # Events per patient
+        orch_events_per_patient = []
+        for pid in orch_patients:
+            orch_events_per_patient.append(
+                len(orch_df[orch_df['patient_id'] == pid])
+            )
+        gt_events_per_patient = []
+        for pid in gt_patients:
+            gt_events_per_patient.append(
+                len(gt_df[gt_df['patient_id'] == pid])
+            )
+
+        fig_compare.add_trace(go.Box(
+            y=orch_events_per_patient, name='Orchestrated',
+            marker_color='#636EFA',
+        ), row=2, col=1)
+        fig_compare.add_trace(go.Box(
+            y=gt_events_per_patient, name='Ground Truth',
+            marker_color='#EF553B',
+        ), row=2, col=1)
+
+        # Summary as bar chart comparing key metrics
+        orch_dur_hr = orch_df['cumulative_time'].max() / 3600
+        gt_dur_hr = gt_df['cumulative_time'].max() / 3600
+
+        metrics = ['Patients', 'Duration (h)', 'Events', 'Breaks']
+        orch_vals = [len(orch_patients), orch_dur_hr, len(orch_df), len(orch_breaks)]
+        gt_vals = [len(gt_patients), gt_dur_hr, len(gt_df), 0]
+
+        fig_compare.add_trace(go.Bar(
+            x=metrics, y=orch_vals, name='Orchestrated',
+            marker_color='#636EFA', showlegend=False,
+        ), row=2, col=2)
+        fig_compare.add_trace(go.Bar(
+            x=metrics, y=gt_vals, name='Ground Truth',
+            marker_color='#EF553B', showlegend=False,
+        ), row=2, col=2)
+
+        fig_compare.update_layout(
+            title='Orchestrated vs Ground Truth Comparison',
+            barmode='group',
+            height=800,
+        )
+        fig_compare.update_xaxes(title_text='Body Region', row=1, col=1)
+        fig_compare.update_yaxes(title_text='Patient Count', row=1, col=1)
+        fig_compare.update_xaxes(title_text='Duration (seconds)', row=1, col=2)
+        fig_compare.update_yaxes(title_text='Count', row=1, col=2)
+        fig_compare.update_yaxes(title_text='Events', row=2, col=1)
+        fig_compare.write_html(os.path.join(viz_dir, 'orchestrated_vs_groundtruth.html'))
+        print(f"  Saved: orchestrated_vs_groundtruth.html")
+
+    # --- Chart 4: Full Day Timeline (Gantt with breaks) ---
+    fig_timeline = go.Figure()
+
+    timeline_colors = {
+        'exchange': '#636EFA',
+        'examination': '#EF553B',
+    }
+
+    # Group events by session (patient or break)
+    all_sessions = []
+    for pid in orch_patients:
+        p_events = orch_df[orch_df['patient_id'] == pid]
+        p_exam = orch_exam[orch_exam['patient_id'] == pid]
+        region = p_exam['body_region'].iloc[0] if len(p_exam) > 0 else '?'
+        start_min = p_events['timestamp'].min() / 60
+        dur_min = p_events['duration'].sum() / 60
+        all_sessions.append({
+            'label': f'{pid} ({region})',
+            'start': start_min,
+            'duration': dur_min,
+            'type': 'patient',
+        })
+
+    for bid in orch_breaks:
+        b_events = orch_df[orch_df['session_id'].astype(str) == bid]
+        start_min = b_events['timestamp'].min() / 60
+        dur_min = b_events['duration'].sum() / 60
+        all_sessions.append({
+            'label': bid,
+            'start': start_min,
+            'duration': dur_min,
+            'type': 'break',
+        })
+
+    # Sort by start time
+    all_sessions.sort(key=lambda s: s['start'])
+
+    for i, session in enumerate(all_sessions):
+        color = '#FFA15A' if session['type'] == 'break' else '#636EFA'
+        fig_timeline.add_trace(go.Bar(
+            x=[session['duration']],
+            y=[session['label']],
+            base=[session['start']],
+            orientation='h',
+            marker_color=color,
+            text=f"{session['duration']:.1f}m",
+            textposition='inside',
+            showlegend=False,
+            hovertemplate=(
+                f"<b>{session['label']}</b><br>"
+                f"Start: {session['start']:.1f} min<br>"
+                f"Duration: {session['duration']:.1f} min<extra></extra>"
+            ),
+        ))
+
+    fig_timeline.update_layout(
+        title='Orchestrated Day: Full Timeline (blue=patient, orange=break)',
+        xaxis_title='Time from start (minutes)',
+        yaxis_title='',
+        height=max(400, len(all_sessions) * 22),
+        barmode='stack',
+        yaxis=dict(autorange='reversed'),
+    )
+    fig_timeline.write_html(os.path.join(viz_dir, 'orchestrated_timeline.html'))
+    print(f"  Saved: orchestrated_timeline.html")
+
+    # --- Chart 5: Body Region Pie Chart ---
+    region_counts = pd.Series(patient_regions).value_counts()
+    fig_pie = go.Figure(data=[go.Pie(
+        labels=region_counts.index,
+        values=region_counts.values,
+        hole=0.4,
+        marker_colors=[region_colors.get(r, '#999999') for r in region_counts.index],
+    )])
+    fig_pie.update_layout(
+        title='Orchestrated Day: Body Region Distribution',
+        annotations=[dict(text=f'{len(orch_patients)}<br>patients',
+                         x=0.5, y=0.5, font_size=16, showarrow=False)],
+    )
+    fig_pie.write_html(os.path.join(viz_dir, 'body_region_pie.html'))
+    print(f"  Saved: body_region_pie.html")
+
+    print(f"\nAll orchestration visualizations saved to: {viz_dir}")
+    return viz_dir
+
+
 def _visualize_customer_simulation(customer_id, schedule_df, output_dir):
     """Generates visualizations for a single customer's simulated data."""
     print(f"\n  Generating visualizations for customer {customer_id}...")
@@ -815,6 +1175,7 @@ Steps:
   4.  Run day simulation (on-the-fly, ground truth patients)
   4b. Run day simulation using orchestration model (fully autonomous)
   5.  Generate visualizations (overall)
+  5b. Orchestration visualizations (comparisons, breaks, timeline)
   6.  Per-customer day simulation
   7.  Generate general visualizations
 
@@ -844,8 +1205,8 @@ Examples:
 
     args = parser.parse_args()
 
-    # Valid step identifiers (strings to support 1b, 2c, 4b)
-    VALID_STEPS = {'1', '1b', '2', '3', '2c', '4', '4b', '5', '6', '7'}
+    # Valid step identifiers (strings to support 1b, 2c, 4b, 5b)
+    VALID_STEPS = {'1', '1b', '2', '3', '2c', '4', '4b', '5', '5b', '6', '7'}
 
     # Determine which steps to run
     if args.customer == 'all':
@@ -865,7 +1226,7 @@ Examples:
         steps_to_run = set(s.strip() for s in args.steps.split(','))
     else:
         # Default run: full pipeline including orchestration
-        steps_to_run = {'1', '1b', '2', '3', '2c', '4', '4b', '5'}
+        steps_to_run = {'1', '1b', '2', '3', '2c', '4', '4b', '5', '5b'}
         if args.skip_preprocess:
             steps_to_run.discard('1')
         if args.skip_training:
@@ -917,6 +1278,10 @@ Examples:
         if '5' in steps_to_run:
             if not args.no_viz:
                 step_5_visualize(schedule)
+
+        if '5b' in steps_to_run:
+            if not args.no_viz:
+                step_5b_orchestration_visualizations()
 
         if '6' in steps_to_run:
             customer_sim_results = step_6_customer_simulation(customer_id=args.customer)
