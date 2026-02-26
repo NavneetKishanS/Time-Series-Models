@@ -4,6 +4,7 @@ Training script for the Exchange Model (Unified Transformer).
 Trains the model to generate exchange event sequences conditioned on
 body_from, body_to, phase_type, and patient features.
 """
+import math
 import os
 import sys
 import torch
@@ -177,14 +178,18 @@ def train_exchange_model(data_path=None, config=None, training_config=None,
     # Optimizer with warmup
     optimizer = optim.AdamW(
         model.parameters(),
-        lr=training_config['learning_rate']
+        lr=training_config['learning_rate'],
+        weight_decay=1e-4,
     )
+
+    total_steps = training_config['epochs'] * len(train_loader)
 
     def lr_lambda(step):
         warmup_steps = training_config['warmup_steps']
         if step < warmup_steps:
             return float(step) / float(max(1, warmup_steps))
-        return 1.0
+        progress = (step - warmup_steps) / max(1, total_steps - warmup_steps)
+        return max(0.05, 0.5 * (1.0 + math.cos(math.pi * progress)))
 
     scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
