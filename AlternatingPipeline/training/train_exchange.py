@@ -32,11 +32,12 @@ MAX_EXCHANGE_DURATION = 7200
 class ExchangeSequenceDataset(Dataset):
     """Dataset for exchange sequence generation training."""
 
-    def __init__(self, exchange_sequences, max_seq_len=None):
+    def __init__(self, exchange_sequences, max_seq_len=None, augment=False):
         if max_seq_len is None:
             max_seq_len = MAX_SEQ_LEN
 
         self.max_seq_len = max_seq_len
+        self.augment = augment
         self.data = []
 
         for seq in exchange_sequences:
@@ -73,7 +74,7 @@ class ExchangeSequenceDataset(Dataset):
                 'phase_type': phase_type,
                 'input_seq': torch.tensor(input_seq, dtype=torch.long),
                 'target_seq': torch.tensor(target_seq, dtype=torch.long),
-                'target_durations': torch.tensor(target_durations, dtype=torch.float32),
+                'target_durations': target_durations,  # kept as list for augmentation
             })
 
     def __len__(self):
@@ -81,6 +82,10 @@ class ExchangeSequenceDataset(Dataset):
 
     def __getitem__(self, idx):
         item = self.data[idx]
+        durations = list(item['target_durations'])
+        if self.augment:
+            noise = np.random.normal(0, 0.10, len(durations))
+            durations = [max(0.0, d * (1 + n)) for d, n in zip(durations, noise)]
         return (
             item['conditioning'],
             torch.tensor(item['body_from'], dtype=torch.long),
@@ -88,7 +93,7 @@ class ExchangeSequenceDataset(Dataset):
             torch.tensor(item['phase_type'], dtype=torch.long),
             item['input_seq'],
             item['target_seq'],
-            item['target_durations'],
+            torch.tensor(durations, dtype=torch.float32),
         )
 
 
@@ -149,8 +154,9 @@ def train_exchange_model(data_path=None, config=None, training_config=None,
             print(f"  Val date range: {min(val_dates)} to {max(val_dates)}")
 
     # Create datasets
-    train_dataset = ExchangeSequenceDataset(train_sequences)
-    val_dataset = ExchangeSequenceDataset(val_sequences)
+    augment = training_config.get('augment_training', False)
+    train_dataset = ExchangeSequenceDataset(train_sequences, augment=augment)
+    val_dataset = ExchangeSequenceDataset(val_sequences, augment=False)
 
     if verbose:
         print(f"Train dataset: {len(train_dataset)}, Val dataset: {len(val_dataset)}")
@@ -237,7 +243,7 @@ def train_exchange_model(data_path=None, config=None, training_config=None,
                 duration_mu, duration_sigma, target_durations, ignore_mask=pad_mask
             )
 
-            duration_weight = training_config.get('duration_loss_weight', 0.1)
+            duration_weight = training_config.get('duration_loss_weight', 0.5)
             loss = token_loss + duration_weight * duration_loss
 
             loss.backward()
@@ -280,7 +286,7 @@ def train_exchange_model(data_path=None, config=None, training_config=None,
                 dur_loss = model.compute_duration_loss(
                     duration_mu, duration_sigma, target_durations, ignore_mask=pad_mask
                 )
-                duration_weight = training_config.get('duration_loss_weight', 0.1)
+                duration_weight = training_config.get('duration_loss_weight', 0.5)
                 loss = token_loss + duration_weight * dur_loss
                 val_loss += loss.item()
 
