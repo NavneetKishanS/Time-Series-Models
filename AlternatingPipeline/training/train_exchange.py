@@ -243,7 +243,7 @@ def train_exchange_model(data_path=None, config=None, training_config=None,
                 duration_mu, duration_sigma, target_durations, ignore_mask=pad_mask
             )
 
-            duration_weight = training_config.get('duration_loss_weight', 0.5)
+            duration_weight = training_config.get('duration_loss_weight', 0.3)
             loss = token_loss + duration_weight * duration_loss
 
             loss.backward()
@@ -286,7 +286,7 @@ def train_exchange_model(data_path=None, config=None, training_config=None,
                 dur_loss = model.compute_duration_loss(
                     duration_mu, duration_sigma, target_durations, ignore_mask=pad_mask
                 )
-                duration_weight = training_config.get('duration_loss_weight', 0.5)
+                duration_weight = training_config.get('duration_loss_weight', 0.3)
                 loss = token_loss + duration_weight * dur_loss
                 val_loss += loss.item()
 

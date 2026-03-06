@@ -18,18 +18,19 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import (
     EXAMINATION_MODEL_CONFIG, EXAMINATION_TRAINING_CONFIG,
     MODEL_SAVE_DIR, RANDOM_SEED, USE_GPU, MAX_SEQ_LEN,
-    START_TOKEN_ID, END_TOKEN_ID, PAD_TOKEN_ID, ID_TO_BODY_REGION
+    START_TOKEN_ID, END_TOKEN_ID, PAD_TOKEN_ID
 )
 from models.examination_model import create_examination_model
 from data.preprocessing import load_preprocessed_data
 from data.archive_duration_priors import load_examination_priors
+from data.examination_duration_calibration import calibrate_examination_durations
 from training.utils import temporal_split, build_conditioning_tensor
 
 
 class ExaminationDataset(Dataset):
     """Dataset for examination (scan sequence) training."""
 
-    def __init__(self, examination_sequences, max_seq_len=None, augment=False):
+    def __init__(self, examination_sequences, max_seq_len=None, augment=False, oversample=1):
         if max_seq_len is None:
             max_seq_len = MAX_SEQ_LEN
 
@@ -63,6 +64,9 @@ class ExaminationDataset(Dataset):
                 'target_seq': torch.tensor(target_seq, dtype=torch.long),
                 'target_durations': target_durations,  # kept as list for augmentation
             })
+
+        if oversample > 1:
+            self.data = self.data * oversample
 
     def __len__(self):
         return len(self.data)
@@ -113,13 +117,13 @@ def train_examination_model(data_path=None, config=None, training_config=None,
     if verbose:
         print(f"Using device: {device}")
 
-    # Load archive duration priors
+    # Load archive duration priors (used for calibration)
     archive_priors = load_examination_priors()
     if verbose:
         if archive_priors:
-            print(f"Loaded archive priors for {len(archive_priors)} body groups: {list(archive_priors.keys())}")
+            print(f"Archive priors loaded for {len(archive_priors)} body groups: {list(archive_priors.keys())}")
         else:
-            print("No archive priors found — prior regularization disabled.")
+            print("No archive priors found — duration calibration disabled.")
 
     # Load data
     if verbose:
@@ -146,10 +150,17 @@ def train_examination_model(data_path=None, config=None, training_config=None,
             print(f"  Train date range: {min(train_dates)} to {max(train_dates)}")
             print(f"  Val date range: {min(val_dates)} to {max(val_dates)}")
 
+    # Calibrate durations using archive priors
+    train_sequences = calibrate_examination_durations(train_sequences, archive_priors)
+    val_sequences = calibrate_examination_durations(val_sequences, archive_priors)
+    if verbose:
+        print("Duration calibration applied to train and val sequences")
+
     # Create datasets
     augment = training_config.get('augment_training', False)
-    train_dataset = ExaminationDataset(train_sequences, augment=augment)
-    val_dataset = ExaminationDataset(val_sequences, augment=False)
+    oversample = training_config.get('oversample_factor', 1)
+    train_dataset = ExaminationDataset(train_sequences, augment=augment, oversample=oversample)
+    val_dataset = ExaminationDataset(val_sequences, augment=False, oversample=1)
 
     if verbose:
         print(f"Train dataset: {len(train_dataset)}, Val dataset: {len(val_dataset)}")
@@ -193,7 +204,7 @@ def train_examination_model(data_path=None, config=None, training_config=None,
     scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
     # Training loop
-    history = {'train_loss': [], 'val_loss': [], 'val_perplexity': [], 'train_duration_loss': [], 'train_prior_loss': []}
+    history = {'train_loss': [], 'val_loss': [], 'val_perplexity': [], 'train_duration_loss': []}
     best_val_loss = float('inf')
     patience_counter = 0
     global_step = 0
@@ -202,7 +213,6 @@ def train_examination_model(data_path=None, config=None, training_config=None,
         model.train()
         train_loss = 0.0
         train_dur_loss = 0.0
-        train_prior_loss = 0.0
 
         for conditioning, body_region, input_seq, target_seq, target_durations in tqdm(
             train_loader, disable=not verbose, desc=f"Epoch {epoch+1}"
@@ -229,22 +239,8 @@ def train_examination_model(data_path=None, config=None, training_config=None,
                 duration_mu, duration_sigma, target_durations, ignore_mask=pad_mask
             )
 
-            duration_weight = training_config.get('duration_loss_weight', 0.5)
+            duration_weight = training_config.get('duration_loss_weight', 0.3)
             loss = token_loss + duration_weight * duration_loss
-
-            # Prior regularization: penalize mean prediction deviating from archive prior
-            batch_prior_loss = 0.0
-            if archive_priors:
-                prior_weight = training_config.get('prior_loss_weight', 0.1)
-                # Use the mode body region in this batch for the prior lookup
-                mode_region_id = int(body_region.mode().values.item())
-                body_region_name = ID_TO_BODY_REGION.get(mode_region_id, '').capitalize()
-                if body_region_name in archive_priors:
-                    prior_mean = archive_priors[body_region_name]['mean']
-                    prior_std = archive_priors[body_region_name]['std']
-                    prior_loss = ((duration_mu.mean() - prior_mean) / prior_std).pow(2)
-                    loss = loss + prior_weight * prior_loss
-                    batch_prior_loss = prior_loss.item()
 
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), training_config['gradient_clip'])
@@ -254,11 +250,9 @@ def train_examination_model(data_path=None, config=None, training_config=None,
 
             train_loss += loss.item()
             train_dur_loss += duration_loss.item()
-            train_prior_loss += batch_prior_loss
 
         train_loss /= len(train_loader)
         train_dur_loss /= len(train_loader)
-        train_prior_loss /= len(train_loader)
 
         # Validation
         model.eval()
@@ -280,7 +274,7 @@ def train_examination_model(data_path=None, config=None, training_config=None,
                 dur_loss = model.compute_duration_loss(
                     duration_mu, duration_sigma, target_durations, ignore_mask=pad_mask
                 )
-                duration_weight = training_config.get('duration_loss_weight', 0.5)
+                duration_weight = training_config.get('duration_loss_weight', 0.3)
                 loss = token_loss + duration_weight * dur_loss
                 val_loss += loss.item()
 
@@ -291,12 +285,11 @@ def train_examination_model(data_path=None, config=None, training_config=None,
         history['val_loss'].append(val_loss)
         history['val_perplexity'].append(val_perplexity)
         history['train_duration_loss'].append(train_dur_loss)
-        history['train_prior_loss'].append(train_prior_loss)
 
         if verbose:
             print(f"Epoch {epoch+1}: train_loss={train_loss:.4f}, "
                   f"val_loss={val_loss:.4f}, perplexity={val_perplexity:.2f}, "
-                  f"dur_loss={train_dur_loss:.4f}, prior_loss={train_prior_loss:.4f}")
+                  f"dur_loss={train_dur_loss:.4f}")
 
         # Early stopping
         if val_loss < best_val_loss:

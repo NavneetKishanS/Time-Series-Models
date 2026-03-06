@@ -271,6 +271,7 @@ def extract_exchange_events(df, verbose=False):
         timediffs = exchange_segment['timediff'].values.astype(float)
         durations = np.diff(timediffs, prepend=timediffs[0]).tolist()
         durations[0] = 0.0  # first event has no prior reference
+        durations = [max(0.0, d) for d in durations]   # clip boundary-reset artifacts
 
         # Get conditioning from the target (next) patient/examination
         row = segment.iloc[0]  # First row has the target info
@@ -345,6 +346,7 @@ def extract_exchange_events(df, verbose=False):
         timediffs = shutdown_segment['timediff'].values.astype(float)
         durations = np.diff(timediffs, prepend=timediffs[0]).tolist()
         durations[0] = 0.0
+        durations = [max(0.0, d) for d in durations]   # clip boundary-reset artifacts
 
         row = shutdown_segment.iloc[0]
         conditioning = _get_conditioning_from_row(row)
@@ -430,6 +432,7 @@ def extract_examination_events(df, verbose=False):
         timediffs = segment['timediff'].values.astype(float)
         durations = np.diff(timediffs, prepend=timediffs[0]).tolist()
         durations[0] = 0.0  # first event has no prior reference
+        durations = [max(0.0, d) for d in durations]   # clip boundary-reset artifacts
 
         # Get conditioning
         row = segment.iloc[0]
