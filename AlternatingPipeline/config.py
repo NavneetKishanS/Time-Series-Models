@@ -216,7 +216,7 @@ EXCHANGE_TRAINING_CONFIG = {
     'gradient_clip': 1.0,
     'early_stopping_patience': 15,
     'validation_split': 0.2,
-    'duration_loss_weight': 0.5,
+    'duration_loss_weight': 0.3,
     'augment_training': True,
     'duration_jitter_pct': 0.10,
 }
@@ -241,10 +241,10 @@ EXAMINATION_TRAINING_CONFIG = {
     'gradient_clip': 1.0,
     'early_stopping_patience': 15,
     'validation_split': 0.2,
-    'duration_loss_weight': 0.5,
+    'duration_loss_weight': 0.3,
     'augment_training': True,
     'duration_jitter_pct': 0.10,
-    'prior_loss_weight': 0.1,
+    'oversample_factor': 2,
 }
 
 # ============================================================================
