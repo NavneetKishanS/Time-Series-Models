@@ -22,9 +22,9 @@
 %pip install openpyxl
 
 # COMMAND ----------
-# Load parent config first (SOURCEID_VOCAB, BODY_REGION_TO_ID, COIL_COLUMNS, etc.)
-# then csv_pipeline config (SERIAL_NUMBERS, DATE_START/END, output paths)
 %run ../config
+
+# COMMAND ----------
 %run ./config
 
 # COMMAND ----------
