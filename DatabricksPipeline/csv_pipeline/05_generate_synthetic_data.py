@@ -1,3 +1,4 @@
+# Databricks notebook source
 # Databricks notebook — Generate synthetic data in CSV format
 #
 # Loads trained models and preprocessed_data.pkl, simulates complete days

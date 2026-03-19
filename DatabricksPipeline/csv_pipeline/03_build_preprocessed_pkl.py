@@ -1,3 +1,4 @@
+# Databricks notebook source
 # Databricks notebook — Build preprocessed_data.pkl from CSV pipeline outputs
 #
 # Reads the exchange and exam CSVs produced by steps 01 and 02, combines them
