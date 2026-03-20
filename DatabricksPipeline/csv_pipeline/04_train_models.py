@@ -19,7 +19,7 @@
 
 # COMMAND ----------
 
-import sys, os, pickle, shutil
+import sys, os, pickle, base64, requests
 
 sys.dont_write_bytecode = True  # suppress __pycache__ writes
 
@@ -27,15 +27,40 @@ sys.dont_write_bytecode = True  # suppress __pycache__ writes
 REPO_ROOT = "/Workspace/Shared/Patient Exchange and Examination/Time-Series-Models"
 # ───────────────────────────────────────────────────────────────────────────
 
-# Copy only .py source files to /tmp to avoid FUSE I/O errors on /Workspace/ imports
+# Copy .py files via the Databricks Workspace REST API — bypasses FUSE EIO on /Workspace/Shared/
 TMP_ROOT = "/tmp/alternating_pipeline_src"
-shutil.copytree(
-    f"{REPO_ROOT}/AlternatingPipeline",
-    f"{TMP_ROOT}/AlternatingPipeline",
-    dirs_exist_ok=True,
-    ignore=shutil.ignore_patterns("outputs", "__pycache__", "*.pkl", "*.pt", "*.csv", "*.html", "*.json"),
-    copy_function=shutil.copy,  # skip metadata/stat calls; FUSE on /Workspace/ doesn't support them
-)
+
+_ctx     = dbutils.notebook.entry_point.getDbutils().notebook().getContext()
+_host    = "https://" + _ctx.browserHostName().get()
+_token   = _ctx.apiToken().get()
+_headers = {"Authorization": f"Bearer {_token}"}
+
+_SKIP = {"outputs", "__pycache__"}
+
+def _api_copy_py(workspace_dir, local_dir):
+    os.makedirs(local_dir, exist_ok=True)
+    resp = requests.get(f"{_host}/api/2.0/workspace/list",
+                        headers=_headers, params={"path": workspace_dir})
+    if resp.status_code == 404:
+        return
+    resp.raise_for_status()
+    for obj in resp.json().get("objects", []):
+        name = os.path.basename(obj["path"])
+        if name in _SKIP:
+            continue
+        dst = os.path.join(local_dir, name)
+        if obj["object_type"] == "DIRECTORY":
+            _api_copy_py(obj["path"], dst)
+        elif obj["object_type"] == "FILE" and name.endswith(".py"):
+            r = requests.get(f"{_host}/api/2.0/workspace/export",
+                             headers=_headers,
+                             params={"path": obj["path"], "format": "SOURCE"})
+            r.raise_for_status()
+            with open(dst, "wb") as f:
+                f.write(base64.b64decode(r.json()["content"]))
+
+_api_copy_py(f"{REPO_ROOT}/AlternatingPipeline", f"{TMP_ROOT}/AlternatingPipeline")
+print(f"Copied AlternatingPipeline to {TMP_ROOT}")
 sys.path.insert(0, TMP_ROOT)
 
 PKL_PATH   = "/dbfs/FileStore/csv_pipeline/preprocessed_data.pkl"
