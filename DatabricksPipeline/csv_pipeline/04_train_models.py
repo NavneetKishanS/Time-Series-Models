@@ -19,15 +19,18 @@
 
 # COMMAND ----------
 
-import sys, os, pickle
+import sys, os, pickle, shutil
 
-sys.dont_write_bytecode = True  # /Workspace/ is read-only; suppress __pycache__ writes
+sys.dont_write_bytecode = True  # suppress __pycache__ writes
 
 # ── CONFIGURE THIS PATH to your Databricks Repos clone ─────────────────────
-REPO_ROOT = "/Workspace/Repos/luke-schumacher/Time-Series-Models"
+REPO_ROOT = "/Workspace/Shared/Patient Exchange and Examination/Time-Series-Models"
 # ───────────────────────────────────────────────────────────────────────────
 
-sys.path.insert(0, REPO_ROOT)
+# Copy AlternatingPipeline to /tmp to avoid FUSE I/O errors on /Workspace/ imports
+TMP_ROOT = "/tmp/alternating_pipeline_src"
+shutil.copytree(f"{REPO_ROOT}/AlternatingPipeline", f"{TMP_ROOT}/AlternatingPipeline", dirs_exist_ok=True)
+sys.path.insert(0, TMP_ROOT)
 
 PKL_PATH   = "/dbfs/FileStore/csv_pipeline/preprocessed_data.pkl"
 MODELS_DIR = "/dbfs/FileStore/csv_pipeline/models"
