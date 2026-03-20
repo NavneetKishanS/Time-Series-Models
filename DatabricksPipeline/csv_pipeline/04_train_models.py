@@ -27,9 +27,14 @@ sys.dont_write_bytecode = True  # suppress __pycache__ writes
 REPO_ROOT = "/Workspace/Shared/Patient Exchange and Examination/Time-Series-Models"
 # ───────────────────────────────────────────────────────────────────────────
 
-# Copy AlternatingPipeline to /tmp to avoid FUSE I/O errors on /Workspace/ imports
+# Copy only .py source files to /tmp to avoid FUSE I/O errors on /Workspace/ imports
 TMP_ROOT = "/tmp/alternating_pipeline_src"
-shutil.copytree(f"{REPO_ROOT}/AlternatingPipeline", f"{TMP_ROOT}/AlternatingPipeline", dirs_exist_ok=True)
+shutil.copytree(
+    f"{REPO_ROOT}/AlternatingPipeline",
+    f"{TMP_ROOT}/AlternatingPipeline",
+    dirs_exist_ok=True,
+    ignore=shutil.ignore_patterns("outputs", "__pycache__", "*.pkl", "*.pt", "*.csv", "*.html", "*.json"),
+)
 sys.path.insert(0, TMP_ROOT)
 
 PKL_PATH   = "/dbfs/FileStore/csv_pipeline/preprocessed_data.pkl"
