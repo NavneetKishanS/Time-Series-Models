@@ -21,6 +21,8 @@
 
 import sys, os, pickle
 
+sys.dont_write_bytecode = True  # /Workspace/ is read-only; suppress __pycache__ writes
+
 # ── CONFIGURE THIS PATH to your Databricks Repos clone ─────────────────────
 REPO_ROOT = "/Workspace/Repos/luke-schumacher/Time-Series-Models"
 # ───────────────────────────────────────────────────────────────────────────
