@@ -34,6 +34,7 @@ shutil.copytree(
     f"{TMP_ROOT}/AlternatingPipeline",
     dirs_exist_ok=True,
     ignore=shutil.ignore_patterns("outputs", "__pycache__", "*.pkl", "*.pt", "*.csv", "*.html", "*.json"),
+    copy_function=shutil.copy,  # skip metadata/stat calls; FUSE on /Workspace/ doesn't support them
 )
 sys.path.insert(0, TMP_ROOT)
 
