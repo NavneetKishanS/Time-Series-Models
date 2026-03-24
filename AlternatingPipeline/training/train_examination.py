@@ -30,12 +30,14 @@ from training.utils import temporal_split, build_conditioning_tensor
 class ExaminationDataset(Dataset):
     """Dataset for examination (scan sequence) training."""
 
-    def __init__(self, examination_sequences, max_seq_len=None, augment=False, oversample=1):
+    def __init__(self, examination_sequences, max_seq_len=None, augment=False,
+                 oversample=1, duration_scale=1.0):
         if max_seq_len is None:
             max_seq_len = MAX_SEQ_LEN
 
         self.max_seq_len = max_seq_len
         self.augment = augment
+        self.duration_scale = duration_scale
         self.data = []
 
         for seq in examination_sequences:
@@ -77,6 +79,9 @@ class ExaminationDataset(Dataset):
         if self.augment:
             noise = np.random.normal(0, 0.10, len(durations))
             durations = [max(0.0, d * (1 + n)) for d, n in zip(durations, noise)]
+        # Normalise raw seconds so Gaussian NLL stays in a reasonable range
+        if self.duration_scale != 1.0:
+            durations = [d / self.duration_scale for d in durations]
         return (
             item['conditioning'],
             torch.tensor(item['body_region'], dtype=torch.long),
@@ -159,8 +164,15 @@ def train_examination_model(data_path=None, config=None, training_config=None,
     # Create datasets
     augment = training_config.get('augment_training', False)
     oversample = training_config.get('oversample_factor', 1)
-    train_dataset = ExaminationDataset(train_sequences, augment=augment, oversample=oversample)
-    val_dataset = ExaminationDataset(val_sequences, augment=False, oversample=1)
+    duration_scale = training_config.get('duration_scale', 1.0)
+    train_dataset = ExaminationDataset(
+        train_sequences, augment=augment, oversample=oversample,
+        duration_scale=duration_scale,
+    )
+    val_dataset = ExaminationDataset(
+        val_sequences, augment=False, oversample=1,
+        duration_scale=duration_scale,
+    )
 
     if verbose:
         print(f"Train dataset: {len(train_dataset)}, Val dataset: {len(val_dataset)}")

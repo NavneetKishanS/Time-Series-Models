@@ -181,14 +181,14 @@ NUM_PHASE_TYPES = len(PHASE_TYPES)
 
 SEQUENCE_GENERATOR_BASE_CONFIG = {
     'vocab_size': VOCAB_SIZE,
-    'd_model': 256,
-    'nhead': 8,
-    'num_encoder_layers': 6,
-    'num_decoder_layers': 6,
-    'dim_feedforward': 1024,
+    'd_model': 128,               # reduced from 256 — ~4x fewer attention params, much faster on CPU
+    'nhead': 4,                   # reduced from 8 to match d_model
+    'num_encoder_layers': 3,      # reduced from 6 — appropriate for ~3500 training sequences
+    'num_decoder_layers': 3,      # reduced from 6
+    'dim_feedforward': 512,       # reduced from 1024
     'dropout': 0.1,
     'max_seq_len': MAX_SEQ_LEN,
-    'num_duration_encoder_layers': 4,
+    'num_duration_encoder_layers': 2,  # reduced from 4
     'num_body_regions': NUM_BODY_REGIONS,
     'num_region_classes': NUM_REGION_CLASSES,
     # Base conditioning: 5 patient + 5 temporal = 10
@@ -211,12 +211,13 @@ EXCHANGE_TRAINING_CONFIG = {
     'batch_size': 32,
     'epochs': 100,
     'learning_rate': 0.0001,
-    'warmup_steps': 4000,
+    'warmup_steps': 500,          # reduced from 4000 — ~4-5 epochs; 4000 caused LR to ramp through epoch 36
     'label_smoothing': 0.1,
     'gradient_clip': 1.0,
     'early_stopping_patience': 15,
     'validation_split': 0.2,
     'duration_loss_weight': 0.3,
+    'duration_scale': 60.0,       # normalise durations — divide raw seconds by 60 before loss
     'augment_training': True,
     'duration_jitter_pct': 0.10,
 }
@@ -233,18 +234,19 @@ EXAMINATION_MODEL_CONFIG = {
 }
 
 EXAMINATION_TRAINING_CONFIG = {
-    'batch_size': 32,
+    'batch_size': 64,             # increased from 32 — halves steps/epoch on large dataset
     'epochs': 100,
     'learning_rate': 0.0001,
-    'warmup_steps': 4000,
+    'warmup_steps': 500,          # reduced from 4000 — same reason as exchange model
     'label_smoothing': 0.1,
     'gradient_clip': 1.0,
     'early_stopping_patience': 15,
     'validation_split': 0.2,
     'duration_loss_weight': 0.3,
+    'duration_scale': 600.0,      # normalise durations — divide raw seconds by 600 (10 min ref)
     'augment_training': True,
     'duration_jitter_pct': 0.10,
-    'oversample_factor': 2,
+    # oversample_factor removed — 165K sequences is sufficient without duplication
 }
 
 # ============================================================================
@@ -289,7 +291,7 @@ ORCHESTRATION_TRAINING_CONFIG = {
     'batch_size': 64,
     'epochs': 100,
     'learning_rate': 0.0003,
-    'warmup_steps': 2000,
+    'warmup_steps': 300,          # reduced from 2000 — orchestration dataset is smaller
     'label_smoothing': 0.1,
     'gradient_clip': 1.0,
     'early_stopping_patience': 20,
