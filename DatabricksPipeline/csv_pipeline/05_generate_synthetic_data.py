@@ -35,8 +35,12 @@ SYNTH_EXAM     = "/dbfs/FileStore/csv_pipeline/synthetic/exam"
 os.makedirs(SYNTH_EXCHANGE, exist_ok=True)
 os.makedirs(SYNTH_EXAM,     exist_ok=True)
 
-# How many synthetic days to generate per scanner
-NUM_DAYS_PER_SCANNER = 30
+# Synthetic date range — must be OUTSIDE the training window (2024-01-01 → 2024-01-31)
+# to avoid data leakage into the orchestration model.
+SYNTH_DATE_START     = "2024-02-01"
+SYNTH_DATE_END       = "2024-02-28"
+WEEKDAYS_ONLY        = True          # skip Saturdays/Sundays (MRI scanners are rarely used then)
+NUM_DAYS_PER_SCANNER = 30            # cap if the date range produces more days than needed
 
 # COMMAND ----------
 # =============================================================================
@@ -368,10 +372,17 @@ for serial_str, daily_schedules in customer_schedules.items():
     all_exchange_rows = []
     all_exam_rows     = []
 
-    # Use real dates from the customer schedule (or generate sequential dates)
-    dates = sorted(daily_schedules.keys())[:NUM_DAYS_PER_SCANNER]
+    # Generate dates from the synthetic range (outside training window — no leakage)
+    _start = datetime.strptime(SYNTH_DATE_START, '%Y-%m-%d')
+    _end   = datetime.strptime(SYNTH_DATE_END,   '%Y-%m-%d')
+    dates  = []
+    _d = _start
+    while _d <= _end and len(dates) < NUM_DAYS_PER_SCANNER:
+        if not WEEKDAYS_ONLY or _d.weekday() < 5:
+            dates.append(_d.strftime('%Y-%m-%d'))
+        _d += timedelta(days=1)
     if not dates:
-        print(f"  No dates in customer schedule — skipping.")
+        print(f"  No dates in synthetic range — skipping.")
         continue
 
     step_counter = {}   # tracks StepCount per patient_id across the day
