@@ -87,12 +87,11 @@ print("Examination model loaded.")
 with open(f"{MODELS_DIR}/orchestration/scanner_to_idx.json") as f:
     scanner_to_idx = json.load(f)
 
+orch_ckpt = torch.load(f"{MODELS_DIR}/orchestration/orchestration_model_best.pt", map_location=device)
 orch_config = dict(ORCHESTRATION_MODEL_CONFIG)
-orch_config['num_scanners'] = max(scanner_to_idx.values()) + 1
+orch_config['num_scanners'] = orch_ckpt['scanner_embedding.weight'].shape[0]
 orchestration_model = create_orchestration_model(orch_config).to(device)
-orchestration_model.load_state_dict(
-    torch.load(f"{MODELS_DIR}/orchestration/orchestration_model_best.pt", map_location=device)
-)
+orchestration_model.load_state_dict(orch_ckpt)
 orchestration_model.eval()
 print("Orchestration model loaded.")
 
