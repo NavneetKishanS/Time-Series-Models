@@ -635,3 +635,255 @@ if not df_exam_all.empty and 'startTime' in df_exam_all.columns:
     plt.tight_layout()
     display(fig4)
     plt.close(fig4)
+
+# COMMAND ----------
+# =============================================================================
+# Text evaluation report — copy/paste this to share for model improvement
+# =============================================================================
+
+from scipy import stats as _scipy_stats
+
+_W  = 72   # report width
+_HR = '─' * _W
+
+def _pct(n, total): return f"{100*n/total:.1f}%" if total > 0 else "N/A"
+def _safe_stat(arr, fn):
+    try: return fn(arr[~np.isnan(arr)])
+    except: return float('nan')
+
+lines = []
+lines += [
+    '=' * _W,
+    'SYNTHETIC DATA EVALUATION REPORT'.center(_W),
+    f'Generated: {pd.Timestamp.now().strftime("%Y-%m-%d %H:%M")}    '
+    f'Range: {SYNTH_DATE_START} → {SYNTH_DATE_END}',
+    '=' * _W,
+]
+
+# ── 1. OVERVIEW ──────────────────────────────────────────────────────────────
+lines += ['', _HR, ' 1. OVERVIEW', _HR]
+n_scanners = len(ex_files)
+n_ex_rows  = len(df_ex_all)
+n_exam_rows= len(df_exam_all)
+lines += [
+    f'  Scanners generated : {n_scanners}',
+    f'  Exchange rows      : {n_ex_rows:,}',
+    f'  Exam rows          : {n_exam_rows:,}',
+    f'  Avg exchange/scanner: {n_ex_rows/n_scanners:,.0f}' if n_scanners else '',
+    f'  Avg exam/scanner   : {n_exam_rows/n_scanners:,.0f}' if n_scanners else '',
+]
+
+# ── 2. PATIENT THROUGHPUT ─────────────────────────────────────────────────────
+lines += ['', _HR, ' 2. PATIENT THROUGHPUT (unique patients per scanner-day)', _HR]
+if not df_exam_all.empty and 'startTime' in df_exam_all.columns:
+    df_exam_all['_date'] = pd.to_datetime(df_exam_all['startTime']).dt.date
+    daily_pts = df_exam_all.groupby(['SN', '_date'])['PatientID'].nunique()
+    vals = daily_pts.values
+    lines += [
+        f'  Overall  — mean: {vals.mean():.1f}  std: {vals.std():.1f}  '
+        f'min: {vals.min()}  median: {int(np.median(vals))}  max: {vals.max()}',
+        '',
+        f'  {"Scanner":<12} {"Days":>5} {"Mean":>6} {"Std":>6} {"Min":>5} {"Med":>5} {"Max":>5}  {"Flag"}',
+    ]
+    for sn, grp in daily_pts.groupby(level='SN'):
+        v = grp.values
+        flag = ''
+        if v.mean() < 5:  flag = '<< very low throughput'
+        elif v.mean() > 25: flag = '>> very high throughput'
+        elif v.std() > 10:  flag = '!! high day-to-day variance'
+        lines.append(
+            f'  {str(sn):<12} {len(v):>5} {v.mean():>6.1f} {v.std():>6.1f} '
+            f'{v.min():>5} {int(np.median(v)):>5} {v.max():>5}  {flag}'
+        )
+
+# ── 3. BODY REGION DISTRIBUTION ───────────────────────────────────────────────
+lines += ['', _HR, ' 3. BODY REGION DISTRIBUTION (exam rows)', _HR]
+if not df_exam_all.empty and 'BodyPart' in df_exam_all.columns:
+    region_vc = df_exam_all['BodyPart'].value_counts()
+    total_r   = region_vc.sum()
+    lines.append(f'  {"Region":<12} {"Count":>7} {"Share":>7}')
+    for region, cnt in region_vc.items():
+        flag = ' !! dominant (>50%)' if cnt/total_r > 0.5 else \
+               ' << rare (<3%)'     if cnt/total_r < 0.03 else ''
+        lines.append(f'  {str(region):<12} {cnt:>7,} {_pct(cnt,total_r):>7}{flag}')
+    # Entropy — higher = more balanced
+    probs = region_vc.values / total_r
+    entropy = -np.sum(probs * np.log(probs + 1e-9))
+    max_entropy = np.log(len(region_vc))
+    lines += [
+        f'',
+        f'  Diversity entropy: {entropy:.3f} / {max_entropy:.3f} '
+        f'(1.0 = perfectly uniform)',
+        f'  Normalised       : {entropy/max_entropy:.3f}  '
+        + ('>> good spread' if entropy/max_entropy > 0.7 else '<< skewed — check orchestration model'),
+    ]
+
+# ── 4. EXAMINATION DURATION ───────────────────────────────────────────────────
+lines += ['', _HR, ' 4. EXAMINATION DURATION (minutes)', _HR]
+if not df_exam_all.empty and 'duration' in df_exam_all.columns:
+    dur_all = df_exam_all['duration'].dropna().values / 60.0
+    dur_all = dur_all[(dur_all > 0) & (dur_all < 4000/60)]
+    lines += [
+        f'  Overall  — mean: {dur_all.mean():.1f}  std: {dur_all.std():.1f}  '
+        f'p10: {np.percentile(dur_all,10):.1f}  p50: {np.percentile(dur_all,50):.1f}  '
+        f'p90: {np.percentile(dur_all,90):.1f}',
+        '',
+        f'  {"Region":<12} {"N":>5} {"Mean":>6} {"Std":>6} {"p10":>6} {"p50":>6} {"p90":>6}  {"Flag"}',
+    ]
+    for region in df_exam_all['BodyPart'].dropna().unique():
+        d = df_exam_all.loc[df_exam_all['BodyPart']==region,'duration'].dropna().values / 60.0
+        d = d[(d > 0) & (d < 4000/60)]
+        if len(d) == 0: continue
+        flag = ''
+        if d.mean() < 1:    flag = '<< implausibly short'
+        elif d.mean() > 60: flag = '>> implausibly long'
+        elif d.std() > 30:  flag = '!! very high variance'
+        lines.append(
+            f'  {str(region):<12} {len(d):>5} {d.mean():>6.1f} {d.std():>6.1f} '
+            f'{np.percentile(d,10):>6.1f} {np.percentile(d,50):>6.1f} '
+            f'{np.percentile(d,90):>6.1f}  {flag}'
+        )
+    n_short = int((dur_all < 1).sum())
+    n_long  = int((dur_all > 60).sum())
+    lines += [
+        '',
+        f'  Quality flags: {n_short} exams <1 min ({_pct(n_short,len(dur_all))}),  '
+        f'{n_long} exams >60 min ({_pct(n_long,len(dur_all))})',
+    ]
+
+# ── 5. FINISH EVENT DISTRIBUTION ─────────────────────────────────────────────
+lines += ['', _HR, ' 5. EXAM FINISH EVENT DISTRIBUTION', _HR]
+if not df_exam_all.empty and 'FinishEvent' in df_exam_all.columns:
+    fe_vc = df_exam_all['FinishEvent'].value_counts()
+    total_fe = fe_vc.sum()
+    for fe, cnt in fe_vc.items():
+        lines.append(f'  {str(fe):<25} {cnt:>6,}  ({_pct(cnt, total_fe)})')
+    stopped_pct = df_exam_all['FinishEvent'].eq('Stopped by User').mean()
+    lines += [
+        '',
+        f'  Stopped-by-user rate: {stopped_pct:.1%}  '
+        + ('>> high abort rate — examination model may be ending sequences early'
+           if stopped_pct > 0.2 else 'OK'),
+    ]
+
+# ── 6. EXCHANGE EVENT TYPE DISTRIBUTION ───────────────────────────────────────
+lines += ['', _HR, ' 6. EXCHANGE EVENT TYPE DISTRIBUTION', _HR]
+if not df_ex_all.empty and 'sourceID' in df_ex_all.columns:
+    ev_vc  = df_ex_all['sourceID'].value_counts()
+    total_ev = ev_vc.sum()
+    lines.append(f'  {"Event":<20} {"Count":>8} {"Share":>7}')
+    for ev, cnt in ev_vc.items():
+        lines.append(f'  {str(ev):<20} {cnt:>8,} {_pct(cnt,total_ev):>7}')
+
+# ── 7. EXCHANGE TIME-BETWEEN-EVENTS ──────────────────────────────────────────
+lines += ['', _HR, ' 7. EXCHANGE INTER-EVENT GAPS (seconds)', _HR]
+if not df_ex_all.empty and 'timediff' in df_ex_all.columns:
+    td = df_ex_all['timediff'].dropna().values
+    td = td[(td >= 0) & (td < 86400)]
+    lines += [
+        f'  mean: {td.mean():.1f}  std: {td.std():.1f}  '
+        f'p25: {np.percentile(td,25):.1f}  p50: {np.percentile(td,50):.1f}  '
+        f'p75: {np.percentile(td,75):.1f}  p99: {np.percentile(td,99):.1f}',
+        f'  Gaps >1 hour : {int((td>3600).sum()):,}  ({_pct(int((td>3600).sum()),len(td))})',
+        f'  Zero gaps    : {int((td==0).sum()):,}  ({_pct(int((td==0).sum()),len(td))})',
+    ]
+
+# ── 8. STEP COUNT (scans per patient) ────────────────────────────────────────
+lines += ['', _HR, ' 8. SCANS PER PATIENT (StepCount)', _HR]
+if not df_exam_all.empty and 'StepCount' in df_exam_all.columns:
+    # Max StepCount per patient = number of scans that patient had
+    sc = df_exam_all.groupby('PatientID')['StepCount'].max()
+    vals = sc.values
+    lines += [
+        f'  mean: {vals.mean():.1f}  std: {vals.std():.1f}  '
+        f'min: {vals.min()}  median: {int(np.median(vals))}  max: {vals.max()}',
+        f'  Patients with only 1 scan : {int((vals==1).sum()):,}  ({_pct(int((vals==1).sum()),len(vals))})',
+        f'  Patients with >10 scans   : {int((vals>10).sum()):,}  ({_pct(int((vals>10).sum()),len(vals))})',
+    ]
+    if vals.mean() > 8:
+        lines.append('  >> high mean step count — examination model may not be terminating cleanly')
+    elif vals.mean() < 2:
+        lines.append('  << low mean step count — examination model may be terminating too early')
+
+# ── 9. PAUSE TIMES ────────────────────────────────────────────────────────────
+lines += ['', _HR, ' 9. INTER-EXAMINATION PAUSE TIMES (seconds)', _HR]
+if not df_exam_all.empty and 'pauseTime' in df_exam_all.columns:
+    pt = df_exam_all['pauseTime'].dropna().values
+    pt = pt[pt > 0]
+    if len(pt):
+        lines += [
+            f'  mean: {pt.mean():.0f}s  std: {pt.std():.0f}s  '
+            f'p25: {np.percentile(pt,25):.0f}s  p50: {np.percentile(pt,50):.0f}s  '
+            f'p90: {np.percentile(pt,90):.0f}s',
+        ]
+
+# ── 10. DEMOGRAPHIC DISTRIBUTIONS ────────────────────────────────────────────
+lines += ['', _HR, ' 10. PATIENT DEMOGRAPHICS', _HR]
+if not df_exam_all.empty:
+    for col, label, lo, hi in [
+        ('Age',    'Age (years)',  1,  100),
+        ('Weight', 'Weight (kg)', 20,  200),
+        ('Height', 'Height (m)',  0.5, 2.5),
+    ]:
+        if col not in df_exam_all.columns: continue
+        v = df_exam_all[col].dropna().values.astype(float)
+        v = v[(v >= lo) & (v <= hi)]
+        if len(v) == 0: continue
+        lines.append(
+            f'  {label:<18} mean: {v.mean():.1f}  std: {v.std():.1f}  '
+            f'[{v.min():.1f} – {v.max():.1f}]'
+        )
+    if 'Direction' in df_exam_all.columns:
+        hf_rate = df_exam_all['Direction'].eq('Head First').mean()
+        lines.append(f'  Head First rate   : {hf_rate:.1%}')
+
+# ── 11. WEEKDAY PATTERN ───────────────────────────────────────────────────────
+lines += ['', _HR, ' 11. WEEKDAY PATIENT LOAD PATTERN', _HR]
+if not df_exam_all.empty and 'startTime' in df_exam_all.columns:
+    df_exam_all['_dow'] = pd.to_datetime(df_exam_all['startTime']).dt.day_name()
+    dow_order = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday']
+    dow_counts = df_exam_all.groupby('_dow')['PatientID'].nunique()
+    for dow in dow_order:
+        if dow in dow_counts:
+            bar = '█' * int(dow_counts[dow] / max(dow_counts.values) * 30)
+            lines.append(f'  {dow:<12} {bar:<30} {dow_counts[dow]:>5}')
+
+# ── 12. MODEL HEALTH FLAGS ───────────────────────────────────────────────────
+lines += ['', _HR, ' 12. MODEL HEALTH SUMMARY', _HR]
+flags = []
+if not df_exam_all.empty:
+    dur = df_exam_all['duration'].dropna().values / 60.0
+    dur = dur[(dur > 0) & (dur < 4000/60)]
+    if dur.mean() < 5:
+        flags.append('[EXAM MODEL]  Mean duration {:.1f} min — sequences terminating too early'.format(dur.mean()))
+    if dur.mean() > 45:
+        flags.append('[EXAM MODEL]  Mean duration {:.1f} min — sequences running too long'.format(dur.mean()))
+
+    if 'BodyPart' in df_exam_all.columns:
+        probs = df_exam_all['BodyPart'].value_counts(normalize=True).values
+        ent   = -np.sum(probs * np.log(probs + 1e-9)) / np.log(len(probs))
+        if ent < 0.5:
+            flags.append('[ORCH MODEL]  Body region entropy {:.2f} — model collapsing to few regions'.format(ent))
+
+    if 'StepCount' in df_exam_all.columns:
+        sc_mean = df_exam_all.groupby('PatientID')['StepCount'].max().mean()
+        if sc_mean > 10:
+            flags.append('[EXAM MODEL]  Mean step count {:.1f} — model not generating END tokens cleanly'.format(sc_mean))
+
+if not df_ex_all.empty and 'timediff' in df_ex_all.columns:
+    td = df_ex_all['timediff'].dropna().values
+    td = td[(td >= 0) & (td < 86400)]
+    zero_pct = (td == 0).mean()
+    if zero_pct > 0.3:
+        flags.append('[EXCHANGE MODEL]  {:.0%} of gaps are zero — duration prediction may be collapsed'.format(zero_pct))
+
+if flags:
+    for f in flags:
+        lines.append(f'  ⚠  {f}')
+else:
+    lines.append('  No critical flags — data looks plausible.')
+
+lines += ['', '=' * _W, 'END OF REPORT'.center(_W), '=' * _W]
+
+report_text = '\n'.join(lines)
+print(report_text)
