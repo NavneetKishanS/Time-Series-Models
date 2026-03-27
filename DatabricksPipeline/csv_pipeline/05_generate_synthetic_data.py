@@ -98,9 +98,7 @@ print("Orchestration model loaded.")
 
 # --- demographic distributions per body region (sampled from real data) ---
 orch_samples, _ = extract_orchestration_samples(data)
-demographic_distributions = build_demographic_distributions(
-    data['examination'], BODY_REGION_TO_ID
-)
+demographic_distributions = build_demographic_distributions(data)
 
 # COMMAND ----------
 # =============================================================================
