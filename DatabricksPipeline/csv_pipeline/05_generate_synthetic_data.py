@@ -506,3 +506,121 @@ for serial_str in customer_schedules.keys():
     links += f'<a href="/files/csv_pipeline/synthetic/exam/DATA_{serial_str}.csv">Exam {serial_str}</a></li>\n'
 
 displayHTML(f'<h3>Synthetic CSVs</h3><ul>{links}</ul>')
+
+# COMMAND ----------
+# =============================================================================
+# Visualizations — synthetic data quality
+# =============================================================================
+
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
+import glob as _glob
+
+# ── Load all synthetic CSVs ──────────────────────────────────────────────────
+ex_files   = _glob.glob(f"{SYNTH_EXCHANGE}/DATA_*.csv")
+exam_files = _glob.glob(f"{SYNTH_EXAM}/DATA_*.csv")
+
+df_ex_all   = pd.concat([pd.read_csv(f) for f in ex_files],   ignore_index=True) if ex_files   else pd.DataFrame()
+df_exam_all = pd.concat([pd.read_csv(f) for f in exam_files], ignore_index=True) if exam_files else pd.DataFrame()
+
+print(f"Loaded {len(df_ex_all):,} exchange rows and {len(df_exam_all):,} exam rows across {len(ex_files)} scanners.")
+
+# ── Figure 1: Exam overview (3 panels) ──────────────────────────────────────
+fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+fig.suptitle('Synthetic Examination Data', fontsize=14, fontweight='bold')
+
+if not df_exam_all.empty:
+    # Body region distribution
+    region_counts = df_exam_all['BodyPart'].value_counts()
+    axes[0].bar(region_counts.index, region_counts.values, color='steelblue', edgecolor='white')
+    axes[0].set_title('Body Region Distribution')
+    axes[0].set_xlabel('Body Region')
+    axes[0].set_ylabel('Count')
+    axes[0].tick_params(axis='x', rotation=45)
+
+    # Examination duration histogram
+    durations = df_exam_all['duration'].dropna()
+    durations = durations[(durations > 0) & (durations < 4000)]
+    axes[1].hist(durations / 60, bins=40, color='steelblue', edgecolor='white')
+    axes[1].set_title('Examination Duration')
+    axes[1].set_xlabel('Duration (minutes)')
+    axes[1].set_ylabel('Count')
+    axes[1].axvline(durations.mean() / 60, color='red', linestyle='--', linewidth=1.5, label=f'Mean {durations.mean()/60:.1f} min')
+    axes[1].legend()
+
+    # Rows per scanner
+    scanner_counts = df_exam_all['SN'].value_counts().sort_index()
+    axes[2].bar(scanner_counts.index.astype(str), scanner_counts.values, color='steelblue', edgecolor='white')
+    axes[2].set_title('Exam Rows per Scanner')
+    axes[2].set_xlabel('Scanner SN')
+    axes[2].set_ylabel('Count')
+    axes[2].tick_params(axis='x', rotation=45)
+
+plt.tight_layout()
+display(fig)
+plt.close(fig)
+
+# ── Figure 2: Duration by body region (box plot) ────────────────────────────
+if not df_exam_all.empty:
+    regions = df_exam_all['BodyPart'].dropna().unique()
+    region_data = [
+        df_exam_all.loc[df_exam_all['BodyPart'] == r, 'duration'].dropna().values / 60
+        for r in regions
+    ]
+    region_data = [d[(d > 0) & (d < 4000 / 60)] for d in region_data]
+
+    fig2, ax2 = plt.subplots(figsize=(14, 5))
+    ax2.boxplot(region_data, labels=regions, patch_artist=True,
+                boxprops=dict(facecolor='steelblue', alpha=0.7),
+                medianprops=dict(color='red', linewidth=2))
+    ax2.set_title('Examination Duration by Body Region', fontsize=13, fontweight='bold')
+    ax2.set_xlabel('Body Region')
+    ax2.set_ylabel('Duration (minutes)')
+    ax2.tick_params(axis='x', rotation=30)
+    plt.tight_layout()
+    display(fig2)
+    plt.close(fig2)
+
+# ── Figure 3: Exchange event type distribution ───────────────────────────────
+if not df_ex_all.empty:
+    fig3, axes3 = plt.subplots(1, 2, figsize=(14, 5))
+    fig3.suptitle('Synthetic Exchange Data', fontsize=14, fontweight='bold')
+
+    event_counts = df_ex_all['sourceID'].value_counts()
+    axes3[0].barh(event_counts.index, event_counts.values, color='teal', edgecolor='white')
+    axes3[0].set_title('Event Type Distribution')
+    axes3[0].set_xlabel('Count')
+    axes3[0].invert_yaxis()
+
+    timediff = df_ex_all['timediff'].dropna()
+    timediff = timediff[(timediff >= 0) & (timediff < 3600)]
+    axes3[1].hist(timediff, bins=40, color='teal', edgecolor='white')
+    axes3[1].set_title('Time Between Events')
+    axes3[1].set_xlabel('Seconds')
+    axes3[1].set_ylabel('Count')
+
+    plt.tight_layout()
+    display(fig3)
+    plt.close(fig3)
+
+# ── Figure 4: Daily patient count per scanner ───────────────────────────────
+if not df_exam_all.empty and 'startTime' in df_exam_all.columns:
+    df_exam_all['date'] = pd.to_datetime(df_exam_all['startTime']).dt.date
+    daily = df_exam_all.groupby(['SN', 'date'])['PatientID'].nunique().reset_index()
+    daily.columns = ['SN', 'date', 'patients']
+
+    scanners = daily['SN'].unique()
+    fig4, ax4 = plt.subplots(figsize=(16, 5))
+    for sn in scanners:
+        d = daily[daily['SN'] == sn].sort_values('date')
+        ax4.plot(d['date'], d['patients'], marker='o', markersize=3, linewidth=1, label=str(sn), alpha=0.7)
+    ax4.set_title('Unique Patients per Day per Scanner', fontsize=13, fontweight='bold')
+    ax4.set_xlabel('Date')
+    ax4.set_ylabel('Patients')
+    ax4.legend(title='Scanner', bbox_to_anchor=(1.01, 1), loc='upper left', fontsize=8)
+    ax4.tick_params(axis='x', rotation=30)
+    plt.tight_layout()
+    display(fig4)
+    plt.close(fig4)
