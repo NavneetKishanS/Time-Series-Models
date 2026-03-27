@@ -723,33 +723,36 @@ lines += ['', _HR, ' 4. EXAMINATION DURATION (minutes)', _HR]
 if not df_exam_all.empty and 'duration' in df_exam_all.columns:
     dur_all = df_exam_all['duration'].dropna().values / 60.0
     dur_all = dur_all[(dur_all > 0) & (dur_all < 4000/60)]
-    lines += [
-        f'  Overall  — mean: {dur_all.mean():.1f}  std: {dur_all.std():.1f}  '
-        f'p10: {np.percentile(dur_all,10):.1f}  p50: {np.percentile(dur_all,50):.1f}  '
-        f'p90: {np.percentile(dur_all,90):.1f}',
-        '',
-        f'  {"Region":<12} {"N":>5} {"Mean":>6} {"Std":>6} {"p10":>6} {"p50":>6} {"p90":>6}  {"Flag"}',
-    ]
-    for region in df_exam_all['BodyPart'].dropna().unique():
-        d = df_exam_all.loc[df_exam_all['BodyPart']==region,'duration'].dropna().values / 60.0
-        d = d[(d > 0) & (d < 4000/60)]
-        if len(d) == 0: continue
-        flag = ''
-        if d.mean() < 1:    flag = '<< implausibly short'
-        elif d.mean() > 60: flag = '>> implausibly long'
-        elif d.std() > 30:  flag = '!! very high variance'
-        lines.append(
-            f'  {str(region):<12} {len(d):>5} {d.mean():>6.1f} {d.std():>6.1f} '
-            f'{np.percentile(d,10):>6.1f} {np.percentile(d,50):>6.1f} '
-            f'{np.percentile(d,90):>6.1f}  {flag}'
-        )
-    n_short = int((dur_all < 1).sum())
-    n_long  = int((dur_all > 60).sum())
-    lines += [
-        '',
-        f'  Quality flags: {n_short} exams <1 min ({_pct(n_short,len(dur_all))}),  '
-        f'{n_long} exams >60 min ({_pct(n_long,len(dur_all))})',
-    ]
+    if len(dur_all) == 0:
+        lines.append('  No valid duration rows found.')
+    else:
+        lines += [
+            f'  Overall  — mean: {dur_all.mean():.1f}  std: {dur_all.std():.1f}  '
+            f'p10: {np.percentile(dur_all,10):.1f}  p50: {np.percentile(dur_all,50):.1f}  '
+            f'p90: {np.percentile(dur_all,90):.1f}',
+            '',
+            f'  {"Region":<12} {"N":>5} {"Mean":>6} {"Std":>6} {"p10":>6} {"p50":>6} {"p90":>6}  {"Flag"}',
+        ]
+        for region in df_exam_all['BodyPart'].dropna().unique():
+            d = df_exam_all.loc[df_exam_all['BodyPart']==region,'duration'].dropna().values / 60.0
+            d = d[(d > 0) & (d < 4000/60)]
+            if len(d) == 0: continue
+            flag = ''
+            if d.mean() < 1:    flag = '<< implausibly short'
+            elif d.mean() > 60: flag = '>> implausibly long'
+            elif d.std() > 30:  flag = '!! very high variance'
+            lines.append(
+                f'  {str(region):<12} {len(d):>5} {d.mean():>6.1f} {d.std():>6.1f} '
+                f'{np.percentile(d,10):>6.1f} {np.percentile(d,50):>6.1f} '
+                f'{np.percentile(d,90):>6.1f}  {flag}'
+            )
+        n_short = int((dur_all < 1).sum())
+        n_long  = int((dur_all > 60).sum())
+        lines += [
+            '',
+            f'  Quality flags: {n_short} exams <1 min ({_pct(n_short,len(dur_all))}),  '
+            f'{n_long} exams >60 min ({_pct(n_long,len(dur_all))})',
+        ]
 
 # ── 5. FINISH EVENT DISTRIBUTION ─────────────────────────────────────────────
 lines += ['', _HR, ' 5. EXAM FINISH EVENT DISTRIBUTION', _HR]
@@ -854,10 +857,11 @@ flags = []
 if not df_exam_all.empty:
     dur = df_exam_all['duration'].dropna().values / 60.0
     dur = dur[(dur > 0) & (dur < 4000/60)]
-    if dur.mean() < 5:
-        flags.append('[EXAM MODEL]  Mean duration {:.1f} min — sequences terminating too early'.format(dur.mean()))
-    if dur.mean() > 45:
-        flags.append('[EXAM MODEL]  Mean duration {:.1f} min — sequences running too long'.format(dur.mean()))
+    if len(dur) > 0:
+        if dur.mean() < 5:
+            flags.append('[EXAM MODEL]  Mean duration {:.1f} min — sequences terminating too early'.format(dur.mean()))
+        if dur.mean() > 45:
+            flags.append('[EXAM MODEL]  Mean duration {:.1f} min — sequences running too long'.format(dur.mean()))
 
     if 'BodyPart' in df_exam_all.columns:
         probs = df_exam_all['BodyPart'].value_counts(normalize=True).values
