@@ -49,11 +49,17 @@ NUM_DAYS_PER_SCANNER = 30            # cap if the date range produces more days 
 
 from AlternatingPipeline.config import (
     EXCHANGE_MODEL_CONFIG, EXAMINATION_MODEL_CONFIG, ORCHESTRATION_MODEL_CONFIG,
+    EXCHANGE_TRAINING_CONFIG, EXAMINATION_TRAINING_CONFIG,
     ID_TO_SOURCEID, SOURCEID_VOCAB, BODY_REGIONS, BODY_REGION_TO_ID,
     START_REGION_ID, END_REGION_ID, PHASE_TYPES, GENERATION_CONFIG,
     START_TOKEN_ID, END_TOKEN_ID, PAD_TOKEN_ID, BREAK_TOKEN_ID,
     NUM_BODY_REGIONS, ORCH_PAD_TOKEN_ID,
 )
+
+# Duration unscaling — models were trained on (raw_seconds / duration_scale),
+# so generated durations must be multiplied back to get real seconds.
+EXCHANGE_DURATION_SCALE  = EXCHANGE_TRAINING_CONFIG['duration_scale']   # 60.0
+EXAMINATION_DURATION_SCALE = EXAMINATION_TRAINING_CONFIG['duration_scale']  # 600.0
 from AlternatingPipeline.models.exchange_model    import create_exchange_model
 from AlternatingPipeline.models.examination_model import create_examination_model
 from AlternatingPipeline.models.orchestration_model import create_orchestration_model
@@ -194,7 +200,7 @@ def _generate_exchange_rows(tokens, durations, day_start, t_offset,
             continue
 
         source_id = ID_TO_SOURCEID.get(tok, 'UNK')
-        dur       = durations_list[i] if i < len(durations_list) else 0.0
+        dur       = (durations_list[i] if i < len(durations_list) else 0.0) * EXCHANGE_DURATION_SCALE
         dt        = day_start + timedelta(seconds=t)
 
         row = {
@@ -265,7 +271,7 @@ def _generate_exam_rows(tokens, durations, day_start, t_offset,
         if tok in (START_TOKEN_ID, END_TOKEN_ID, PAD_TOKEN_ID):
             continue
 
-        dur = durations_list[i] if i < len(durations_list) else 0.0
+        dur = (durations_list[i] if i < len(durations_list) else 0.0) * EXAMINATION_DURATION_SCALE
 
         if tok == MSR_100:
             msr_start   = day_start + timedelta(seconds=t)
