@@ -101,3 +101,22 @@ COIL_ABBREV_MAP = {
     'PA1': 'PA1', 'PA2': 'PA2', 'PA3': 'PA3',
     'PA4': 'PA4', 'PA5': 'PA5', 'PA6': 'PA6',
 }
+
+# ============================================================================
+# TOKEN VOCABULARY & BODY REGION MAP  (mirrors AlternatingPipeline/config.py)
+# Used by preprocessing notebooks to add token_id and BodyGroup integer columns.
+# ============================================================================
+
+SOURCEID_VOCAB = {
+    'PAD': 0, 'MRI_CCS_11': 1, 'MRI_EXU_95': 2, 'MRI_FRR_18': 3,
+    'MRI_FRR_257': 4, 'MRI_FRR_264': 5, 'MRI_FRR_2': 6, 'MRI_FRR_3': 7,
+    'MRI_FRR_34': 8, 'MRI_MPT_1005': 9, 'MRI_MSR_100': 10, 'START': 11,
+    'MRI_MSR_104': 12, 'MRI_MSR_21': 13, 'END': 14, 'MRI_MSR_34': 15,
+    'MRI_FRR_256': 16, 'UNK': 17,
+}
+
+BODY_REGIONS = [
+    'HEAD', 'NECK', 'CHEST', 'ABDOMEN', 'PELVIS',
+    'SPINE', 'ARM', 'LEG', 'HAND', 'FOOT', 'UNKNOWN',
+]
+BODY_REGION_TO_ID = {r: i for i, r in enumerate(BODY_REGIONS)}

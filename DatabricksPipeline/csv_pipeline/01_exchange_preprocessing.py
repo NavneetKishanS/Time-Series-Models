@@ -466,10 +466,53 @@ for serial_number in SERIAL_NUMBERS:
         df_merged = df_filter_final.copy()
 
     # -------------------------------------------------------------------------
-    # Step 8: Save CSV
+    # Step 8: Align schema to match 05_generate_synthetic_data.py output, then save
     # -------------------------------------------------------------------------
+    df_out = df_merged.copy()
+
+    # customer_idx — position of this serial in SERIAL_NUMBERS
+    df_out['customer_idx'] = SERIAL_NUMBERS.index(serial_number)
+
+    # sample_idx — increments when timediff resets (new exchange block)
+    df_out['sample_idx'] = (
+        df_out['timediff'] < df_out['timediff'].shift(1).fillna(-1)
+    ).cumsum()
+
+    # step — position within the current block
+    df_out['step'] = df_out.groupby('sample_idx').cumcount()
+
+    # Token columns
+    df_out['token_id']   = df_out['sourceID'].map(lambda x: SOURCEID_VOCAB.get(str(x), 17))
+    df_out['token_name'] = df_out['sourceID']
+
+    # BodyGroup as integer + text (BodyGroup_from/to are currently text strings)
+    df_out['BodyGroup_from_text'] = df_out['BodyGroup_from'].astype(str).str.upper()
+    df_out['BodyGroup_to_text']   = df_out['BodyGroup_to'].astype(str).str.upper()
+    df_out['BodyGroup_from'] = df_out['BodyGroup_from_text'].map(
+        lambda x: BODY_REGION_TO_ID.get(x, len(BODY_REGIONS) - 1))
+    df_out['BodyGroup_to']   = df_out['BodyGroup_to_text'].map(
+        lambda x: BODY_REGION_TO_ID.get(x, len(BODY_REGIONS) - 1))
+
+    # total_time — total duration of this block in seconds (max timediff per block)
+    df_out['total_time'] = df_out.groupby('sample_idx')['timediff'].transform('max')
+
+    # Model columns — not available at preprocessing time
+    df_out['predicted_mu']     = float('nan')
+    df_out['predicted_sigma']  = float('nan')
+    df_out['sampled_duration'] = float('nan')
+
+    # Select and reorder to match 05 schema
+    _out_cols = [
+        'SN', 'customer_idx', 'sample_idx', 'step', 'token_id', 'token_name',
+        'BodyGroup_from', 'BodyGroup_to', 'BodyGroup_from_text', 'BodyGroup_to_text',
+        'PatientID_from', 'PatientID_to',
+        'predicted_mu', 'predicted_sigma', 'sampled_duration', 'total_time',
+        'timediff', 'datetime',
+    ]
+    df_out = df_out[[c for c in _out_cols if c in df_out.columns]]
+
     csv_path = f"{EXCHANGE_OUTPUT_DIR}/DATA_{serial_number}.csv"
-    df_merged.to_csv(csv_path, index=False, header=True)
-    print(f"  Saved {len(df_merged):,} rows → {csv_path}")
+    df_out.to_csv(csv_path, index=False, header=True)
+    print(f"  Saved {len(df_out):,} rows → {csv_path}")
 
 print("\nExchange preprocessing complete.")

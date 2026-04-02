@@ -539,8 +539,20 @@ for serial_number in SERIAL_NUMBERS:
             df[col_name] = np.nan
 
     # -------------------------------------------------------------------------
-    # Save CSV
+    # Add schema columns to match 05_generate_synthetic_data.py output, then save
     # -------------------------------------------------------------------------
+    df['customer_idx'] = SERIAL_NUMBERS.index(serial_number)
+
+    # sample_idx — increments each time PatientID changes (one patient = one sample)
+    df['sample_idx'] = (
+        df['PatientID'] != df['PatientID'].shift(1, fill_value='__START__')
+    ).cumsum() - 1
+
+    # Model columns — not available at preprocessing time
+    df['predicted_mu']     = float('nan')
+    df['predicted_sigma']  = float('nan')
+    df['sampled_duration'] = float('nan')
+
     csv_path = f"{EXAM_OUTPUT_DIR}/DATA_{serial_number}.csv"
     df.to_csv(csv_path, index=False, header=True)
     print(f"  Saved {len(df):,} rows → {csv_path}")
