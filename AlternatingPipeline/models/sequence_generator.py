@@ -270,7 +270,8 @@ class SequenceGeneratorModel(nn.Module):
 
     @torch.no_grad()
     def generate(self, conditioning, body_region_info, phase_type=None,
-                 max_length=None, temperature=1.0, top_k=0, top_p=0.9):
+                 max_length=None, temperature=1.0, top_k=0, top_p=0.9,
+                 return_stats=False):
         """
         Two-phase generation:
         1. Autoregressive token generation
@@ -284,10 +285,13 @@ class SequenceGeneratorModel(nn.Module):
             temperature: sampling temperature
             top_k: top-k filtering (0 = disabled)
             top_p: nucleus sampling threshold
+            return_stats: if True, also return (duration_mu, duration_sigma)
 
         Returns:
             generated_tokens: [batch, seq_len]
             generated_durations: [batch, seq_len]
+            duration_mu: [batch, seq_len]  — only if return_stats=True
+            duration_sigma: [batch, seq_len] — only if return_stats=True
         """
         self.eval()
 
@@ -361,6 +365,8 @@ class SequenceGeneratorModel(nn.Module):
         # Sample durations from Normal(mu, sigma), clamp to non-negative
         durations = torch.normal(duration_mu, duration_sigma).clamp(min=0.0)
 
+        if return_stats:
+            return generated, durations, duration_mu, duration_sigma
         return generated, durations
 
     def _ensure_batched(self, body_region_info, device):
