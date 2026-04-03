@@ -36,7 +36,11 @@
       "Bash(git commit -m \"$\\(cat <<''EOF''\nfeat: Add preprocessed data with temporal features\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
       "Bash(python3:*)",
       "Bash(del \"C:\\\\Users\\\\lukis\\\\Documents\\\\GitHub\\\\Time-Series-Models\\\\AlternatingPipeline\\\\generation\\\\bucket_generator.py\")",
-      "Bash(head -5 \"C:\\\\Users\\\\lukis\\\\Documents\\\\GitHub\\\\Time-Series-Models\\\\PXChange_Refactored\\\\data\"/*.csv | head -30)"
+      "Bash(head -5 \"C:\\\\Users\\\\lukis\\\\Documents\\\\GitHub\\\\Time-Series-Models\\\\PXChange_Refactored\\\\data\"/*.csv | head -30)",
+      "Bash(git push:*)",
+      "Bash(git checkout:*)",
+      "Bash(git merge:*)",
+      "Bash(git commit:*)"
     ],
     "deny": [],
     "ask": []
