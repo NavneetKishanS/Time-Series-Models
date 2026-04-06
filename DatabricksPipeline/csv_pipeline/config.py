@@ -120,3 +120,37 @@ BODY_REGIONS = [
     'SPINE', 'ARM', 'LEG', 'HAND', 'FOOT', 'UNKNOWN',
 ]
 BODY_REGION_TO_ID = {r: i for i, r in enumerate(BODY_REGIONS)}
+
+# ============================================================================
+# CONSTANTS FORMERLY IN DatabricksPipeline/config.py (now removed)
+# Required by 03_build_preprocessed_pkl.py
+# ============================================================================
+
+# Alias for SOURCE_ID_FILTER — used by step 03 Spark queries
+REAL_EVENT_TYPES = SOURCE_ID_FILTER
+
+# Maximum exchange block duration in seconds (2 hours); longer blocks are
+# treated as overnight gaps and discarded (mirrors train_exchange.py)
+MAX_EXCHANGE_DURATION = 7200
+
+# Phase labels for exchange sequences
+PHASE_TYPES = {
+    'startup':  0,   # First exchange of the day
+    'between':  1,   # Between-patient exchanges
+    'shutdown': 2,   # Last exchange of the day
+}
+
+# Coil element columns used by examination sequences
+COIL_COLUMNS = [
+    'BC',
+    'SP1', 'SP2', 'SP3', 'SP4', 'SP5', 'SP6', 'SP7', 'SP8',
+    '15K',
+    'HW1', 'HW2', 'HW3',
+    'HE1', 'HE2', 'HE3', 'HE4',
+    'NE1', 'NE2',
+    'SHL',
+    'BO1', 'BO2', 'BO3',
+    'FA', 'TO', 'FS',
+    'PA1', 'PA2', 'PA3', 'PA4', 'PA5', 'PA6',
+    'SN',
+]

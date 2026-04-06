@@ -22,9 +22,6 @@
 %pip install openpyxl
 
 # COMMAND ----------
-%run ../config
-
-# COMMAND ----------
 %run ./config
 
 # COMMAND ----------

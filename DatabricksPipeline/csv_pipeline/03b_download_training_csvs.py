@@ -11,9 +11,6 @@
 #   /dbfs/FileStore/csv_pipeline/exam/DATA_{serial}.csv      (one per scanner)
 
 # COMMAND ----------
-%run ../config
-
-# COMMAND ----------
 %run ./config
 
 # COMMAND ----------
