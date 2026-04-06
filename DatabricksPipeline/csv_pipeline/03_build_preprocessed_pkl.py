@@ -118,8 +118,10 @@ for serial in SERIAL_NUMBERS:
     df = pd.read_csv(csv_path)
     df['datetime'] = pd.to_datetime(df['datetime'], errors='coerce')
 
-    # Keep only genuine event rows (sourceID not empty)
-    df = df[df['sourceID'].notna() & (df['sourceID'].astype(str).str.strip() != '')].copy()
+    # Keep only genuine event rows (token_name not empty)
+    # Step 01 renamed sourceID → token_name; token_id is the integer token
+    name_col = 'token_name' if 'token_name' in df.columns else 'sourceID'
+    df = df[df[name_col].notna() & (df[name_col].astype(str).str.strip() != '')].copy()
     df = df.reset_index(drop=True)
 
     if df.empty:
@@ -132,18 +134,26 @@ for serial in SERIAL_NUMBERS:
                   else (1 if str(x).strip().lower() == 'feet first' else -1)
     )
 
-    # Map body groups to region IDs
-    df['body_from_id'] = df['BodyGroup_from'].apply(
-        lambda x: _BODY_REGION_TO_ID.get(str(x).strip().upper(), 10) if pd.notna(x) else 10
-    )
-    df['body_to_id'] = df['BodyGroup_to'].apply(
-        lambda x: _BODY_REGION_TO_ID.get(str(x).strip().upper(), 10) if pd.notna(x) else 10
-    )
+    # Body group IDs — step 01 outputs integer IDs in BodyGroup_from/to;
+    # fall back to text columns (BodyGroup_from/to_text) → string mapping for older CSVs
+    if pd.api.types.is_integer_dtype(df['BodyGroup_from']) or df['BodyGroup_from'].dropna().apply(lambda x: str(x).isdigit()).all():
+        df['body_from_id'] = pd.to_numeric(df['BodyGroup_from'], errors='coerce').fillna(10).astype(int)
+        df['body_to_id']   = pd.to_numeric(df['BodyGroup_to'],   errors='coerce').fillna(10).astype(int)
+    else:
+        df['body_from_id'] = df['BodyGroup_from'].apply(
+            lambda x: _BODY_REGION_TO_ID.get(str(x).strip().upper(), 10) if pd.notna(x) else 10
+        )
+        df['body_to_id'] = df['BodyGroup_to'].apply(
+            lambda x: _BODY_REGION_TO_ID.get(str(x).strip().upper(), 10) if pd.notna(x) else 10
+        )
 
-    # Tokenise sourceID
-    df['sourceID_token'] = df['sourceID'].apply(
-        lambda x: SOURCEID_VOCAB.get(str(x), SOURCEID_VOCAB['UNK'])
-    )
+    # Token IDs — step 01 writes integer token_id; fall back to vocab lookup
+    if 'token_id' in df.columns:
+        df['sourceID_token'] = pd.to_numeric(df['token_id'], errors='coerce').fillna(SOURCEID_VOCAB['UNK']).astype(int)
+    else:
+        df['sourceID_token'] = df['sourceID'].apply(
+            lambda x: SOURCEID_VOCAB.get(str(x), SOURCEID_VOCAB['UNK'])
+        )
 
     # Detect block boundaries by PatientID_to changes
     pid_col = 'PatientID_to' if 'PatientID_to' in df.columns else 'BodyGroup_to'
@@ -563,7 +573,8 @@ for serial in SERIAL_NUMBERS:
         continue
 
     df = pd.read_csv(csv_path)
-    df = df[df['sourceID'].notna() & (df['sourceID'].astype(str).str.strip() != '')].copy()
+    name_col = 'token_name' if 'token_name' in df.columns else 'sourceID'
+    df = df[df[name_col].notna() & (df[name_col].astype(str).str.strip() != '')].copy()
     df['datetime'] = pd.to_datetime(df['datetime'], errors='coerce')
     df = df.dropna(subset=['datetime'])
     df['date']        = df['datetime'].dt.date
@@ -585,7 +596,9 @@ for serial in SERIAL_NUMBERS:
             'avg_duration_per_event':  float(grp['timediff'].mean()),
             'hourly_distribution': hourly_dist,
             'morning_event_ratio': float((grp['hour_of_day'] < 12).mean()),
-            'body_regions':        (grp['BodyGroup_to'].value_counts().to_dict()
+            'body_regions':        (grp['BodyGroup_to_text'].value_counts().to_dict()
+                                    if 'BodyGroup_to_text' in grp.columns
+                                    else grp['BodyGroup_to'].value_counts().to_dict()
                                     if 'BodyGroup_to' in grp.columns else {}),
             'customer_id':         str(serial),
         })
