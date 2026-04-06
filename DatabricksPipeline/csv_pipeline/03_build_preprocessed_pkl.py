@@ -128,24 +128,26 @@ for serial in SERIAL_NUMBERS:
         print(f"  {serial}: no event rows after filtering")
         continue
 
-    # Encode direction
-    df['Direction_encoded'] = df['Direction'].apply(
-        lambda x: 0 if str(x).strip().lower() == 'head first'
-                  else (1 if str(x).strip().lower() == 'feet first' else -1)
-    )
-
-    # Body group IDs — step 01 outputs integer IDs in BodyGroup_from/to;
-    # fall back to text columns (BodyGroup_from/to_text) → string mapping for older CSVs
-    if pd.api.types.is_integer_dtype(df['BodyGroup_from']) or df['BodyGroup_from'].dropna().apply(lambda x: str(x).isdigit()).all():
-        df['body_from_id'] = pd.to_numeric(df['BodyGroup_from'], errors='coerce').fillna(10).astype(int)
-        df['body_to_id']   = pd.to_numeric(df['BodyGroup_to'],   errors='coerce').fillna(10).astype(int)
+    # Encode direction — Direction column present in new CSVs (step 01 >= e45fa42)
+    if 'Direction' in df.columns:
+        df['Direction_encoded'] = df['Direction'].apply(
+            lambda x: 0 if str(x).strip().lower() == 'head first'
+                      else (1 if str(x).strip().lower() == 'feet first' else -1)
+        )
     else:
-        df['body_from_id'] = df['BodyGroup_from'].apply(
+        df['Direction_encoded'] = 0  # safe default if column absent
+
+    # Body group IDs — step 01 writes integer IDs; try numeric parse first,
+    # fall back to string→region mapping for older CSVs with text values
+    def _to_region_id(series):
+        numeric = pd.to_numeric(series, errors='coerce')
+        if numeric.notna().all():
+            return numeric.astype(int)
+        return series.apply(
             lambda x: _BODY_REGION_TO_ID.get(str(x).strip().upper(), 10) if pd.notna(x) else 10
         )
-        df['body_to_id'] = df['BodyGroup_to'].apply(
-            lambda x: _BODY_REGION_TO_ID.get(str(x).strip().upper(), 10) if pd.notna(x) else 10
-        )
+    df['body_from_id'] = _to_region_id(df['BodyGroup_from'])
+    df['body_to_id']   = _to_region_id(df['BodyGroup_to'])
 
     # Token IDs — step 01 writes integer token_id; fall back to vocab lookup
     if 'token_id' in df.columns:

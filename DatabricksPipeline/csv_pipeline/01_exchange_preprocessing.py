@@ -501,13 +501,16 @@ for serial_number in SERIAL_NUMBERS:
     df_out['predicted_sigma']  = float('nan')
     df_out['sampled_duration'] = float('nan')
 
-    # Select and reorder to match 05 schema
+    # Select and reorder to match 05 schema.
+    # Age/Weight/Height/Direction/PTAB are needed by step 03 for exchange
+    # sequence conditioning — include them even though synthetic data won't have them.
     _out_cols = [
         'SN', 'customer_idx', 'sample_idx', 'step', 'token_id', 'token_name',
         'BodyGroup_from', 'BodyGroup_to', 'BodyGroup_from_text', 'BodyGroup_to_text',
         'PatientID_from', 'PatientID_to',
         'predicted_mu', 'predicted_sigma', 'sampled_duration', 'total_time',
         'timediff', 'datetime',
+        'Age', 'Weight', 'Height', 'Direction', 'PTAB',
     ]
     df_out = df_out[[c for c in _out_cols if c in df_out.columns]]
 
