@@ -243,7 +243,11 @@ EXAMINATION_TRAINING_CONFIG = {
     'early_stopping_patience': 15,
     'validation_split': 0.2,
     'duration_loss_weight': 0.3,
-    'duration_scale': 600.0,      # normalise durations — divide raw seconds by 600 (10 min ref)
+    'duration_scale': 60.0,       # normalise durations — divide raw seconds by 60 (1 min ref)
+                                   # Lowered from 600 — real per-token durations average ~10 s, so
+                                   # dividing by 600 compressed targets to ~0.02 and collapsed the
+                                   # Gaussian duration head.  Scale 60 puts targets in the 0.15–0.3
+                                   # range, matching the healthy exchange-model regime.
     'augment_training': True,
     'duration_jitter_pct': 0.10,
     # oversample_factor removed — 165K sequences is sufficient without duplication

@@ -159,18 +159,25 @@ def _region_name(region_id):
     return 'UNKNOWN'
 
 
-# Exchange-specific coil columns (same as step 01 output)
-_EXCHANGE_COIL_COLS = [
-    'S1','S2','S3','S4','S5','S6','S7','S8',
-    'HC1','HC2','HC3','HC4','NC1','NC2',
-    'BC','SHL','FA','TO','FS','15K',
-]
-
-# Exam coil binary columns (same as step 02 output, #0_ prefix format)
+# Exam coil binary columns.  Mirrors the real exam CSV schema from step 02:
+# all coils listed in csv_pipeline/config.py COIL_COLUMNS, prefixed with '#0_'
+# to match how step 02 writes them.  Real scanners emit a subset of these;
+# the extras are harmless (consumers ignore unknown columns).
+#
+# Earlier version used HC/NC (un-abbreviated) — step 02 actually emits the
+# post-abbreviation form HE/NE via COIL_ABBREV_MAP, so HC/NC were silently wrong.
 _EXAM_COIL_COLS = [
-    '#0_HC1','#0_HC2','#0_HC3','#0_HC4',
-    '#0_NC1','#0_NC2',
-    '#0_BC','#0_SHL','#0_FA','#0_TO','#0_FS','#0_15K',
+    '#0_BC',
+    '#0_SP1','#0_SP2','#0_SP3','#0_SP4','#0_SP5','#0_SP6','#0_SP7','#0_SP8',
+    '#0_15K',
+    '#0_HW1','#0_HW2','#0_HW3',
+    '#0_HE1','#0_HE2','#0_HE3','#0_HE4',
+    '#0_NE1','#0_NE2',
+    '#0_SHL',
+    '#0_BO1','#0_BO2','#0_BO3',
+    '#0_FA','#0_TO','#0_FS',
+    '#0_PA1','#0_PA2','#0_PA3','#0_PA4','#0_PA5','#0_PA6',
+    '#0_SN',
 ]
 
 # Synthetic sequence name pool (used for exam Sequence/Protocol columns)
@@ -221,7 +228,16 @@ def _generate_exchange_rows(tokens, durations, mu, sigma, day_start, t_offset,
         t += dur_sec
     total_time = t - t_offset  # total block duration in seconds
 
-    # Second pass: build rows with total_time filled in
+    # Second pass: build rows with total_time filled in.
+    # Include Age/Weight/Height/Direction/PTAB so synthetic exchange CSVs
+    # match the real step 01 schema and keep patient conditioning if fed
+    # back through step 03.
+    _age       = round(patient_info.get('age',    0) or 0, 1)
+    _weight    = round(patient_info.get('weight', 0) or 0, 1)
+    _height    = round(patient_info.get('height', 0) or 0, 2)
+    _direction = patient_info.get('direction', 'Head First')
+    _ptab      = patient_info.get('ptab', 0) or 0
+
     rows = []
     for step, td in enumerate(token_data):
         rows.append({
@@ -243,6 +259,11 @@ def _generate_exchange_rows(tokens, durations, mu, sigma, day_start, t_offset,
             'total_time':        total_time,
             'timediff':          td['timediff'],
             'datetime':          td['dt'].strftime('%Y-%m-%d %H:%M:%S'),
+            'Age':               _age,
+            'Weight':            _weight,
+            'Height':            _height,
+            'Direction':         _direction,
+            'PTAB':              _ptab,
         })
 
     return rows, t
@@ -319,6 +340,8 @@ def _generate_exam_rows(tokens, durations, mu, sigma, day_start, t_offset,
                 'BodyGroup':      body_name,
                 'ConnectedCoils': '',
                 'DOT':            False,
+                'MissingBodyPart':   False,
+                'MissingPatientID':  False,
                 'PTAB':           ptab,
                 'FinishEvent':    FINISH_MAP[tok],
                 'pauseTime':      0.0,            # filled in post-loop
@@ -476,26 +499,35 @@ for customer_idx, (serial_str, daily_schedules) in enumerate(customer_schedules.
             exchange_sample_idx += 1
 
             # ── EXAMINATION ──
-            cond = _build_cond_tensor(patient, current_t, day_start)
-            with torch.no_grad():
-                exam_tokens, exam_durations, exam_mu, exam_sigma = examination_model.generate(
-                    cond,
-                    {'body_region': region_id},
-                    max_length=gen_config['max_length'],
-                    temperature=gen_config['temperature'],
-                    top_k=gen_config['top_k'],
-                    top_p=gen_config['top_p'],
-                    return_stats=True,
-                )
+            # Training samples are per-measurement (one MSR_100 → MSR_104 span),
+            # so each examination_model.generate() call produces a single scan.
+            # Real patients receive multiple scans per visit (mean ≈ 8, p90 ≈ 13
+            # on serials 176148/183242), so we loop N times per patient and
+            # concatenate the resulting measurement rows.  Without this loop the
+            # synthetic output degenerates to exactly 1 scan per patient.
+            num_scans = max(1, int(np.random.poisson(8)))
+            num_scans = min(num_scans, 20)          # clamp the tail
+            for _scan in range(num_scans):
+                cond = _build_cond_tensor(patient, current_t, day_start)
+                with torch.no_grad():
+                    exam_tokens, exam_durations, exam_mu, exam_sigma = examination_model.generate(
+                        cond,
+                        {'body_region': region_id},
+                        max_length=gen_config['max_length'],
+                        temperature=gen_config['temperature'],
+                        top_k=gen_config['top_k'],
+                        top_p=gen_config['top_p'],
+                        return_stats=True,
+                    )
 
-            exam_rows, current_t = _generate_exam_rows(
-                exam_tokens[0], exam_durations[0], exam_mu[0], exam_sigma[0],
-                day_start, current_t,
-                pat_id, region_id, patient,
-                serial_str, step_counter, customer_idx, exam_sample_idx,
-            )
-            all_exam_rows.extend(exam_rows)
-            exam_sample_idx += 1
+                exam_rows, current_t = _generate_exam_rows(
+                    exam_tokens[0], exam_durations[0], exam_mu[0], exam_sigma[0],
+                    day_start, current_t,
+                    pat_id, region_id, patient,
+                    serial_str, step_counter, customer_idx, exam_sample_idx,
+                )
+                all_exam_rows.extend(exam_rows)
+            exam_sample_idx += 1   # one sample_idx per patient (matches step 02)
 
             prev_region     = region_id
             prev_patient_id = pat_id
