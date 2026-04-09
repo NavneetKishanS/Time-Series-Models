@@ -632,11 +632,15 @@ if not df_exam_all.empty:
     plt.close(fig2)
 
 # ── Figure 3: Exchange event type distribution ───────────────────────────────
-if not df_ex_all.empty:
+# Exchange CSVs use the 'token_name' column (renamed from 'sourceID' in step 01)
+_ex_token_col = 'token_name' if 'token_name' in df_ex_all.columns else (
+    'sourceID' if 'sourceID' in df_ex_all.columns else None
+)
+if not df_ex_all.empty and _ex_token_col is not None:
     fig3, axes3 = plt.subplots(1, 2, figsize=(14, 5))
     fig3.suptitle('Synthetic Exchange Data', fontsize=14, fontweight='bold')
 
-    event_counts = df_ex_all['sourceID'].value_counts()
+    event_counts = df_ex_all[_ex_token_col].value_counts()
     axes3[0].barh(event_counts.index, event_counts.values, color='teal', edgecolor='white')
     axes3[0].set_title('Event Type Distribution')
     axes3[0].set_xlabel('Count')
@@ -807,9 +811,13 @@ if not df_exam_all.empty and 'FinishEvent' in df_exam_all.columns:
     ]
 
 # ── 6. EXCHANGE EVENT TYPE DISTRIBUTION ───────────────────────────────────────
+# Exchange CSVs use 'token_name' column (renamed from 'sourceID' in step 01)
 lines += ['', _HR, ' 6. EXCHANGE EVENT TYPE DISTRIBUTION', _HR]
-if not df_ex_all.empty and 'sourceID' in df_ex_all.columns:
-    ev_vc  = df_ex_all['sourceID'].value_counts()
+_ex_tok = 'token_name' if (not df_ex_all.empty and 'token_name' in df_ex_all.columns) else (
+    'sourceID' if (not df_ex_all.empty and 'sourceID' in df_ex_all.columns) else None
+)
+if _ex_tok is not None:
+    ev_vc  = df_ex_all[_ex_tok].value_counts()
     total_ev = ev_vc.sum()
     lines.append(f'  {"Event":<20} {"Count":>8} {"Share":>7}')
     for ev, cnt in ev_vc.items():
