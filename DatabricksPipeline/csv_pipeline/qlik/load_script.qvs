@@ -1,0 +1,250 @@
+// ============================================================================
+// Qlik Sense Data Load Script
+// MRI Pipeline — Synthetic vs Real Validation Dashboard
+// ----------------------------------------------------------------------------
+// Design pattern: "DataSource discriminator"
+//
+// Real and synthetic CSVs are loaded into the SAME fact table, with each row
+// tagged by a DataSource column ('Real' or 'Synthetic').  This lets every
+// Qlik chart do side-by-side comparison just by adding DataSource as a
+// grouping dimension or colour series.  No joins, no unions, no schema
+// gymnastics — Qlik's associative engine does the rest.
+//
+// Data model produced:
+//   FACT_Exchange   — one row per exchange event    (real + synthetic stacked)
+//   FACT_Exam       — one row per scan measurement   (real + synthetic stacked)
+//   DIM_Scanner     — deduplicated scanner list
+//   DIM_Date        — auto-generated calendar
+//   DIM_DataSource  — inline table for the Real/Synthetic filter
+//
+// How to use:
+//   1. Populate qlik/data/ with CSVs (see fetch_from_dbfs.md)
+//   2. In Qlik Sense, open the Data Load Editor
+//   3. Set vDataRoot below to the absolute path OR a Qlik lib:// connection
+//   4. Paste this script, click Load
+//   5. Verify the five tables appear in the Data Model Viewer
+//   6. Build charts per dashboard_spec.md
+// ============================================================================
+
+SET ThousandSep        = ',';
+SET DecimalSep         = '.';
+SET MoneyThousandSep   = ',';
+SET MoneyDecimalSep    = '.';
+SET TimestampFormat    = 'YYYY-MM-DD hh:mm:ss';
+SET TimeFormat         = 'hh:mm:ss';
+SET DateFormat         = 'YYYY-MM-DD';
+
+// ============================================================================
+// PATHS — edit these for your environment
+// ----------------------------------------------------------------------------
+// Option A (Qlik Sense SaaS / Cloud Hub): use a lib:// data connection
+//     SET vDataRoot = 'lib://DataFiles/qlik/';
+//
+// Option B (Qlik Sense Desktop): absolute local path
+//     SET vDataRoot = 'C:\Users\you\Time-Series-Models\DatabricksPipeline\csv_pipeline\qlik\data\';
+//
+// Option C (on-prem / shared folder): UNC or mapped drive
+//     SET vDataRoot = '\\server\share\mri_qlik\data\';
+// ============================================================================
+
+SET vDataRoot          = 'lib://DataFiles/qlik/data/';
+SET vRealExchangePath  = '$(vDataRoot)real/exchange/';
+SET vRealExamPath      = '$(vDataRoot)real/exam/';
+SET vSynthExchangePath = '$(vDataRoot)synthetic/exchange/';
+SET vSynthExamPath     = '$(vDataRoot)synthetic/exam/';
+
+// ============================================================================
+// FACT_Exchange  —  real + synthetic exchange events, stacked
+// ----------------------------------------------------------------------------
+// Real CSVs come from step 01 output (csv_pipeline/01_exchange_preprocessing.py)
+// Synthetic CSVs come from step 05 output (csv_pipeline/05_generate_synthetic_data.py)
+// Both share the same schema after commit 08663b9.
+// ============================================================================
+
+FACT_Exchange:
+LOAD
+    'Real'                                                   as DataSource,
+    Text(SN)                                                 as ScannerID,
+    PatientID_to                                             as PatientID,
+    Timestamp#(datetime, 'YYYY-MM-DD hh:mm:ss')              as EventTimestamp,
+    Date(Floor(Timestamp#(datetime, 'YYYY-MM-DD hh:mm:ss'))) as EventDate,
+    Hour(Timestamp#(datetime, 'YYYY-MM-DD hh:mm:ss'))        as EventHour,
+    sample_idx                                               as ExchangeBlockID,
+    step                                                     as StepInBlock,
+    token_name                                               as EventTypeName,
+    token_id                                                 as EventTypeID,
+    BodyGroup_from_text                                      as BodyRegionFrom,
+    BodyGroup_to_text                                        as BodyRegionTo,
+    Num#(timediff)                                           as TimeDiffSec,
+    Num#(total_time)                                         as ExchangeBlockDurationSec,
+    Num#(Age)                                                as Age,
+    Num#(Weight)                                             as Weight,
+    Num#(Height)                                             as Height,
+    Direction                                                as PatientDirection,
+    Num#(PTAB)                                               as PTAB
+FROM [$(vRealExchangePath)DATA_*.csv]
+(txt, utf8, embedded labels, delimiter is ',', msq);
+
+CONCATENATE (FACT_Exchange)
+LOAD
+    'Synthetic'                                              as DataSource,
+    Text(SN)                                                 as ScannerID,
+    PatientID_to                                             as PatientID,
+    Timestamp#(datetime, 'YYYY-MM-DD hh:mm:ss')              as EventTimestamp,
+    Date(Floor(Timestamp#(datetime, 'YYYY-MM-DD hh:mm:ss'))) as EventDate,
+    Hour(Timestamp#(datetime, 'YYYY-MM-DD hh:mm:ss'))        as EventHour,
+    sample_idx                                               as ExchangeBlockID,
+    step                                                     as StepInBlock,
+    token_name                                               as EventTypeName,
+    token_id                                                 as EventTypeID,
+    BodyGroup_from_text                                      as BodyRegionFrom,
+    BodyGroup_to_text                                        as BodyRegionTo,
+    Num#(timediff)                                           as TimeDiffSec,
+    Num#(total_time)                                         as ExchangeBlockDurationSec,
+    Num#(Age)                                                as Age,
+    Num#(Weight)                                             as Weight,
+    Num#(Height)                                             as Height,
+    Direction                                                as PatientDirection,
+    Num#(PTAB)                                               as PTAB
+FROM [$(vSynthExchangePath)DATA_*.csv]
+(txt, utf8, embedded labels, delimiter is ',', msq);
+
+// ============================================================================
+// FACT_Exam  —  real + synthetic exam measurements, stacked
+// ----------------------------------------------------------------------------
+// Real CSVs come from step 02 output
+// Synthetic CSVs come from step 05 output
+// Note: real CSVs have ~30 scanner-specific coil columns that synthetic does
+// not always emit.  We intentionally do NOT load coil columns here — they are
+// not needed for validation and would bloat the model.  Add them later if a
+// coil-level drilldown is requested.
+// ============================================================================
+
+FACT_Exam:
+LOAD
+    'Real'                                                     as DataSource,
+    Text(SN)                                                   as ScannerID,
+    PatientID,
+    Timestamp#(startTime, 'YYYY-MM-DD hh:mm:ss')               as EventTimestamp,
+    Date(Floor(Timestamp#(startTime, 'YYYY-MM-DD hh:mm:ss')))  as EventDate,
+    Hour(Timestamp#(startTime, 'YYYY-MM-DD hh:mm:ss'))         as EventHour,
+    sample_idx                                                 as PatientVisitID,
+    Num#(duration)                                             as ExamDurationSec,
+    Num#(duration) / 60                                        as ExamDurationMin,
+    Num#(StepCount)                                            as ScanIndexInVisit,
+    FinishEvent,
+    BodyPart                                                   as BodyRegion,
+    BodyGroup,
+    Sequence                                                   as ScanSequence,
+    Protocol,
+    Num#(pauseTime)                                            as PauseTimeSec,
+    Num#(Age)                                                  as Age,
+    Num#(Weight)                                               as Weight,
+    Num#(Height)                                               as Height,
+    Direction                                                  as PatientDirection,
+    Num#(PTAB)                                                 as PTAB
+FROM [$(vRealExamPath)DATA_*.csv]
+(txt, utf8, embedded labels, delimiter is ',', msq);
+
+CONCATENATE (FACT_Exam)
+LOAD
+    'Synthetic'                                                as DataSource,
+    Text(SN)                                                   as ScannerID,
+    PatientID,
+    Timestamp#(startTime, 'YYYY-MM-DD hh:mm:ss')               as EventTimestamp,
+    Date(Floor(Timestamp#(startTime, 'YYYY-MM-DD hh:mm:ss')))  as EventDate,
+    Hour(Timestamp#(startTime, 'YYYY-MM-DD hh:mm:ss'))         as EventHour,
+    sample_idx                                                 as PatientVisitID,
+    Num#(duration)                                             as ExamDurationSec,
+    Num#(duration) / 60                                        as ExamDurationMin,
+    Num#(StepCount)                                            as ScanIndexInVisit,
+    FinishEvent,
+    BodyPart                                                   as BodyRegion,
+    BodyGroup,
+    Sequence                                                   as ScanSequence,
+    Protocol,
+    Num#(pauseTime)                                            as PauseTimeSec,
+    Num#(Age)                                                  as Age,
+    Num#(Weight)                                               as Weight,
+    Num#(Height)                                               as Height,
+    Direction                                                  as PatientDirection,
+    Num#(PTAB)                                                 as PTAB
+FROM [$(vSynthExamPath)DATA_*.csv]
+(txt, utf8, embedded labels, delimiter is ',', msq);
+
+// ============================================================================
+// DIM_Scanner  —  deduplicated scanner list from both fact tables
+// ============================================================================
+
+DIM_Scanner:
+LOAD DISTINCT
+    ScannerID,
+    'Scanner ' & ScannerID as ScannerLabel
+RESIDENT FACT_Exam;
+
+CONCATENATE (DIM_Scanner)
+LOAD DISTINCT
+    ScannerID,
+    'Scanner ' & ScannerID as ScannerLabel
+RESIDENT FACT_Exchange
+WHERE NOT EXISTS(ScannerID);
+
+// ============================================================================
+// DIM_Date  —  auto-generated calendar spanning all observed dates
+// ============================================================================
+
+MinMaxDates:
+LOAD
+    Min(EventDate) as MinDate,
+    Max(EventDate) as MaxDate
+RESIDENT FACT_Exam;
+
+LET vMinDate = Num(Peek('MinDate', 0, 'MinMaxDates'));
+LET vMaxDate = Num(Peek('MaxDate', 0, 'MinMaxDates'));
+DROP TABLE MinMaxDates;
+
+DIM_Date:
+LOAD
+    Date($(vMinDate) + RowNo() - 1)                             as EventDate,
+    Year(Date($(vMinDate) + RowNo() - 1))                       as Year,
+    'Q' & Ceil(Month(Date($(vMinDate) + RowNo() - 1))/3)        as Quarter,
+    Month(Date($(vMinDate) + RowNo() - 1))                      as Month,
+    MonthName(Date($(vMinDate) + RowNo() - 1))                  as MonthName,
+    Day(Date($(vMinDate) + RowNo() - 1))                        as Day,
+    WeekDay(Date($(vMinDate) + RowNo() - 1))                    as WeekdayName,
+    Num(WeekDay(Date($(vMinDate) + RowNo() - 1)))               as WeekdayNum,
+    If(Num(WeekDay(Date($(vMinDate) + RowNo() - 1))) >= 5,
+       'Weekend', 'Weekday')                                    as WeekPart
+AUTOGENERATE ($(vMaxDate) - $(vMinDate) + 1);
+
+// ============================================================================
+// DIM_DataSource  —  inline table guarantees the filter is always selectable
+// ============================================================================
+
+DIM_DataSource:
+LOAD * INLINE [
+DataSource, DataSourceOrder, DataSourceColor
+Real,       1,               '#1f77b4'
+Synthetic,  2,               '#ff7f0e'
+];
+
+// ============================================================================
+// END OF SCRIPT
+// ----------------------------------------------------------------------------
+// After load, the Data Model Viewer should show:
+//   FACT_Exchange   linked to DIM_Scanner, DIM_Date, DIM_DataSource
+//   FACT_Exam       linked to DIM_Scanner, DIM_Date, DIM_DataSource
+//
+// Each fact table's row count should be approximately:
+//   real rows + synthetic rows = total
+//
+// Sanity check — paste into a Qlik text object after reload:
+//   Exchange rows:  =Count({<DataSource={'Real'}>} ExchangeBlockID)
+//                    & ' real / '
+//                    & Count({<DataSource={'Synthetic'}>} ExchangeBlockID)
+//                    & ' synthetic'
+//   Exam rows:      =Count({<DataSource={'Real'}>} PatientVisitID)
+//                    & ' real / '
+//                    & Count({<DataSource={'Synthetic'}>} PatientVisitID)
+//                    & ' synthetic'
+// ============================================================================

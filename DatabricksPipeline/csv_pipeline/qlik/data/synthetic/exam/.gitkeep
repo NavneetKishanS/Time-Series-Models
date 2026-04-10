@@ -1,0 +1,2 @@
+# Drop synthetic exam CSVs here (from step 05 output / DBFS /FileStore/csv_pipeline/synthetic/exam/).
+# See ../../../fetch_from_dbfs.md

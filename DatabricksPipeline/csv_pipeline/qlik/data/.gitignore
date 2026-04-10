@@ -1,0 +1,10 @@
+# Ignore everything in data/ — it's a landing zone for downloaded CSVs.
+# Folder structure is preserved by .gitkeep files in each leaf folder.
+*
+!.gitignore
+!real/
+!real/**/
+!real/**/.gitkeep
+!synthetic/
+!synthetic/**/
+!synthetic/**/.gitkeep

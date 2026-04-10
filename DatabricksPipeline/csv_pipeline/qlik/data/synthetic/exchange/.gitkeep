@@ -1,0 +1,2 @@
+# Drop synthetic exchange CSVs here (from step 05 output / DBFS /FileStore/csv_pipeline/synthetic/exchange/).
+# See ../../../fetch_from_dbfs.md

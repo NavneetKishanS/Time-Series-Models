@@ -1,0 +1,2 @@
+# Drop real exam CSVs here (from step 02 output / DBFS /FileStore/csv_pipeline/exam/).
+# See ../../../fetch_from_dbfs.md

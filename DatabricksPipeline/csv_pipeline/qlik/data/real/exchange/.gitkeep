@@ -1,0 +1,2 @@
+# Drop real exchange CSVs here (from step 01 output / DBFS /FileStore/csv_pipeline/exchange/).
+# See ../../../fetch_from_dbfs.md
