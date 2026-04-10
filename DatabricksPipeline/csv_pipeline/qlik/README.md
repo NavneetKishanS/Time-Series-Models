@@ -1,210 +1,404 @@
-# Qlik Validation Dashboard — Synthetic vs Real
+# Qlik Validation Dashboard — How-To
 
-This folder contains everything needed to set up a Qlik Sense dashboard
-that compares the synthetic MRI pipeline output against the real
-training data, side-by-side.
+**Goal:** Compare the synthetic MRI pipeline output against real training
+data in a Qlik Sense dashboard, side-by-side, by manually uploading two
+consolidated CSV files.
 
-```
-qlik/
-├── README.md               ← you are here — meeting overview + workflow
-├── load_script.qvs         ← paste-ready Qlik Data Load script
-├── dashboard_spec.md       ← 6 comparison charts, expressions, sheet layout
-├── fetch_from_dbfs.md      ← how to populate data/ from Databricks DBFS
-└── data/                   ← drop CSVs here (gitignored content, structure tracked)
-    ├── real/
-    │   ├── exchange/       ← copy step 01 output here
-    │   └── exam/           ← copy step 02 output here
-    └── synthetic/
-        ├── exchange/       ← copy step 05 exchange output here
-        └── exam/           ← copy step 05 exam output here
-```
+Everything here is **local**. No Databricks pipeline changes, no Qlik
+load scripts to maintain — just a small Python helper that merges your
+per-scanner CSVs into two files, plus a few drag-and-drops in Qlik.
 
 ---
 
-## 1. Why we're building this
+## What you'll do (5 steps, ~30 minutes)
 
-The pipeline already produces a text evaluation report at the end of
-step 05. It's useful, but has four limits:
+1. **Fetch** the per-scanner CSVs from Databricks into `data/`
+2. **Consolidate** them with `python consolidate.py`
+3. **Upload** the two combined files to Qlik Sense
+4. **Build** six comparison charts on one sheet
+5. **Read** the numbers to see if synthetic matches real
 
-| Limit | Impact |
+> **Tip:** you can do steps 1–4 using only real data first to test the
+> workflow. Add synthetic later (after step 05 reruns) and re-run the
+> consolidation to refresh.
+
+---
+
+## Prerequisites
+
+- **Python 3** with pandas installed (`pip install pandas`)
+- **Qlik Sense Desktop** or **Qlik Sense SaaS** account — both work identically
+- CSVs from steps 01, 02, and 05 of the Databricks pipeline (see step 1 below)
+
+---
+
+## Step 1 — Fetch the CSVs
+
+You need four sets of files:
+
+| Type | DBFS source | Target folder |
+|---|---|---|
+| Real exchange | `/dbfs/FileStore/csv_pipeline/exchange/` | `data/real/exchange/` |
+| Real exam | `/dbfs/FileStore/csv_pipeline/exam/` | `data/real/exam/` |
+| Synthetic exchange | `/dbfs/FileStore/csv_pipeline/synthetic/exchange/` | `data/synthetic/exchange/` |
+| Synthetic exam | `/dbfs/FileStore/csv_pipeline/synthetic/exam/` | `data/synthetic/exam/` |
+
+See [`fetch_from_dbfs.md`](fetch_from_dbfs.md) for three ways to do this
+(Databricks CLI is the fastest; browser download via step 03b is the
+no-install option).
+
+**After this step**, the `data/` tree should look like this:
+
+```
+data/
+├── real/
+│   ├── exchange/   DATA_175670.csv, DATA_175828.csv, ...
+│   └── exam/       DATA_175670.csv, DATA_175828.csv, ...
+└── synthetic/
+    ├── exchange/   DATA_175670.csv, DATA_175828.csv, ...
+    └── exam/       DATA_175670.csv, DATA_175828.csv, ...
+```
+
+File names match the scanner serial numbers configured in
+`csv_pipeline/config.py`. Missing synthetic files are OK for a first
+pass — you can still run steps 2–4 with real data only.
+
+---
+
+## Step 2 — Consolidate into two flat files
+
+From this folder:
+
+```bash
+cd DatabricksPipeline/csv_pipeline/qlik
+python consolidate.py
+```
+
+The script:
+
+- reads every `DATA_*.csv` under `data/real/` and `data/synthetic/`
+- inserts a `DataSource` column (`Real` or `Synthetic`) as the first column
+- concatenates all scanners for each kind into one DataFrame
+- renames the `sample_idx` column to `ExchangeBlockID` (exchange file)
+  and `PatientVisitID` (exam file) so Qlik doesn't mistakenly auto-link
+  them across tables
+- sorts rows by `DataSource`, `SN`, then timestamp
+- writes two files under `data/combined/`
+
+**Expected output** (approximate, with real data only):
+
+```
+================================================================
+Consolidating EXCHANGE
+================================================================
+  Real       175670:   10,668 rows,  24 cols
+  Real       175828:    9,284 rows,  24 cols
+  ... (10 scanners) ...
+  Synthetic  (none yet)
+
+  → data/combined/exchange_combined.csv
+     120,735 rows, 24 cols, 22.7 MB
+    Real:       120,735 rows
+    Synthetic:        0 rows
+
+================================================================
+Consolidating EXAM
+================================================================
+  ... similar ...
+```
+
+**After this step** you should have exactly two files ready to upload:
+
+```
+data/combined/
+├── exchange_combined.csv   (~23 MB)
+└── exam_combined.csv       (~23 MB)
+```
+
+These files are **local-only** (`.gitignore`'d) — they are never
+committed to git.
+
+---
+
+## Step 3 — Upload both files to Qlik Sense
+
+### 3a. Create a new app
+
+1. Open Qlik Sense (Desktop or SaaS)
+2. Click **Create new app** and name it e.g. `MRI Pipeline Validation`
+3. Click **Open app**
+
+### 3b. Add the exchange file
+
+1. Click **Add data from files and other sources** (or the big **+** button)
+2. Drag `data/combined/exchange_combined.csv` into the drop zone
+3. On the table preview screen:
+   - Leave the auto-detected field types
+   - Click the table name at the top and rename it from `exchange_combined` to `Exchange` *(shorter = cleaner chart expressions later)*
+   - Click **Add data**
+
+### 3c. Add the exam file
+
+Repeat 3b for `data/combined/exam_combined.csv`, renaming the table to `Exam`.
+
+### 3d. Let Qlik associate the two tables
+
+Qlik auto-links tables on any field that appears in both. Both of our
+files share `DataSource`, `SN`, `Age`, `Weight`, `Height`, `Direction`,
+and `PTAB`. Qlik will draw green association lines between them in the
+data manager — that's what you want.
+
+Click **Load data** and wait a few seconds. The status should say
+*"Data loaded"*.
+
+### 3e. Sanity check before building charts
+
+Go to a blank sheet, add a **Text & image** object, and paste:
+
+```qlik
+='Exchange: ' & Count({<DataSource={'Real'}>} ExchangeBlockID) & ' real + '
+  & Count({<DataSource={'Synthetic'}>} ExchangeBlockID) & ' synthetic'
+  & Chr(10) & 'Exam: '
+  & Count({<DataSource={'Real'}>} PatientVisitID) & ' real + '
+  & Count({<DataSource={'Synthetic'}>} PatientVisitID) & ' synthetic'
+```
+
+You should see something like:
+
+```
+Exchange: 120735 real + 0 synthetic
+Exam: 41106 real + 0 synthetic
+```
+
+If both numbers are 0, the data didn't load — check step 3b/3c table
+names. If you only see real numbers, step 05 hasn't been rerun yet
+(that's fine for initial testing).
+
+---
+
+## Step 4 — Build the six comparison charts
+
+Create a new sheet titled **Synthetic vs Real**. Drop these six charts
+onto it. Every chart uses `DataSource` as a color or grouping so real
+and synthetic appear side by side.
+
+### Chart 1 — Scans per patient (mean)
+
+The #1 validation chart. Real patients get ~9–10 scans; the broken
+pre-fix synthetic version produced exactly 1.
+
+- Type: **Bar chart**
+- Dimension: `DataSource`
+- Measure (rename "Average scans"):
+  ```
+  =Avg(Aggr(Max(StepCount), PatientID, DataSource))
+  ```
+- Title: **Scans per patient (mean)**
+
+**Pass:** both bars land in 7–12. **Fail:** synthetic near 1.
+
+### Chart 2 — Exam duration distribution
+
+- Type: **Histogram** (or bar chart)
+- Dimension: `Class(duration/60, 0.5)`  *(half-minute bins)*
+- Measure: `Count(PatientVisitID)`
+- Color by: `DataSource`
+- Title: **Exam duration (minutes)**
+
+**Pass:** two overlapping distributions centered near 1.7 min, most
+mass under 5 min.
+
+### Chart 3 — Finish event breakdown
+
+- Type: **100% stacked bar chart**
+- Dimension 1: `DataSource`
+- Dimension 2: `FinishEvent`
+- Measure: `Count(PatientVisitID)`
+- Title: **Finish event distribution**
+
+**Pass:** both bars show ~96% Successful, ~3–4% Stopped by User.
+**Fail:** synthetic shows 100% Successful (no stop events learned).
+
+### Chart 4 — Body region distribution
+
+- Type: **Bar chart** grouped by DataSource
+- Dimension: `BodyPart`
+- Measure:
+  ```
+  =Count(PatientVisitID) / Count(TOTAL <DataSource> PatientVisitID)
+  ```
+- Color by: `DataSource`
+- Sort: descending by real %
+- Title: **Body part share of exams**
+
+**Pass:** same top-3 rank for both (BRAIN, ABDOMEN, LIVER) and low
+UNKNOWN share on the synthetic side.
+
+### Chart 5 — Exchange event type distribution
+
+- Type: **Horizontal bar chart**
+- Dimension: `token_name`
+- Measure:
+  ```
+  =Count(token_name) / Count(TOTAL <DataSource> token_name)
+  ```
+- Color by: `DataSource`
+- Sort: descending by real %
+- Title: **Exchange event type share**
+
+**Pass:** top 5 match the real ordering
+(`MRI_FRR_264`, `MRI_FRR_257`, `MRI_FRR_256`, `MRI_FRR_2`, `MRI_CCS_11`).
+This is already the metric the exchange model passes.
+
+### Chart 6 — Fidelity Score (headline KPI)
+
+A single number summarising how close synthetic is to real.
+
+- Type: **KPI card**
+- Measure:
+  ```
+  =Round(100 * (1 - (
+      (
+          Fabs(
+              Avg({<DataSource={'Real'}>}      Aggr(Max(StepCount), PatientID))
+            - Avg({<DataSource={'Synthetic'}>} Aggr(Max(StepCount), PatientID))
+          )
+          / Avg({<DataSource={'Real'}>} Aggr(Max(StepCount), PatientID))
+        +
+          Fabs(
+              Avg({<DataSource={'Real'}>}      duration/60)
+            - Avg({<DataSource={'Synthetic'}>} duration/60)
+          )
+          / Avg({<DataSource={'Real'}>} duration/60)
+        +
+          Fabs(
+              Count({<DataSource={'Real'},      FinishEvent={'Stopped by User'}>} PatientVisitID) / Count({<DataSource={'Real'}>} PatientVisitID)
+            - Count({<DataSource={'Synthetic'}, FinishEvent={'Stopped by User'}>} PatientVisitID) / Count({<DataSource={'Synthetic'}>} PatientVisitID)
+          )
+      ) / 3
+  )), 1) & ' / 100'
+  ```
+- Title: **Fidelity Score**
+
+**Interpretation:** 100 means synthetic matches real on all three key
+metrics. Ship threshold: **≥ 80**. (Real-only data shows N/A because
+there's no synthetic to compare yet.)
+
+### Optional — global filter pane
+
+Add a filter pane at the top of the sheet with these fields:
+
+- `DataSource`
+- `SN` *(as "Scanner")*
+- `BodyPart`
+- A date field — click on `datetime` in the fields panel to add
+
+Clicking any value filters every chart on the sheet simultaneously.
+
+---
+
+## Step 5 — Read the results
+
+Use this grade sheet as your meeting talking points:
+
+| Chart | Real baseline | Pass threshold for synthetic |
+|---|---|---|
+| 1. Scans per patient | **9.7** mean | 7.5 – 12 |
+| 2. Exam duration | **1.75** min mean | 1.4 – 2.1 min |
+| 2. Exam duration (% <1 min) | ~10% | < 20% |
+| 3. Stopped-by-User rate | **3.6%** | 1 – 6% |
+| 4. Top body parts (rank) | BRAIN, ABDOMEN, LIVER | top 3 match |
+| 5. Top exchange tokens (rank) | FRR_264, FRR_257, FRR_256, FRR_2, CCS_11 | top 5 match |
+| 6. Fidelity Score | n/a | ≥ 75 good, ≥ 80 ship |
+
+If most rows fall in the pass range, the model is producing plausible
+data. The broken April 9 run failed Charts 1, 2 (<1 min rate), and 3 —
+those three are the smoking guns for examination-model health.
+
+---
+
+## Refreshing when a new pipeline run completes
+
+```bash
+# 1. Pull new CSVs into data/synthetic/ (and data/real/ if that changed too)
+#    See fetch_from_dbfs.md
+# 2. Rerun the consolidation
+cd DatabricksPipeline/csv_pipeline/qlik
+python consolidate.py
+# 3. In Qlik, right-click the data source → Refresh data
+#    (or open Data manager and click the reload icon next to each table)
+```
+
+That's the entire refresh loop. No script editing.
+
+---
+
+## FAQ
+
+**Why combine per-scanner CSVs into one file?**
+Manual uploading in Qlik is simplest with one file per table. With
+per-scanner files you would drag-and-drop 40 files per refresh, which
+is error-prone. Two files = two drag-and-drops. The `SN` column in each
+file still preserves the scanner identity for filtering.
+
+**Where does the Qlik app live?**
+Your choice — Qlik Sense Desktop (everything local, no sharing) or Qlik
+Sense SaaS (cloud, shareable with the team). This manual workflow works
+identically in both.
+
+**Who owns the refresh cadence?**
+Whoever runs `consolidate.py`. Pipeline runs are infrequent (weekly at
+most), so manual refresh is fine. If the cadence picks up later, use
+the automated `load_script.qvs` in this folder instead.
+
+**Can we automate this later?**
+Yes. `load_script.qvs` is a paste-ready Qlik load script that reads
+per-scanner files directly and builds the same data model. Switch to
+that when you want scheduled refreshes or live Databricks connections.
+
+**The exam file has 100+ columns — why?**
+Different scanners emit different coil column sets (27 cols on scanner
+182625 vs 92 cols on scanner 176227). Pandas takes the union during
+consolidation and pads missing cells with NaN. Qlik handles this
+cleanly and you can ignore the coil columns for validation work —
+they're there if you ever want coil-level drill-down later.
+
+**What if synthetic and real have different column counts?**
+That's expected during the transition period — older synthetic CSVs
+(pre-commit `08663b9`) don't have `Age/Weight/Height/Direction/PTAB`.
+Pandas fills missing cells with NaN so the concatenation still works;
+demographic charts will just show blanks on the synthetic side until
+step 05 is rerun with the fix.
+
+**The fidelity score is blank — why?**
+You only have real data loaded (no synthetic yet). The formula divides
+by synthetic values; with zero synthetic rows it returns NaN. Run step
+05, refetch, rerun `consolidate.py`, refresh Qlik, and it will populate.
+
+---
+
+## Troubleshooting
+
+| Symptom | Fix |
 |---|---|
-| Text-only, printed once | Can't share outside Databricks |
-| Only shows synthetic stats | No side-by-side comparison with real |
-| Frozen at that run | Disappears on the next rerun |
-| Not drillable | You can't click "what about scanner X on Feb 12?" |
-
-A Qlik dashboard solves all four: **persistent, side-by-side,
-shareable, drillable.**
-
----
-
-## 2. The approach in one sentence
-
-**Load real CSVs and synthetic CSVs into the same Qlik fact tables,
-tag each row with `DataSource = 'Real' | 'Synthetic'`, and let Qlik's
-associative engine do the comparison work automatically.**
-
-Every chart becomes a side-by-side comparison just by adding
-`DataSource` as a series/colour. No joins, no unions, no schema
-gymnastics.
+| `consolidate.py` says "No DATA_*.csv files" | Populate `data/real/` and/or `data/synthetic/` first — see [`fetch_from_dbfs.md`](fetch_from_dbfs.md) |
+| `ModuleNotFoundError: pandas` | `pip install pandas` |
+| Qlik can't find a column like `ExchangeBlockID` when you paste an expression | You forgot to rename the table to `Exchange`/`Exam` in step 3b — delete the data source, re-add, and rename |
+| Chart 3 shows only "Successful" on the synthetic side | Your exam model is still producing no stop events — rerun step 04 and step 05 with commit `08663b9` or later |
+| Chart 1 shows exactly 1.0 for synthetic | Same — you're looking at pre-fix synthetic output |
+| Qlik shows "synthetic circular reference" warning | Qlik thinks a field in both tables carries the same meaning but with different values. Usually a `sample_idx` issue — make sure you ran the latest `consolidate.py` which renames it |
+| Fidelity Score is `NaN / 100` | One side has zero rows — check the sanity-check text from step 3e |
 
 ---
 
-## 3. Data model — why we keep exchange and exam separate
-
-Exchange and exam data live at different **grains**:
-
-| | Grain | Rows per scanner-month | What each row means |
-|---|---|---|---|
-| **Exchange** | event-level | ~9k–19k | One MRI log event during a patient changeover |
-| **Exam** | measurement-level | ~2.5k–5k | One MRI scan (start → finish) |
-
-Smashing them into a single table would either force one to lose
-detail or pad the other with empty columns. Worse, it would fight
-Qlik's **associative model** — Qlik's strongest feature is that
-separate tables linked by shared keys auto-filter across each other.
-Two clean tables beat one messy one.
-
-**The final data model:**
-
-```
-                ┌──────────────────┐
-                │   DIM_DataSource │  Real | Synthetic
-                └────────┬─────────┘
-                         │
-       ┌─────────────────┼─────────────────┐
-       │                 │                 │
-┌──────┴──────┐   ┌──────┴──────┐   ┌──────┴──────┐
-│ DIM_Scanner │   │ DIM_Date    │   │  (patient   │
-│             │   │  (calendar) │   │  dimensions │
-└──────┬──────┘   └──────┬──────┘   │  derived)   │
-       │                 │          └──────┬──────┘
-       └────────┬────────┴─────────────────┘
-                │
-     ┌──────────┴───────────┐
-     │                      │
-┌────┴──────────┐   ┌──────┴────────┐
-│ FACT_Exchange │   │   FACT_Exam   │
-│ (events)      │   │ (measurements)│
-└───────────────┘   └───────────────┘
-```
-
-Every fact row carries `DataSource`, `ScannerID`, `PatientID`, and
-`EventDate`, so clicking any of those filters across both tables and
-both real/synthetic sides at once.
-
----
-
-## 4. The six metrics we'll compare
-
-The dashboard validates the four findings from the step 05 evaluation
-report plus two supporting signals. Targets are derived from the real
-training data.
-
-| # | Metric | Real baseline | Synthetic target | Why it matters |
-|---|---|---|---|---|
-| 1 | **Scans per patient** (mean) | ~8 | 6–10 | Caught the "1 scan per patient" bug |
-| 2 | **Exam duration** (mean, minutes) | 1.6–2.8 | within ±20% | Caught the duration-scale issue |
-| 3 | **Finish event mix** | 96–98% Successful, 2–4% Stopped | similar spread | Model should learn stop tokens |
-| 4 | **Body region distribution** | HEAD/PELVIS/SPINE dominant, low UNKNOWN | low UNKNOWN share, similar rank | Orchestration model health |
-| 5 | **Exchange event type distribution** | FRR_264 / FRR_256 / FRR_257 / CCS_11 top | top 5 match real | Exchange model health (passing today) |
-| 6 | **Patients per scanner-day** | ~14–30 | within ±30% | Throughput realism |
-
-See `dashboard_spec.md` for the exact chart expressions.
-
----
-
-## 5. How new data gets into the dashboard (the refresh loop)
-
-```
-Databricks                            Local / Qlik server
-───────────                           ───────────────────
-step 01 ─┐
-step 02 ─┤
-         ├──> DBFS: /FileStore/csv_pipeline/{exchange,exam}/DATA_*.csv
-step 05 ─┘                                        │
-                                                  │  fetch_from_dbfs.md
-                                                  ▼
-                                     qlik/data/{real,synthetic}/...
-                                                  │
-                                                  │  Qlik Data Load Editor
-                                                  ▼
-                                     load_script.qvs  →  reload app
-                                                  │
-                                                  ▼
-                                     Dashboard refreshed
-```
-
-**Three triggers for a refresh:**
-
-1. **New model run** — someone retrains (step 04) and regenerates
-   (step 05). Fetch new synthetic CSVs → reload Qlik app.
-2. **New real data** — a fresh month of scanner logs lands. Fetch new
-   real CSVs → reload.
-3. **New scanners** — SERIAL_NUMBERS in `csv_pipeline/config.py`
-   changes. Rerun the full pipeline → fetch both → reload.
-
-The refresh is idempotent: the Qlik load script reads every CSV under
-`data/{real,synthetic}/{exchange,exam}/DATA_*.csv`, so dropping new
-files in and reloading is the entire workflow.
-
----
-
-## 6. What to present at the meeting
-
-Suggested talking-point order (~5 minutes):
-
-1. **Problem** — "We have a text report that tells us synthetic data is
-   mostly good but hard to share and impossible to drill into."
-2. **Direction** — "Build a Qlik dashboard that shows synthetic
-   side-by-side with real, for the six metrics that matter."
-3. **Design decision** — "Keep exchange and exam as separate fact
-   tables. Tag rows with DataSource. Let Qlik's associative model do
-   the comparison."
-4. **What's ready today** — folder structure, load script, chart
-   specs, refresh workflow (point at this folder).
-5. **What's pending** — step 04 retraining finishes tonight; step 05
-   rerun tomorrow morning; first dashboard by end of week.
-6. **Ask** — who owns the Qlik app, where does it live, who has
-   access, what's the refresh cadence?
-
----
-
-## 7. Immediate next steps
-
-- [ ] **Step 04 retrain finishes** (in-flight, ~5 h remaining as of
-      meeting time)
-- [ ] **Rerun step 05** to pick up the multi-scan fix + new model
-      weights (commit `08663b9`)
-- [ ] **Fetch CSVs** from DBFS into `data/` (see `fetch_from_dbfs.md`)
-- [ ] **Run the load script** in a new Qlik Sense app
-      (`load_script.qvs`)
-- [ ] **Build Sheet 1** from `dashboard_spec.md` (Overview + headline
-      comparison KPIs)
-- [ ] **Review with team** — sanity-check chart targets against real
-      data
-- [ ] **Schedule refresh cadence** — align with pipeline rerun cadence
-
----
-
-## 8. Files in this folder
+## Files in this folder
 
 | File | Purpose |
 |---|---|
-| `README.md` | This file — overview, data model, workflow, meeting notes |
-| `load_script.qvs` | Paste-ready Qlik Data Load Editor script |
-| `dashboard_spec.md` | 6 comparison charts with Qlik expressions + sheet layout |
-| `fetch_from_dbfs.md` | How to populate `data/` from Databricks |
-| `data/` | Landing zone for CSVs (content ignored by git, folders tracked) |
-
----
-
-## 9. Open questions for the meeting
-
-- Where will the Qlik app live? (Qlik Sense SaaS, on-prem, Cloud Hub?)
-- Who owns the load/refresh cadence?
-- Do we want a Databricks JDBC/ODBC connector for live data later, or
-  stick with file-based refresh for now?
-- Do we need role-based access (PHI considerations for real patient
-  IDs)?
-- What's the promotion path from "dev dashboard" to "team dashboard"?
+| `README.md` | You are here — step-by-step how-to |
+| `consolidate.py` | Local Python script that merges per-scanner CSVs into two flat files |
+| `fetch_from_dbfs.md` | Three ways to download CSVs from Databricks |
+| `load_script.qvs` | Alternative: automated Qlik load script (for later, when you want scheduled refreshes) |
+| `dashboard_spec.md` | Advanced reference: full 4-sheet dashboard with pivot tables and extras (uses the automated load_script.qvs model) |
+| `data/` | Landing zone for CSVs. Content is git-ignored; folder structure preserved via `.gitkeep` files |
+| `data/combined/` | Output of `consolidate.py` — the two files you upload to Qlik |

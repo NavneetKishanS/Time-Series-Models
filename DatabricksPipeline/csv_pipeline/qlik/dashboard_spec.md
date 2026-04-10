@@ -1,12 +1,20 @@
-# Dashboard Spec — Synthetic vs Real Comparison
+# Dashboard Spec — Synthetic vs Real Comparison (advanced reference)
 
-This document defines the minimum viable Qlik dashboard for validating
-synthetic pipeline output against real training data. Four sheets, six
-core comparison charts, one headline score.
+> **Looking for the simple how-to?** See [`README.md`](README.md) — it
+> walks through the manual upload workflow (two consolidated CSVs,
+> drag-and-drop into Qlik, six essential charts). This document is the
+> advanced reference for when you move to the automated
+> `load_script.qvs` workflow with the full 4-sheet dashboard, pivot
+> tables, and extra breakdowns.
+
+This document defines the full Qlik dashboard for validating synthetic
+pipeline output against real training data. Four sheets, six core
+comparison charts, pivot tables, and a headline score.
 
 **Prerequisite:** `load_script.qvs` must be loaded and all five tables
 (`FACT_Exchange`, `FACT_Exam`, `DIM_Scanner`, `DIM_Date`,
-`DIM_DataSource`) visible in the Data Model Viewer.
+`DIM_DataSource`) visible in the Data Model Viewer. For the simpler
+two-table manual workflow, see `README.md` instead.
 
 ---
 
