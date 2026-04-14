@@ -15,17 +15,70 @@
 
 # COMMAND ----------
 
-import sys, os, re, json, pickle
+import sys, os, re, json, pickle, shutil, subprocess
 import numpy as np
 import pandas as pd
 import torch
 from datetime import datetime, timedelta
 
-# ── CONFIGURE THIS PATH to your Databricks Repos clone ─────────────────────
-REPO_ROOT = "/Workspace/Repos/luke-schumacher/Time-Series-Models"
-# ───────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# Bootstrap: load AlternatingPipeline from a healthy source, no matter where
+# this notebook lives. The Shared workspace mount has been observed throwing
+# Errno 5 on file reads, and Databricks auto-injects the notebook's parent
+# folder onto sys.path, so we have to actively defend against both.
+#
+# Order of preference for the import root:
+#   1. /Workspace/Repos/<user>/Time-Series-Models  (proper Databricks Repos clone)
+#   2. /tmp/tsm                                    (fresh shallow clone of main)
+# Anything containing "Patient Exchange and Examination" is scrubbed from
+# sys.path because that path lives on the broken Workspace Files mount.
+# ─────────────────────────────────────────────────────────────────────────────
+_REPO_URL = "https://github.com/luke-schumacher/Time-Series-Models.git"
+_FALLBACK = "/tmp/tsm"
+_REPO_CANDIDATES = [
+    "/Workspace/Repos/luke-schumacher/Time-Series-Models",
+    _FALLBACK,
+]
 
+def _is_healthy_repo(path):
+    cfg = os.path.join(path, "AlternatingPipeline", "config.py")
+    if not os.path.isfile(cfg):
+        return False
+    try:
+        with open(cfg, "rb") as f:
+            f.read(64)
+        return True
+    except OSError:
+        return False
+
+REPO_ROOT = next((p for p in _REPO_CANDIDATES if _is_healthy_repo(p)), None)
+if REPO_ROOT is None:
+    if os.path.isdir(_FALLBACK):
+        shutil.rmtree(_FALLBACK)
+    subprocess.run(
+        ["git", "clone", "--depth", "1", "--branch", "main", _REPO_URL, _FALLBACK],
+        check=True,
+    )
+    REPO_ROOT = _FALLBACK
+    assert _is_healthy_repo(REPO_ROOT), f"Fresh clone at {REPO_ROOT} is still unhealthy."
+
+sys.path[:] = [p for p in sys.path if "Patient Exchange and Examination" not in p]
+if REPO_ROOT in sys.path:
+    sys.path.remove(REPO_ROOT)
 sys.path.insert(0, REPO_ROOT)
+
+for _name in [n for n in list(sys.modules) if n == "AlternatingPipeline" or n.startswith("AlternatingPipeline.")]:
+    del sys.modules[_name]
+
+import AlternatingPipeline as _ap
+_bad = [p for p in list(_ap.__path__) if "Patient Exchange and Examination" in p]
+if _bad or not any(REPO_ROOT in p for p in _ap.__path__):
+    raise RuntimeError(
+        f"AlternatingPipeline.__path__ is contaminated: {list(_ap.__path__)}. "
+        f"Expected entries under {REPO_ROOT}."
+    )
+print(f"[bootstrap] REPO_ROOT = {REPO_ROOT}")
+print(f"[bootstrap] AlternatingPipeline.__path__ = {list(_ap.__path__)}")
 
 PKL_PATH       = "/dbfs/FileStore/csv_pipeline/preprocessed_data.pkl"
 MODELS_DIR     = "/dbfs/FileStore/csv_pipeline/models"
