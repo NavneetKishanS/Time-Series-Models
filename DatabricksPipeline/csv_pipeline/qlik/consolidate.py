@@ -20,6 +20,17 @@ Key columns added / renamed during consolidation:
                         (prevents Qlik from spuriously auto-linking these
                         columns across tables — they mean different things)
 
+  * All remaining columns are prefixed with 'Exch_' or 'Exam_' per kind,
+    except the four fields left unprefixed on purpose so Qlik can
+    associate the two tables through them:
+        DataSource, SN, ExchangeBlockID, PatientVisitID
+    Everything else (Age, Weight, Height, duration, predicted_mu,
+    timediff, PatientID, …) would otherwise collide by name between the
+    two files and cause Qlik to auto-create a synthetic key over every
+    shared column, silently inflating every aggregate through the join.
+    With the prefixes, the associative model cleanly links on exactly
+    two fields (SN and DataSource) and nothing else.
+
 Synthetic data is optional: if the synthetic folders are empty (e.g. step 05
 has not been rerun yet), the output files will contain only real rows.  The
 same Qlik dashboard can still be built and tested; rerun this script after
@@ -53,6 +64,19 @@ SAMPLE_IDX_RENAME = {
     'exchange': 'ExchangeBlockID',
     'exam':     'PatientVisitID',
 }
+
+# Prefix applied to every non-key column of each kind, so Qlik's
+# associative model only links the two tables on the intentional keys.
+COLUMN_PREFIX = {
+    'exchange': 'Exch_',
+    'exam':     'Exam_',
+}
+
+# Columns that survive the prefix pass unchanged. DataSource + SN are
+# the two intentional join keys between Exchange and Exam. The two ID
+# columns are already unique per kind after the sample_idx rename above
+# and shouldn't be prefixed either (they'd look silly as Exch_ExchangeBlockID).
+KEEP_UNPREFIXED = {'DataSource', 'SN', 'ExchangeBlockID', 'PatientVisitID'}
 
 
 def _read_one(path: str, data_source: str) -> pd.DataFrame:
@@ -106,13 +130,23 @@ def consolidate(kind: str) -> str | None:
         combined = combined.rename(columns={'sample_idx': SAMPLE_IDX_RENAME[kind]})
 
     # Sort for human-readable ordering (and to keep git diffs stable if you
-    # ever want to inspect the combined files)
+    # ever want to inspect the combined files). Done before the prefix pass
+    # so we can still reference the unprefixed timestamp column.
     sort_cols = ['DataSource']
     if 'SN' in combined.columns:
         sort_cols.append('SN')
     if TIME_COL[kind] in combined.columns:
         sort_cols.append(TIME_COL[kind])
     combined = combined.sort_values(sort_cols, kind='stable').reset_index(drop=True)
+
+    # Prefix every non-key column so Qlik only auto-links the two tables
+    # on SN and DataSource. This is the whole reason we bother with a
+    # consolidation script instead of uploading per-scanner files.
+    prefix = COLUMN_PREFIX[kind]
+    combined = combined.rename(columns={
+        c: (c if c in KEEP_UNPREFIXED else f'{prefix}{c}')
+        for c in combined.columns
+    })
 
     os.makedirs(COMBINED_DIR, exist_ok=True)
     out_path = os.path.join(COMBINED_DIR, f'{kind}_combined.csv')

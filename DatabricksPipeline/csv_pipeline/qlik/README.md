@@ -82,6 +82,14 @@ The script:
 - renames the `sample_idx` column to `ExchangeBlockID` (exchange file)
   and `PatientVisitID` (exam file) so Qlik doesn't mistakenly auto-link
   them across tables
+- **prefixes every non-key column** with `Exch_` (exchange file) or
+  `Exam_` (exam file). The only fields left unprefixed are the four
+  intentional association keys: `DataSource`, `SN`, `ExchangeBlockID`,
+  `PatientVisitID`. Everything else — `Age`, `Weight`, `Height`,
+  `duration`, `PatientID`, `datetime`, `token_name`, `FinishEvent`, …
+  — would otherwise collide by name between the two files and cause
+  Qlik's associative engine to auto-join them, silently inflating
+  every aggregate. Prefixing keeps the link graph to exactly two edges.
 - sorts rows by `DataSource`, `SN`, then timestamp
 - writes two files under `data/combined/`
 
@@ -143,10 +151,14 @@ Repeat 3b for `data/combined/exam_combined.csv`, renaming the table to `Exam`.
 
 ### 3d. Let Qlik associate the two tables
 
-Qlik auto-links tables on any field that appears in both. Both of our
-files share `DataSource`, `SN`, `Age`, `Weight`, `Height`, `Direction`,
-and `PTAB`. Qlik will draw green association lines between them in the
-data manager — that's what you want.
+Qlik auto-links tables on any field that appears in both. Because
+`consolidate.py` prefixes all non-key columns, our two files share
+exactly **two** fields: `SN` (scanner serial) and `DataSource`
+(`Real`/`Synthetic`). Qlik will draw two green association lines
+between `Exchange` and `Exam` in the data manager — that's all you
+want. If you see more than two lines, either the consolidation step
+didn't run or the table names were already populated from an older
+(pre-prefix) upload — delete both tables and re-add them.
 
 Click **Load data** and wait a few seconds. The status should say
 *"Data loaded"*.
@@ -191,7 +203,7 @@ pre-fix synthetic version produced exactly 1.
 - Dimension: `DataSource`
 - Measure (rename "Average scans"):
   ```
-  =Avg(Aggr(Max(StepCount), PatientID, DataSource))
+  =Avg(Aggr(Max(Exam_StepCount), Exam_PatientID, DataSource))
   ```
 - Title: **Scans per patient (mean)**
 
@@ -200,7 +212,7 @@ pre-fix synthetic version produced exactly 1.
 ### Chart 2 — Exam duration distribution
 
 - Type: **Histogram** (or bar chart)
-- Dimension: `Class(duration/60, 0.5)`  *(half-minute bins)*
+- Dimension: `Class(Exam_duration/60, 0.5)`  *(half-minute bins)*
 - Measure: `Count(PatientVisitID)`
 - Color by: `DataSource`
 - Title: **Exam duration (minutes)**
@@ -212,7 +224,7 @@ mass under 5 min.
 
 - Type: **100% stacked bar chart**
 - Dimension 1: `DataSource`
-- Dimension 2: `FinishEvent`
+- Dimension 2: `Exam_FinishEvent`
 - Measure: `Count(PatientVisitID)`
 - Title: **Finish event distribution**
 
@@ -222,7 +234,7 @@ mass under 5 min.
 ### Chart 4 — Body region distribution
 
 - Type: **Bar chart** grouped by DataSource
-- Dimension: `BodyPart`
+- Dimension: `Exam_BodyPart`
 - Measure:
   ```
   =Count(PatientVisitID) / Count(TOTAL <DataSource> PatientVisitID)
@@ -237,10 +249,10 @@ UNKNOWN share on the synthetic side.
 ### Chart 5 — Exchange event type distribution
 
 - Type: **Horizontal bar chart**
-- Dimension: `token_name`
+- Dimension: `Exch_token_name`
 - Measure:
   ```
-  =Count(token_name) / Count(TOTAL <DataSource> token_name)
+  =Count(Exch_token_name) / Count(TOTAL <DataSource> Exch_token_name)
   ```
 - Color by: `DataSource`
 - Sort: descending by real %
@@ -260,20 +272,20 @@ A single number summarising how close synthetic is to real.
   =Round(100 * (1 - (
       (
           Fabs(
-              Avg({<DataSource={'Real'}>}      Aggr(Max(StepCount), PatientID))
-            - Avg({<DataSource={'Synthetic'}>} Aggr(Max(StepCount), PatientID))
+              Avg({<DataSource={'Real'}>}      Aggr(Max(Exam_StepCount), Exam_PatientID))
+            - Avg({<DataSource={'Synthetic'}>} Aggr(Max(Exam_StepCount), Exam_PatientID))
           )
-          / Avg({<DataSource={'Real'}>} Aggr(Max(StepCount), PatientID))
+          / Avg({<DataSource={'Real'}>} Aggr(Max(Exam_StepCount), Exam_PatientID))
         +
           Fabs(
-              Avg({<DataSource={'Real'}>}      duration/60)
-            - Avg({<DataSource={'Synthetic'}>} duration/60)
+              Avg({<DataSource={'Real'}>}      Exam_duration/60)
+            - Avg({<DataSource={'Synthetic'}>} Exam_duration/60)
           )
-          / Avg({<DataSource={'Real'}>} duration/60)
+          / Avg({<DataSource={'Real'}>} Exam_duration/60)
         +
           Fabs(
-              Count({<DataSource={'Real'},      FinishEvent={'Stopped by User'}>} PatientVisitID) / Count({<DataSource={'Real'}>} PatientVisitID)
-            - Count({<DataSource={'Synthetic'}, FinishEvent={'Stopped by User'}>} PatientVisitID) / Count({<DataSource={'Synthetic'}>} PatientVisitID)
+              Count({<DataSource={'Real'},      Exam_FinishEvent={'Stopped by User'}>} PatientVisitID) / Count({<DataSource={'Real'}>} PatientVisitID)
+            - Count({<DataSource={'Synthetic'}, Exam_FinishEvent={'Stopped by User'}>} PatientVisitID) / Count({<DataSource={'Synthetic'}>} PatientVisitID)
           )
       ) / 3
   )), 1) & ' / 100'
@@ -290,10 +302,14 @@ Add a filter pane at the top of the sheet with these fields:
 
 - `DataSource`
 - `SN` *(as "Scanner")*
-- `BodyPart`
-- A date field — click on `datetime` in the fields panel to add
+- `Exam_BodyPart`
+- A date field — click on `Exch_datetime` in the fields panel to add
 
 Clicking any value filters every chart on the sheet simultaneously.
+Because `DataSource` and `SN` are unprefixed (the only two association
+keys), selecting a value in either of these filter panes cross-filters
+both Exchange and Exam charts at once. All other filter fields are
+table-local, which is what you want.
 
 ---
 
@@ -370,6 +386,14 @@ Pandas fills missing cells with NaN so the concatenation still works;
 demographic charts will just show blanks on the synthetic side until
 step 05 is rerun with the fix.
 
+**Why not just rename columns inside Qlik's load dialog?**
+You can, but it's a per-app manual step that nobody will remember on
+the next refresh. Doing it once in `consolidate.py` means every
+downstream person gets the right names for free, and the README's
+chart expressions copy-paste cleanly. Also, renaming inside Qlik
+breaks the "upload the same two files and click Load" refresh loop,
+which is the whole point of the manual workflow.
+
 **The fidelity score is blank — why?**
 You only have real data loaded (no synthetic yet). The formula divides
 by synthetic values; with zero synthetic rows it returns NaN. Run step
@@ -383,11 +407,53 @@ by synthetic values; with zero synthetic rows it returns NaN. Run step
 |---|---|
 | `consolidate.py` says "No DATA_*.csv files" | Populate `data/real/` and/or `data/synthetic/` first — see [`fetch_from_dbfs.md`](fetch_from_dbfs.md) |
 | `ModuleNotFoundError: pandas` | `pip install pandas` |
-| Qlik can't find a column like `ExchangeBlockID` when you paste an expression | You forgot to rename the table to `Exchange`/`Exam` in step 3b — delete the data source, re-add, and rename |
+| Qlik can't find a column like `Exam_StepCount` or `Exch_token_name` when you paste an expression | You're on an old combined CSV from before the prefix pass. Rerun `consolidate.py`, re-upload both tables in Qlik (delete the old data sources first, then add fresh) |
+| Chart expressions reference bare `StepCount`, `duration`, `FinishEvent`, `BodyPart`, `PatientID`, `token_name` | Those are the pre-prefix column names. Every exam-side field is now `Exam_<name>` and every exchange-side field is now `Exch_<name>`. Only `DataSource`, `SN`, `ExchangeBlockID`, `PatientVisitID` are unprefixed |
+| Qlik draws more than two association lines between `Exchange` and `Exam` in Data Manager | You uploaded pre-prefix CSVs or mixed an old file with a new one. Delete both tables, rerun `consolidate.py`, re-add |
+| Qlik shows "synthetic key" or "circular reference" warning | Same as above — prefixing keeps the link graph to exactly two edges (`SN` and `DataSource`). If you still see this, open Data Manager and check whether some field other than those two is creating a green link |
 | Chart 3 shows only "Successful" on the synthetic side | Your exam model is still producing no stop events — rerun step 04 and step 05 with commit `08663b9` or later |
 | Chart 1 shows exactly 1.0 for synthetic | Same — you're looking at pre-fix synthetic output |
-| Qlik shows "synthetic circular reference" warning | Qlik thinks a field in both tables carries the same meaning but with different values. Usually a `sample_idx` issue — make sure you ran the latest `consolidate.py` which renames it |
 | Fidelity Score is `NaN / 100` | One side has zero rows — check the sanity-check text from step 3e |
+
+---
+
+## Column naming reference
+
+Every non-key column is prefixed per kind so Qlik's associative engine
+only joins the two tables on the fields you actually want. Use this
+table as a lookup when writing your own chart expressions.
+
+| Qlik field name | Lives in | What it is |
+|---|---|---|
+| `DataSource` | **both** (link) | `'Real'` or `'Synthetic'` — drives every comparison |
+| `SN` | **both** (link) | Scanner serial number — cross-filter key |
+| `ExchangeBlockID` | Exchange | Per-row block id (was `sample_idx`) |
+| `PatientVisitID` | Exam | Per-visit id (was `sample_idx`) |
+| `Exch_token_name` | Exchange | Event name, e.g. `MRI_FRR_264` |
+| `Exch_token_id` | Exchange | Event id (integer) |
+| `Exch_datetime` | Exchange | Event timestamp |
+| `Exch_timediff` | Exchange | Seconds since previous event |
+| `Exch_PatientID_from` / `Exch_PatientID_to` | Exchange | Patient handoff direction |
+| `Exch_BodyGroup_from` / `Exch_BodyGroup_to` | Exchange | Body-region handoff |
+| `Exch_predicted_mu` / `Exch_predicted_sigma` / `Exch_sampled_duration` | Exchange | Exchange-model outputs |
+| `Exch_Age` / `Exch_Weight` / `Exch_Height` / `Exch_Direction` / `Exch_PTAB` | Exchange | Patient demographics as seen by exchange rows |
+| `Exam_PatientID` | Exam | Patient id (note: independent of `Exch_PatientID_*`) |
+| `Exam_BodyPart` / `Exam_BodyGroup` | Exam | Anatomical region |
+| `Exam_Sequence` / `Exam_Protocol` | Exam | MRI sequence identifiers |
+| `Exam_ConnectedCoils` | Exam | Comma-separated coil list |
+| `Exam_FinishEvent` | Exam | `Successful`, `Stopped by User`, etc. |
+| `Exam_duration` / `Exam_startTime` / `Exam_endTime` / `Exam_pauseTime` | Exam | Timing fields |
+| `Exam_StepCount` | Exam | Scans per patient visit |
+| `Exam_predicted_mu` / `Exam_predicted_sigma` / `Exam_sampled_duration` | Exam | Examination-model outputs |
+| `Exam_Age` / `Exam_Weight` / `Exam_Height` / `Exam_Direction` / `Exam_PTAB` | Exam | Patient demographics as seen by exam rows |
+| `Exam_#0_BC`, `Exam_#0_SP1`, … | Exam | Coil columns (pre-fixed verbatim; not meant to be linked) |
+
+**Rule of thumb for your own charts:** if the field exists in exactly
+one file, use the prefixed name. If it exists in both files and you
+want them joined, use one of the four unprefixed keys. If you find
+yourself wanting to join on `PatientID` across tables, stop — those
+are `Exch_PatientID_*` and `Exam_PatientID`, and they mean different
+things even in real data (and are completely independent in synthetic).
 
 ---
 
