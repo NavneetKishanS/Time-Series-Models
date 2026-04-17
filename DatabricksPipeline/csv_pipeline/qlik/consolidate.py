@@ -148,6 +148,19 @@ def consolidate(kind: str) -> str | None:
         for c in combined.columns
     })
 
+    # Reorder columns so a human opening the CSV sees meaningful fields
+    # first. Without this, the exam file leads with ~60 mostly-False coil
+    # columns and looks empty in a spreadsheet preview. Order:
+    #   1. The unprefixed keys (DataSource, SN, ExchangeBlockID/PatientVisitID)
+    #   2. All prefixed non-coil columns (preserves original discovery order)
+    #   3. Coil columns last (anything containing '_#' — e.g. Exam_#0_BC)
+    key_order  = ['DataSource', 'SN', 'ExchangeBlockID', 'PatientVisitID']
+    keys_first = [c for c in key_order if c in combined.columns]
+    remaining  = [c for c in combined.columns if c not in keys_first]
+    non_coil   = [c for c in remaining if '_#' not in c]
+    coils      = [c for c in remaining if '_#' in c]
+    combined = combined[keys_first + non_coil + coils]
+
     os.makedirs(COMBINED_DIR, exist_ok=True)
     out_path = os.path.join(COMBINED_DIR, f'{kind}_combined.csv')
     combined.to_csv(out_path, index=False)
