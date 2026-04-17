@@ -22,6 +22,24 @@ per-scanner CSVs into two files, plus a few drag-and-drops in Qlik.
 > workflow. Add synthetic later (after step 05 reruns) and re-run the
 > consolidation to refresh.
 
+### Returning user? The one-screen refresh loop
+
+If you have the Qlik app built already and just want to refresh with a
+new pipeline run:
+
+```bash
+# 1. Drop new DATA_*.csv files into data/real/ and/or data/synthetic/
+# 2. Re-consolidate
+cd DatabricksPipeline/csv_pipeline/qlik
+python consolidate.py
+# 3. In Qlik: Data manager → click reload icon on each table → Load data
+```
+
+That's it — no chart edits, no formula changes. The column names are
+stable across runs because `consolidate.py` prefixes them
+deterministically (`Exch_*`, `Exam_*`) and the four key fields
+(`DataSource`, `SN`, `ExchangeBlockID`, `PatientVisitID`) never change.
+
 ---
 
 ## Prerequisites
@@ -178,13 +196,18 @@ Go to a blank sheet, add a **Text & image** object, and paste:
 You should see something like:
 
 ```
-Exchange: 120735 real + 0 synthetic
-Exam: 41106 real + 0 synthetic
+Exchange: 120735 real + 96596 synthetic
+Exam: 41106 real + 10143 synthetic
 ```
 
+(Exact numbers shift when scanners are added, step 05 is rerun, or the
+training window changes. What matters is that **both sides are non-
+zero**.)
+
 If both numbers are 0, the data didn't load — check step 3b/3c table
-names. If you only see real numbers, step 05 hasn't been rerun yet
-(that's fine for initial testing).
+names. If only the real side is non-zero, step 05 hasn't produced
+synthetic CSVs yet (fine for initial workflow testing — every chart
+still renders, Chart 6 Fidelity Score will be `NaN`).
 
 ---
 
@@ -207,7 +230,9 @@ pre-fix synthetic version produced exactly 1.
   ```
 - Title: **Scans per patient (mean)**
 
-**Pass:** both bars land in 7–12. **Fail:** synthetic near 1.
+**Pass:** both bars in 7–20. **Fail:** synthetic at 1 (model produces
+exactly one scan per visit — degenerate). Current synthetic run: 3.0
+(under-producing, but not degenerate).
 
 ### Chart 2 — Exam duration distribution
 
@@ -218,7 +243,9 @@ pre-fix synthetic version produced exactly 1.
 - Title: **Exam duration (minutes)**
 
 **Pass:** two overlapping distributions centered near 1.7 min, most
-mass under 5 min.
+mass under 5 min. **Current state:** real is a tall spike near 1.7 min,
+synthetic is a wide plateau centered near 25 min — the 14× duration-
+scale mismatch. This is the single most visually obvious gap.
 
 ### Chart 3 — Finish event breakdown
 
@@ -229,7 +256,9 @@ mass under 5 min.
 - Title: **Finish event distribution**
 
 **Pass:** both bars show ~96% Successful, ~3–4% Stopped by User.
-**Fail:** synthetic shows 100% Successful (no stop events learned).
+**Fail:** synthetic shows 100% Successful (no stop events learned) —
+this is the current state. Low priority to fix (3.6% is a cosmetic
+class) but it's visually obvious so plan to mention it.
 
 ### Chart 4 — Body region distribution
 
@@ -244,7 +273,10 @@ mass under 5 min.
 - Title: **Body part share of exams**
 
 **Pass:** same top-3 rank for both (BRAIN, ABDOMEN, LIVER) and low
-UNKNOWN share on the synthetic side.
+UNKNOWN share on the synthetic side. **Current state:** real top-3 is
+BRAIN (17%), ABDOMEN (17%), LIVER (8%); synthetic top-3 is UNKNOWN
+(28%), HEAD (25%), ABDOMEN (23%). ABDOMEN matches, the rest are off —
+the model is defaulting to UNKNOWN when uncertain.
 
 ### Chart 5 — Exchange event type distribution
 
@@ -260,7 +292,10 @@ UNKNOWN share on the synthetic side.
 
 **Pass:** top 5 match the real ordering
 (`MRI_FRR_264`, `MRI_FRR_257`, `MRI_FRR_256`, `MRI_FRR_2`, `MRI_CCS_11`).
-This is already the metric the exchange model passes.
+**Current state:** same top-5 set, ordering matches except `FRR_256`
+and `FRR_257` swap positions 2 and 3. This is the exchange model's
+win column — use it as the "here's what success looks like" reference
+for the other charts.
 
 ### Chart 6 — Fidelity Score (headline KPI)
 
@@ -315,21 +350,64 @@ table-local, which is what you want.
 
 ## Step 5 — Read the results
 
-Use this grade sheet as your meeting talking points:
+Baselines below are computed directly from the combined CSVs on disk
+(10 real scanners, Jan 2024 training window), so they stay in sync if
+your scanner set changes — just rerun `consolidate.py` and the numbers
+in Qlik match the numbers here.
 
-| Chart | Real baseline | Pass threshold for synthetic |
-|---|---|---|
-| 1. Scans per patient | **9.7** mean | 7.5 – 12 |
-| 2. Exam duration | **1.75** min mean | 1.4 – 2.1 min |
-| 2. Exam duration (% <1 min) | ~10% | < 20% |
-| 3. Stopped-by-User rate | **3.6%** | 1 – 6% |
-| 4. Top body parts (rank) | BRAIN, ABDOMEN, LIVER | top 3 match |
-| 5. Top exchange tokens (rank) | FRR_264, FRR_257, FRR_256, FRR_2, CCS_11 | top 5 match |
-| 6. Fidelity Score | n/a | ≥ 75 good, ≥ 80 ship |
+### Grade sheet
 
-If most rows fall in the pass range, the model is producing plausible
-data. The broken April 9 run failed Charts 1, 2 (<1 min rate), and 3 —
-those three are the smoking guns for examination-model health.
+| Chart | Real baseline | Current synthetic | Pass threshold |
+|---|---|---|---|
+| 1. Scans per patient (mean) | **15.3** (median 9.0) | 3.0 | 7 – 20 |
+| 2. Exam duration (mean per row) | **1.75 min** (105 sec) | **25.2 min** ⚠ 14× high | 1.2 – 2.5 min |
+| 2a. % of rows under 1 min | ~12% | ~22% | < 25% |
+| 3. Stopped-by-User rate | **3.6%** | **0%** ⚠ class missing | 1 – 6% |
+| 4. Top-3 body parts (rank) | BRAIN, ABDOMEN, LIVER | UNKNOWN, HEAD, ABDOMEN ⚠ | top 3 match |
+| 5. Top-5 exchange tokens | FRR_264, FRR_257, FRR_256, FRR_2, CCS_11 | FRR_264, FRR_256, FRR_257, FRR_2, CCS_11 ✓ | top 5 match (any order) |
+| 6. Fidelity Score | — | — | ≥ 75 good, ≥ 80 ship |
+
+### Current state in one line
+
+Exchange side is healthy (Chart 5 matches); examination side has three
+known gaps — duration scale is 14× high, the stopped-exam class is not
+being generated, and body-part distribution is skewed toward `UNKNOWN`.
+The fixes for these land in the weekend retrain; for the Monday meeting
+the honest framing is **"exchange model ready, examination model mid-
+iteration — here are the three specific gaps and what drives each."**
+
+### How to read each chart in the meeting
+
+- **Chart 1 (Scans per patient)** — if the synthetic bar is <5, say:
+  "the multi-scan-per-visit loop fires but it's under-producing; we
+  think Poisson mean needs to move from 8 to ~12 for the next run."
+- **Chart 2 (Exam duration)** — if synthetic mean > 3 min, that's the
+  14× scale bug showing. Point at it, say: "known — duration unscaling
+  in step 05 still assumes the old 600 scale somewhere downstream.
+  Commit `08663b9` updated the training scale but the fidelity gap
+  suggests the generator path needs a matching fix."
+- **Chart 3 (Finish event)** — if synthetic shows 100% Successful, the
+  stopped class isn't in the vocab / sample weights the exam model saw
+  enough of. Minor priority since it's a cosmetic 3.6% class.
+- **Chart 4 (Body part)** — if `UNKNOWN` is the top synthetic bar but
+  not in the top-5 real bars, the model is defaulting to the null
+  region whenever it's uncertain. Call out as honest-known, fix plan is
+  to either drop UNKNOWN during generation or train the region head
+  harder.
+- **Chart 5 (Exchange tokens)** — this should match. If it doesn't, the
+  exchange model regressed and you should stop the demo.
+- **Chart 6 (Fidelity score)** — a single-number summary combining
+  Charts 1, 2, 3. Expect ~40–60 with current synthetic (the Chart 2
+  scale gap dominates). Ship threshold is 80.
+
+### Historical comparison
+
+The April 9 broken run failed **Charts 1, 2, and 3** outright: 1 scan
+per patient, ~0.02-min exams, 100% Successful. This rerun (April 14)
+fixes the degeneracy — Chart 5 now matches, Chart 1 is in the right
+order of magnitude, and Chart 2 at least has a realistic shape even if
+the mean is 14× off. The green arrow between runs is what the meeting
+is about, not the absolute pass/fail.
 
 ---
 
