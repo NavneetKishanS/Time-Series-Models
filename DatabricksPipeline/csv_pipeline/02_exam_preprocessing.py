@@ -505,6 +505,14 @@ for serial_number in SERIAL_NUMBERS:
     df['StepCount'] = df.groupby('PatientID').cumcount() + 1
     df.loc[df['PatientID'] != df['PatientID'].shift(-1), 'pauseTime'] = 0
 
+    # timediff — seconds between this exam's startTime and the previous
+    # exam's startTime on the same scanner. Produced here so it matches
+    # the column that step 05 writes for synthetic CSVs; without it the
+    # qlik combined file has timediff populated for synthetic but NaN
+    # for real, which makes any inter-exam-gap chart look broken.
+    df = df.sort_values('startTime').reset_index(drop=True)
+    df['timediff'] = df['startTime'].diff().dt.total_seconds().fillna(0)
+
     # -------------------------------------------------------------------------
     # Merge examination_workflow for Age, Weight, Height, Direction
     # -------------------------------------------------------------------------

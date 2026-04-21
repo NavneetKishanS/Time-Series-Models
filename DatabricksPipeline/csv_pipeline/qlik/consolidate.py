@@ -86,6 +86,41 @@ def _read_one(path: str, data_source: str) -> pd.DataFrame:
     return df
 
 
+def _backfill_exam_timediff(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Step 02 older runs didn't emit a `timediff` column for exam rows.
+    Step 05 always emits one for synthetic. Without this backfill, the
+    combined exam CSV ends up with `timediff` populated for synthetic
+    but NaN for real — any inter-exam-gap chart in Qlik looks broken.
+
+    If the column is already fully populated, this is a no-op. Otherwise,
+    we compute it per (DataSource, SN) from the startTime deltas, which
+    matches the semantic step 02/05 both use (seconds between this exam's
+    startTime and the previous exam's startTime on the same scanner).
+    """
+    if 'timediff' in df.columns and df['timediff'].notna().all():
+        return df
+    if 'startTime' not in df.columns:
+        return df
+
+    if 'timediff' not in df.columns:
+        df['timediff'] = float('nan')
+
+    st = pd.to_datetime(df['startTime'], errors='coerce')
+    # Stable sort on the null-only subset; compute per-(source, scanner) diff.
+    needs_fill = df['timediff'].isna()
+    if not needs_fill.any():
+        return df
+
+    order = df.index  # remember original order
+    tmp = df.assign(_st=st).sort_values(['DataSource', 'SN', '_st'], kind='stable')
+    filled = tmp.groupby(['DataSource', 'SN'])['_st'].diff().dt.total_seconds().fillna(0)
+    tmp['_filled'] = filled
+    tmp = tmp.loc[order]  # restore original row order
+    df.loc[needs_fill, 'timediff'] = tmp.loc[needs_fill, '_filled'].values
+    return df
+
+
 def consolidate(kind: str) -> str | None:
     """
     Merge per-scanner CSVs for one kind (exchange or exam) into one file.
@@ -124,6 +159,12 @@ def consolidate(kind: str) -> str | None:
     # with NaN.  This handles exam files with scanner-specific coil columns
     # gracefully.
     combined = pd.concat(pieces, ignore_index=True, sort=False)
+
+    # Back-fill exam-side timediff from startTime when step 02 didn't emit it
+    # (older real CSVs). No-op once 02_exam_preprocessing.py's timediff
+    # patch has been rerun on Databricks and the fresh files are downloaded.
+    if kind == 'exam':
+        combined = _backfill_exam_timediff(combined)
 
     # Disambiguate sample_idx
     if 'sample_idx' in combined.columns:
