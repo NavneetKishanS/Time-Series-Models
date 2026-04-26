@@ -112,7 +112,7 @@ from AlternatingPipeline.config import (
 # Duration unscaling — models were trained on (raw_seconds / duration_scale),
 # so generated durations must be multiplied back to get real seconds.
 EXCHANGE_DURATION_SCALE  = EXCHANGE_TRAINING_CONFIG['duration_scale']   # 60.0
-EXAMINATION_DURATION_SCALE = EXAMINATION_TRAINING_CONFIG['duration_scale']  # 600.0
+EXAMINATION_DURATION_SCALE = EXAMINATION_TRAINING_CONFIG['duration_scale']  # 60.0
 from AlternatingPipeline.models.exchange_model    import create_exchange_model
 from AlternatingPipeline.models.examination_model import create_examination_model
 from AlternatingPipeline.models.orchestration_model import create_orchestration_model
@@ -430,6 +430,28 @@ def _fill_pause_times(rows):
     return rows
 
 
+def _fill_exam_timediff(rows):
+    """
+    Overwrite per-row timediff with inter-exam delta on the same scanner,
+    matching the semantic step 02 emits for real CSVs (`startTime.diff()`
+    on a scanner-sorted frame). The in-loop `round(msr_start_t, 2)` value
+    set inside `_generate_exam_rows` is cumulative-from-day-start, which
+    diverges from real and silently breaks any inter-exam-gap chart in
+    Qlik. Same-scanner ordering matches consolidate.py's backfill.
+    """
+    if not rows:
+        return rows
+    df = pd.DataFrame({
+        'i':  range(len(rows)),
+        'SN': [r['SN'] for r in rows],
+        'st': pd.to_datetime([r['startTime'] for r in rows]),
+    }).sort_values(['SN', 'st'], kind='stable')
+    df['td'] = df.groupby('SN')['st'].diff().dt.total_seconds().fillna(0)
+    for i, td in zip(df['i'].values, df['td'].values):
+        rows[i]['timediff'] = round(float(td), 2)
+    return rows
+
+
 def _generate_orch_tokens(scanner_idx, date, demographic_distributions):
     """
     Use orchestration model to predict the body region sequence for one day.
@@ -613,6 +635,25 @@ for customer_idx, (serial_str, daily_schedules) in enumerate(customer_schedules.
 
     # ── Fill pause times for exam rows ──
     all_exam_rows = _fill_pause_times(all_exam_rows)
+    all_exam_rows = _fill_exam_timediff(all_exam_rows)
+
+    # ── Duration diagnostic: surface model-vs-real calibration up front ──
+    # Real exam_duration mean ≈ 105 s on serials 176148/183242. If synthetic
+    # mean lands far outside ~80-150 s, the per-token duration model is
+    # mis-calibrated and Qlik comparison will look broken regardless of the
+    # rest of the pipeline. We also emit median tokens-per-block so the
+    # operator can tell whether the inflation is per-token-too-large or
+    # too-many-tokens-per-MSR_100→MSR_104 window.
+    if all_exam_rows:
+        durs = [r['duration'] for r in all_exam_rows if r.get('duration', 0) > 0]
+        if durs:
+            mean_dur = sum(durs) / len(durs)
+            sorted_d = sorted(durs)
+            med_dur  = sorted_d[len(sorted_d) // 2]
+            flag = ''
+            if mean_dur < 30 or mean_dur > 300:
+                flag = '  ⚠ off-band (real ≈ 105 s) — examination duration model needs recalibration'
+            print(f"  Exam duration: mean={mean_dur:.1f}s  median={med_dur:.1f}s  n={len(durs)}{flag}")
 
     # ── Save exchange CSV ──
     if all_exchange_rows:
