@@ -441,8 +441,19 @@ for serial in SERIAL_NUMBERS:
         timediffs = segment['timediff'].values.astype(float)
         durations = np.diff(timediffs, prepend=timediffs[0]).tolist()
         durations[0] = 0.0
-        durations = [max(0.0, d) for d in durations]
+        # Clip below at 0 (boundary-reset artifacts) and above at
+        # MAX_PER_TOKEN_DURATION. The upper cap is the load-bearing fix for
+        # the duration calibration bug: without it, segment-boundary
+        # artifacts (single tokens with 88-hour durations) blow up the
+        # Gaussian NLL loss and the model learns inflated mu/sigma.
+        durations = [min(MAX_PER_TOKEN_DURATION, max(0.0, d)) for d in durations]
         total_duration = float(timediffs[-1] - timediffs[0]) if len(timediffs) > 1 else 0.0
+
+        # Drop segments whose total duration is implausibly long — these
+        # are missed change-points (cross-day / cross-patient spans) that
+        # would still bias training even with the per-token cap above.
+        if total_duration > MAX_EXAMINATION_DURATION:
+            continue
 
         # Body region: prefer last MRI_EXU_95 before start
         body_region_str = str(segment.iloc[0].get('BodyGroup_to', 'UNKNOWN')).upper()

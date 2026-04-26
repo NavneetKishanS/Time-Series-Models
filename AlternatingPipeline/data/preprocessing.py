@@ -432,7 +432,12 @@ def extract_examination_events(df, verbose=False):
         timediffs = segment['timediff'].values.astype(float)
         durations = np.diff(timediffs, prepend=timediffs[0]).tolist()
         durations[0] = 0.0  # first event has no prior reference
-        durations = [max(0.0, d) for d in durations]   # clip boundary-reset artifacts
+        # Clip below at 0 and above at 600 s. The upper cap is load-bearing:
+        # without it, segment-boundary artifacts (observed: single tokens
+        # with 88-hour durations on the production pkl) dominate the
+        # Gaussian NLL loss and inflate every synthesized duration. Mirror
+        # of MAX_PER_TOKEN_DURATION in DatabricksPipeline/csv_pipeline/config.py.
+        durations = [min(600.0, max(0.0, d)) for d in durations]
 
         # Get conditioning
         row = segment.iloc[0]
@@ -449,6 +454,11 @@ def extract_examination_events(df, verbose=False):
 
         # Total duration is the time span of the examination (last - first timediff)
         total_duration = float(timediffs[-1] - timediffs[0]) if len(timediffs) > 1 else 0.0
+
+        # Drop segments whose total span is implausibly long — missed
+        # change-points (multi-day / cross-patient) that bias training.
+        if total_duration > 4000.0:
+            continue
 
         examination_sequences.append({
             'sequence': sequence,

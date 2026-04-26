@@ -133,6 +133,21 @@ REAL_EVENT_TYPES = SOURCE_ID_FILTER
 # treated as overnight gaps and discarded (mirrors train_exchange.py)
 MAX_EXCHANGE_DURATION = 7200
 
+# Maximum total examination (MSR_100 → MSR_104) duration in seconds. Above
+# this, the segment is almost certainly a missed change-point boundary
+# (multi-day or cross-patient span) and would feed an outlier per-token
+# duration into the Gaussian NLL training loss. Matches the 4000 s sanity
+# filter that 05_generate_synthetic_data.py applies to its own output rows.
+MAX_EXAMINATION_DURATION = 4000
+
+# Cap on any single intra-event duration in seconds. Real per-token P90 is
+# ~15 s and FINISH-token duration tracks total exam length (P90 ~141 s); a
+# 600 s cap leaves headroom for legitimate long exams while clipping the
+# segment-boundary artifacts (observed up to 316 712 s = 88 h on one token)
+# that otherwise dominate the Gaussian NLL loss and inflate every
+# synthesized duration.
+MAX_PER_TOKEN_DURATION = 600
+
 # Phase labels for exchange sequences
 PHASE_TYPES = {
     'startup':  0,   # First exchange of the day
