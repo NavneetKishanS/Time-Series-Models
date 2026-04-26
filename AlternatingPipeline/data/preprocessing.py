@@ -459,6 +459,12 @@ def extract_examination_events(df, verbose=False):
         # change-points (multi-day / cross-patient) that bias training.
         if total_duration > 4000.0:
             continue
+        # Also drop trivially-short segments (localizers, aborts,
+        # calibration pings) — ~66% of raw segments fall under 10 s on
+        # production data and pull the learned distribution mean far
+        # below the per-measurement step-02 reference.
+        if total_duration < 10.0:
+            continue
 
         examination_sequences.append({
             'sequence': sequence,

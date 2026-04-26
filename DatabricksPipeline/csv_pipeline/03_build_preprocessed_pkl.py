@@ -454,6 +454,12 @@ for serial in SERIAL_NUMBERS:
         # would still bias training even with the per-token cap above.
         if total_duration > MAX_EXAMINATION_DURATION:
             continue
+        # Also drop trivially-short segments (localizer pings, aborts,
+        # calibrations). Without this filter, ~66% of training segments
+        # are <10 s and pull the model's learned mean ~2.4× below the
+        # step-02 per-measurement reference distribution.
+        if total_duration < MIN_EXAMINATION_DURATION:
+            continue
 
         # Body region: prefer last MRI_EXU_95 before start
         body_region_str = str(segment.iloc[0].get('BodyGroup_to', 'UNKNOWN')).upper()

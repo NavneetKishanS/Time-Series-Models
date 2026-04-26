@@ -140,6 +140,14 @@ MAX_EXCHANGE_DURATION = 7200
 # filter that 05_generate_synthetic_data.py applies to its own output rows.
 MAX_EXAMINATION_DURATION = 4000
 
+# Minimum total examination duration in seconds. Below this, the segment is
+# almost always a localizer / aborted measurement / calibration ping, not a
+# real diagnostic exam. On the production pkl, 65.8% of segments fell under
+# 10 s and dragged the mean total_duration to 43 s vs step 02's per-
+# measurement CSV mean of 105 s. Filtering at 10 s realigns the training
+# distribution with the real-data reference Qlik compares against.
+MIN_EXAMINATION_DURATION = 10
+
 # Cap on any single intra-event duration in seconds. Real per-token P90 is
 # ~15 s and FINISH-token duration tracks total exam length (P90 ~141 s); a
 # 600 s cap leaves headroom for legitimate long exams while clipping the
