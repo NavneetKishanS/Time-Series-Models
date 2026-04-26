@@ -58,6 +58,16 @@ TIME_COL = {
     'exam':     'startTime',
 }
 
+# Columns to drop before writing. These exist in one side only (or carry a
+# single constant value) and therefore mislead any Qlik comparison chart.
+DROP_COLS = {
+    'exchange': (),
+    # sourceID is present only on synthetic exam rows (step 02 doesn't emit
+    # it) and is always 'MRI_MSR_104' in synthetic, i.e. a constant. The
+    # equivalent comparable field is FinishEvent, which step 02 does emit.
+    'exam':     ('sourceID',),
+}
+
 # Rename sample_idx to something unambiguous per kind, so Qlik doesn't
 # auto-link the exchange sample_idx to the exam sample_idx.
 SAMPLE_IDX_RENAME = {
@@ -165,6 +175,12 @@ def consolidate(kind: str) -> str | None:
     # patch has been rerun on Databricks and the fresh files are downloaded.
     if kind == 'exam':
         combined = _backfill_exam_timediff(combined)
+
+    # Drop misleading single-side / constant-valued columns
+    to_drop = [c for c in DROP_COLS[kind] if c in combined.columns]
+    if to_drop:
+        combined = combined.drop(columns=to_drop)
+        print(f"  (dropped {len(to_drop)} misleading col{'s' if len(to_drop)!=1 else ''}: {to_drop})")
 
     # Disambiguate sample_idx
     if 'sample_idx' in combined.columns:
