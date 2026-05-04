@@ -15,6 +15,49 @@
 
 # COMMAND ----------
 
+import sys, os, shutil, subprocess, importlib                                                          
+                                                                                                        
+                                                                                                        
+# 1. Scrub broken Shared paths                                                                         
+sys.path[:] = [p for p in sys.path if 'Shared/Patient Exchange and Examination' not in p]              
+                                                                                                        
+# 2. Evict everything AlternatingPipeline-related                                                      
+for mod in list(sys.modules):                                                                          
+    if mod.startswith('AlternatingPipeline') or mod == 'config':                                       
+        del sys.modules[mod]                                                                           
+
+# 3. Ensure /tmp/tsm exists
+TSM = '/tmp/tsm'
+if not os.path.isdir(f'{TSM}/AlternatingPipeline'):
+    shutil.rmtree(TSM, ignore_errors=True)
+    subprocess.check_call(['git', 'clone', '--depth=1',
+                            'https://github.com/luke-schumacher/Time-Series-Models.git', TSM])
+if TSM not in sys.path:
+    sys.path.insert(0, TSM)
+
+# 4. Pre-import every submodule load_models touches, so each one lands in
+#    sys.modules pointing at /tmp/tsm before Databricks's Workspace finder
+#    can intercept it.
+for name in [
+    'AlternatingPipeline',
+    'AlternatingPipeline.config',
+    'AlternatingPipeline.models',
+    'AlternatingPipeline.models.exchange_model',
+    'AlternatingPipeline.models.examination_model',
+    'AlternatingPipeline.models.orchestration_model',
+    'AlternatingPipeline.models.sequence_generator',
+    'AlternatingPipeline.data',
+    'AlternatingPipeline.data.preprocessing',
+    'AlternatingPipeline.data.orchestration_preprocessing',
+]:
+    m = importlib.import_module(name)
+    print(f'  {name:60s} -> {getattr(m, "__file__", "<pkg>")}')
+
+print('\nALL MODULES LOADED FROM /tmp/tsm')
+
+
+# COMMAND ----------
+
 import sys, os, re, json, pickle, shutil, subprocess
 import numpy as np
 import pandas as pd
@@ -96,9 +139,14 @@ WEEKDAYS_ONLY        = True          # skip Saturdays/Sundays (MRI scanners are 
 NUM_DAYS_PER_SCANNER = 30            # cap if the date range produces more days than needed
 
 # COMMAND ----------
+
 # =============================================================================
 # Load data and models
 # =============================================================================
+import sys                                                
+sys.path[:] = [p for p in sys.path if 'Patient Exchange and Examination' not in p]
+import AlternatingPipeline as _ap                                                                      
+_ap.__path__[:] = [p for p in _ap.__path__ if 'Patient Exchange and Examination' not in p]
 
 from AlternatingPipeline.config import (
     EXCHANGE_MODEL_CONFIG, EXAMINATION_MODEL_CONFIG, ORCHESTRATION_MODEL_CONFIG,
@@ -163,6 +211,7 @@ orch_samples, _ = extract_orchestration_samples(data)
 demographic_distributions = build_demographic_distributions(data)
 
 # COMMAND ----------
+
 # =============================================================================
 # HELPER FUNCTIONS
 # =============================================================================
@@ -483,6 +532,7 @@ def _generate_orch_tokens(scanner_idx, date, demographic_distributions):
             if 0 <= t < NUM_BODY_REGIONS and t not in (START_REGION_ID, END_REGION_ID)]
 
 # COMMAND ----------
+
 # =============================================================================
 # MAIN GENERATION LOOP — one synthetic day per customer per date
 # =============================================================================
@@ -670,6 +720,7 @@ for customer_idx, (serial_str, daily_schedules) in enumerate(customer_schedules.
         print(f"  Exam CSV:     {len(df_exam):,} rows → {exam_path}")
 
 # COMMAND ----------
+
 # =============================================================================
 # Download links
 # =============================================================================
@@ -682,6 +733,7 @@ for serial_str in customer_schedules.keys():
 displayHTML(f'<h3>Synthetic CSVs</h3><ul>{links}</ul>')
 
 # COMMAND ----------
+
 # =============================================================================
 # Visualizations — synthetic data quality
 # =============================================================================
@@ -804,6 +856,7 @@ if not df_exam_all.empty and 'startTime' in df_exam_all.columns:
     plt.close(fig4)
 
 # COMMAND ----------
+
 # =============================================================================
 # Text evaluation report — copy/paste this to share for model improvement
 # =============================================================================

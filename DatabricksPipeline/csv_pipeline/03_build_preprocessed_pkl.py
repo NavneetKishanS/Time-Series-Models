@@ -19,10 +19,12 @@
 # scripts at it.
 
 # COMMAND ----------
-%pip install openpyxl
+
+# MAGIC %pip install openpyxl
 
 # COMMAND ----------
-%run ./config
+
+# MAGIC %run ./config
 
 # COMMAND ----------
 
@@ -50,6 +52,7 @@ print(f"Date range: {DATE_START} → {DATE_END}")
 print(f"Output:     {PKL_OUTPUT}")
 
 # COMMAND ----------
+
 # =============================================================================
 # HELPERS
 # =============================================================================
@@ -95,6 +98,7 @@ def _conditioning(row, dt=None):
     }
 
 # COMMAND ----------
+
 # =============================================================================
 # SECTION 1 — Exchange sequences from CSV
 # =============================================================================
@@ -213,6 +217,7 @@ for serial in SERIAL_NUMBERS:
 print(f"\nTotal exchange sequences: {len(exchange_sequences)}")
 
 # COMMAND ----------
+
 # =============================================================================
 # SECTION 2 — Examination sequences re-queried from Spark
 #
@@ -506,6 +511,7 @@ for serial in SERIAL_NUMBERS:
 print(f"\nTotal examination sequences: {len(examination_sequences)}")
 
 # COMMAND ----------
+
 # =============================================================================
 # SECTION 3 — customer_schedules from exam CSVs
 # =============================================================================
@@ -576,6 +582,7 @@ for serial in SERIAL_NUMBERS:
 print(f"\nCustomer schedules: {len(customer_schedules)} scanners")
 
 # COMMAND ----------
+
 # =============================================================================
 # SECTION 4 — daily_summaries from exchange CSVs
 # =============================================================================
@@ -626,6 +633,7 @@ daily_summaries.sort(key=lambda x: x['date'])
 print(f"Daily summary entries: {len(daily_summaries)}")
 
 # COMMAND ----------
+
 # =============================================================================
 # SECTION 5 — Assemble and save preprocessed_data.pkl
 # =============================================================================
@@ -649,6 +657,7 @@ size_mb = os.path.getsize(PKL_OUTPUT) / (1024 * 1024)
 print(f"Saved → {PKL_OUTPUT}  ({size_mb:.1f} MB)")
 
 # COMMAND ----------
+
 # =============================================================================
 # SECTION 6 — Summary + download link
 # =============================================================================
@@ -678,6 +687,7 @@ if examination_sequences:
 displayHTML('<a href="/files/csv_pipeline/preprocessed_data.pkl">Download preprocessed_data.pkl</a>')
 
 # COMMAND ----------
+
 # =============================================================================
 # NEXT STEP: run AlternatingPipeline training locally
 #
@@ -688,3 +698,30 @@ displayHTML('<a href="/files/csv_pipeline/preprocessed_data.pkl">Download prepro
 #      python AlternatingPipeline/training/train_examination.py
 #      python AlternatingPipeline/training/train_orchestration.py
 # =============================================================================
+
+# COMMAND ----------
+
+import pickle                                                                                          
+import numpy as np                                                                                     
+
+with open('/dbfs/FileStore/csv_pipeline/preprocessed_data.pkl', 'rb') as f:                            
+    data = pickle.load(f)                                 
+                                                                                                        
+seqs = data['examination']                                                                             
+print('n sequences:', len(seqs))
+                                                                                                        
+seq_lens = np.array([len(s['sequence']) for s in seqs])                                                
+totals   = np.array([s['total_duration'] for s in seqs])
+all_durs = np.array([d for s in seqs for d in s['durations']])                                         
+                                                                                                        
+print('seq_len        mean', round(seq_lens.mean(), 1), 'median', int(np.median(seq_lens)), 'p90',     
+int(np.percentile(seq_lens, 90)), 'max', int(seq_lens.max()))                                          
+print('total_duration mean', round(totals.mean(), 1), 'median', round(np.median(totals), 1), 'p90',    
+round(np.percentile(totals, 90), 1), 'max', round(totals.max(), 1))                                    
+print('per_token_dur  mean', round(all_durs.mean(), 2), 'median', round(np.median(all_durs), 2), 'p90',
+round(np.percentile(all_durs, 90), 1), 'max', round(all_durs.max(), 0))                               
+                                                        
+for i in [0, len(seqs) // 2, len(seqs) - 1]:                                                           
+    s = seqs[i]                                           
+    print('seq', i, 'tokens', s['sequence'][:8], 'durs', [round(d, 1) for d in s['durations'][:8]],    
+'total', round(s['total_duration'], 1))   

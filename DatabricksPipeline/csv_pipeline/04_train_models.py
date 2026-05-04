@@ -15,7 +15,8 @@
 #   /dbfs/FileStore/csv_pipeline/models/orchestration/orchestration_model_best.pt
 
 # COMMAND ----------
-%pip install tqdm
+
+# MAGIC %pip install tqdm
 
 # COMMAND ----------
 
@@ -75,6 +76,7 @@ print(f"PKL path:   {PKL_PATH}")
 print(f"Models dir: {MODELS_DIR}")
 
 # COMMAND ----------
+
 # =============================================================================
 # Verify GPU
 # =============================================================================
@@ -86,6 +88,7 @@ if torch.cuda.is_available():
     print(f"GPU: {torch.cuda.get_device_name(0)}")
 
 # COMMAND ----------
+
 # =============================================================================
 # Load preprocessed data
 # =============================================================================
@@ -99,6 +102,7 @@ print(f"Customer schedules:    {len(data['customer_schedules'])}")
 print(f"Daily summaries:       {len(data['daily_summaries']):,}")
 
 # COMMAND ----------
+
 # =============================================================================
 # TRAIN EXCHANGE MODEL
 # =============================================================================
@@ -119,6 +123,7 @@ print(f"\nBest val loss:       {min(exchange_history['val_loss']):.4f}")
 print(f"Best val perplexity: {min(exchange_history['val_perplexity']):.2f}")
 
 # COMMAND ----------
+
 # =============================================================================
 # TRAIN EXAMINATION MODEL
 # =============================================================================
@@ -139,6 +144,7 @@ print(f"\nBest val loss:       {min(examination_history['val_loss']):.4f}")
 print(f"Best val perplexity: {min(examination_history['val_perplexity']):.2f}")
 
 # COMMAND ----------
+
 # =============================================================================
 # TRAIN ORCHESTRATION MODEL
 # =============================================================================
@@ -172,6 +178,7 @@ orchestration_model, orch_history = train_orchestration_model(
 print(f"\nBest val loss: {min(orch_history['val_loss']):.4f}")
 
 # COMMAND ----------
+
 # =============================================================================
 # Summary
 # =============================================================================
@@ -194,3 +201,27 @@ displayHTML(f'''
 </ul>
 <p>Next: run <b>05_generate_synthetic_data.py</b></p>
 ''')
+
+# COMMAND ----------
+
+  import os, time                                                                                                                      
+                                                                                                                                                                           
+  ckpt_dir = "/dbfs/FileStore/csv_pipeline/models/exchange"                                                                                                                
+  print("exists:", os.path.isdir(ckpt_dir))                                                                                                                                
+  for f in sorted(os.listdir(ckpt_dir)):                                                                                                                                   
+      p = os.path.join(ckpt_dir, f)                                                                                                                                        
+      sz = os.path.getsize(p) / 1e6                                                                                                                                        
+      mt = time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(p)))
+      print(f"  {mt}  {sz:8.1f} MB  {f}") 
+
+# COMMAND ----------
+
+  import os, time                                                                                                                                                          
+  d = "/dbfs/FileStore/csv_pipeline/models/examination"
+  print("exists:", os.path.isdir(d))                                                                                                                                       
+  if os.path.isdir(d):
+      for f in sorted(os.listdir(d)):                                                                                                                                      
+          p = os.path.join(d, f)
+          sz = os.path.getsize(p) / 1e6                                                                                                                                    
+          mt = time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(p)))
+          print(f"  {mt}  {sz:8.1f} MB  {f}")  
