@@ -69,6 +69,53 @@ VALID_BODY_REGIONS = [r for r in BODY_REGIONS if r not in EXCLUDED_BODY_REGIONS]
 VALID_BODY_REGION_IDS = [BODY_REGION_TO_ID[r] for r in VALID_BODY_REGIONS]
 
 # ============================================================================
+# SEQUENCE-TYPE VOCABULARY (examination scan-type conditioning)
+# ============================================================================
+# MRI pulse-sequence families parsed from the `Sequence` field of MRI_MSR_100
+# messages (e.g. "%SiemensSeq%\\AALScout", "%SiemensSeq%\\tse"). The exam data
+# carries this field but the examination model historically never saw it, so
+# it predicted one body-region-mean duration for every scan. Feeding the
+# sequence type lets the model learn that a scout (~20 s) and a TSE (~4 min)
+# have very different durations.
+#
+# NOTE: this vocab MUST stay byte-identical to the copy in
+# DatabricksPipeline/csv_pipeline/config.py — step 03 writes the IDs into the
+# pkl and the training scripts read them back.
+SEQUENCE_TYPE_VOCAB = {
+    'other': 0, 'scout': 1, 'localizer': 2, 'tse': 3, 'space': 4,
+    'haste': 5, 'gre': 6, 'flash': 7, 'epi': 8, 'tfl': 9, 'tirm': 10,
+    'vibe': 11, 'dixon': 12, 'swi': 13, 'medic': 14,
+}
+NUM_SEQUENCE_TYPES = len(SEQUENCE_TYPE_VOCAB)
+ID_TO_SEQUENCE_TYPE = {v: k for k, v in SEQUENCE_TYPE_VOCAB.items()}
+
+# Substrings checked in order; first hit wins. 'epi' family also matches the
+# diffusion/BOLD sequences that show up as ep2d_* / *bold* / *diff*.
+_SEQUENCE_TYPE_KEYS = [
+    'localizer', 'scout', 'haste', 'space', 'tirm', 'vibe', 'dixon',
+    'medic', 'swi', 'tfl', 'flash', 'tse', 'gre',
+]
+
+
+def classify_sequence_type(raw):
+    """Map a raw `Sequence` string to a SEQUENCE_TYPE_VOCAB id."""
+    s = str(raw or '').lower()
+    if not s:
+        return SEQUENCE_TYPE_VOCAB['other']
+    for key in _SEQUENCE_TYPE_KEYS:
+        if key in s:
+            return SEQUENCE_TYPE_VOCAB[key]
+    if 'ep2d' in s or 'epi' in s or 'bold' in s or 'diff' in s or 'dwi' in s:
+        return SEQUENCE_TYPE_VOCAB['epi']
+    return SEQUENCE_TYPE_VOCAB['other']
+
+
+# Number of distinct scanners in the csv_pipeline scope. Used as the size of
+# the examination model's serial embedding so it can learn per-scanner
+# duration offsets. serial_idx is the index of a serial in SERIAL_NUMBERS.
+NUM_SERIALS = 10
+
+# ============================================================================
 # CONDITIONING FEATURES
 # ============================================================================
 
@@ -231,6 +278,13 @@ EXAMINATION_MODEL_CONFIG = {
     'model_type': 'examination',
     'has_phase_type': False,
     'body_region_mode': 'single',  # Uses single body_region
+    # Scan-type + per-scanner conditioning. When enabled the examination
+    # model embeds the MRI sequence type (scout/tse/...) and the scanner
+    # serial alongside body_region, so it can produce duration variability
+    # across scan types and customers instead of one flat body-region mean.
+    'use_exam_conditioning': True,
+    'num_sequence_types': NUM_SEQUENCE_TYPES,
+    'num_serials': NUM_SERIALS,
 }
 
 EXAMINATION_TRAINING_CONFIG = {

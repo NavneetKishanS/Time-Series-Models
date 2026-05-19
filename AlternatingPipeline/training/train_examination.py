@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import (
     EXAMINATION_MODEL_CONFIG, EXAMINATION_TRAINING_CONFIG,
     MODEL_SAVE_DIR, RANDOM_SEED, USE_GPU, MAX_SEQ_LEN,
-    START_TOKEN_ID, END_TOKEN_ID, PAD_TOKEN_ID
+    START_TOKEN_ID, END_TOKEN_ID, PAD_TOKEN_ID, VOCAB_SIZE
 )
 from models.examination_model import create_examination_model
 from data.preprocessing import load_preprocessed_data
@@ -44,6 +44,10 @@ class ExaminationDataset(Dataset):
             conditioning = build_conditioning_tensor(seq['conditioning'])
 
             body_region = seq['body_region']
+            # Scan-type / scanner conditioning — default to 0 ('other' /
+            # first scanner) for pkls built before these fields existed.
+            sequence_type = int(seq.get('sequence_type', 0))
+            serial_idx = int(seq.get('serial_idx', 0))
             tokens = seq['sequence']
             durations = seq.get('durations', [0.0] * len(tokens))
 
@@ -62,6 +66,8 @@ class ExaminationDataset(Dataset):
             self.data.append({
                 'conditioning': conditioning,
                 'body_region': body_region,
+                'sequence_type': sequence_type,
+                'serial_idx': serial_idx,
                 'input_seq': torch.tensor(input_seq, dtype=torch.long),
                 'target_seq': torch.tensor(target_seq, dtype=torch.long),
                 'target_durations': target_durations,  # kept as list for augmentation
@@ -85,10 +91,35 @@ class ExaminationDataset(Dataset):
         return (
             item['conditioning'],
             torch.tensor(item['body_region'], dtype=torch.long),
+            torch.tensor(item['sequence_type'], dtype=torch.long),
+            torch.tensor(item['serial_idx'], dtype=torch.long),
             item['input_seq'],
             item['target_seq'],
             torch.tensor(durations, dtype=torch.float32),
         )
+
+
+def compute_token_class_weights(sequences, vocab_size=VOCAB_SIZE, smoothing=0.5):
+    """Inverse-frequency class weights for the token cross-entropy.
+
+    Rare workflow events — most importantly MRI_MSR_34 ("Stopped by User") —
+    are otherwise crowded out of the softmax by frequent tokens and never
+    appear in synthetic data. Weights are normalised to mean 1.0 so the
+    overall loss scale is unchanged. `smoothing` dampens the weighting so a
+    very rare token does not dominate the gradient.
+    """
+    counts = np.zeros(vocab_size, dtype=np.float64)
+    for seq in sequences:
+        for tok in seq['sequence']:
+            if 0 <= tok < vocab_size:
+                counts[tok] += 1
+    counts = counts + counts.sum() * 1e-6  # avoid div-by-zero for unseen tokens
+    freq = counts / counts.sum()
+    weights = (1.0 / freq) ** smoothing
+    weights[PAD_TOKEN_ID] = 0.0  # padding is ignored anyway
+    nonzero = weights[weights > 0]
+    weights = weights / nonzero.mean()  # normalise so mean weight ≈ 1.0
+    return torch.tensor(weights, dtype=torch.float32)
 
 
 def train_examination_model(data_path=None, config=None, training_config=None,
@@ -197,6 +228,13 @@ def train_examination_model(data_path=None, config=None, training_config=None,
     if verbose:
         print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
 
+    # Inverse-frequency token weights — keeps rare events (MRI_MSR_34 abort)
+    # from being crowded out of the softmax. Computed on the training split.
+    token_class_weights = compute_token_class_weights(train_sequences).to(device)
+    if verbose:
+        print(f"Token class weights (mean≈1.0): "
+              f"min={token_class_weights.min():.2f} max={token_class_weights.max():.2f}")
+
     # Optimizer with warmup
     optimizer = optim.AdamW(
         model.parameters(),
@@ -226,11 +264,13 @@ def train_examination_model(data_path=None, config=None, training_config=None,
         train_loss = 0.0
         train_dur_loss = 0.0
 
-        for conditioning, body_region, input_seq, target_seq, target_durations in tqdm(
+        for conditioning, body_region, sequence_type, serial_idx, input_seq, target_seq, target_durations in tqdm(
             train_loader, disable=not verbose, desc=f"Epoch {epoch+1}"
         ):
             conditioning = conditioning.to(device)
             body_region = body_region.to(device)
+            sequence_type = sequence_type.to(device)
+            serial_idx = serial_idx.to(device)
             input_seq = input_seq.to(device)
             target_seq = target_seq.to(device)
             target_durations = target_durations.to(device)
@@ -238,12 +278,16 @@ def train_examination_model(data_path=None, config=None, training_config=None,
             optimizer.zero_grad()
 
             logits, duration_mu, duration_sigma = model(
-                conditioning, {'body_region': body_region}, input_seq
+                conditioning,
+                {'body_region': body_region,
+                 'sequence_type': sequence_type, 'serial_idx': serial_idx},
+                input_seq,
             )
 
             token_loss = model.compute_loss(
                 logits, target_seq,
-                label_smoothing=training_config['label_smoothing']
+                label_smoothing=training_config['label_smoothing'],
+                class_weights=token_class_weights,
             )
 
             pad_mask = (target_seq == PAD_TOKEN_ID)
@@ -271,17 +315,24 @@ def train_examination_model(data_path=None, config=None, training_config=None,
         val_loss = 0.0
 
         with torch.no_grad():
-            for conditioning, body_region, input_seq, target_seq, target_durations in val_loader:
+            for conditioning, body_region, sequence_type, serial_idx, input_seq, target_seq, target_durations in val_loader:
                 conditioning = conditioning.to(device)
                 body_region = body_region.to(device)
+                sequence_type = sequence_type.to(device)
+                serial_idx = serial_idx.to(device)
                 input_seq = input_seq.to(device)
                 target_seq = target_seq.to(device)
                 target_durations = target_durations.to(device)
 
                 logits, duration_mu, duration_sigma = model(
-                    conditioning, {'body_region': body_region}, input_seq
+                    conditioning,
+                    {'body_region': body_region,
+                     'sequence_type': sequence_type, 'serial_idx': serial_idx},
+                    input_seq,
                 )
-                token_loss = model.compute_loss(logits, target_seq)
+                token_loss = model.compute_loss(
+                    logits, target_seq, class_weights=token_class_weights
+                )
                 pad_mask = (target_seq == PAD_TOKEN_ID)
                 dur_loss = model.compute_duration_loss(
                     duration_mu, duration_sigma, target_durations, ignore_mask=pad_mask

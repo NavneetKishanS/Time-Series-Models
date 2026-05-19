@@ -62,6 +62,10 @@ class SequenceGeneratorModel(nn.Module):
         # =====================================================================
         region_emb_dim = self.d_model // 4  # 64 for d_model=256
 
+        # Examination scan-type + per-scanner conditioning (off by default;
+        # enabled via config for the examination model only).
+        self.use_exam_conditioning = config.get('use_exam_conditioning', False)
+
         if self.body_region_mode == 'from_to':
             # Exchange: embed body_from AND body_to, concat both
             self.body_from_embedding = nn.Embedding(num_region_classes, region_emb_dim)
@@ -71,6 +75,19 @@ class SequenceGeneratorModel(nn.Module):
             # Examination: embed single body_region
             self.body_region_embedding = nn.Embedding(num_body_regions, region_emb_dim)
             cond_input_dim = base_conditioning_dim + region_emb_dim
+
+            if self.use_exam_conditioning:
+                # Sequence type (scout/tse/...) and scanner serial. Small
+                # embeddings — these are coarse categoricals, not the main
+                # signal — concatenated onto the conditioning vector.
+                exam_emb_dim = self.d_model // 8  # 16 for d_model=128
+                self.sequence_type_embedding = nn.Embedding(
+                    config['num_sequence_types'], exam_emb_dim
+                )
+                self.serial_embedding = nn.Embedding(
+                    config['num_serials'], exam_emb_dim
+                )
+                cond_input_dim += 2 * exam_emb_dim
 
         if self.has_phase_type:
             phase_emb_dim = self.d_model // 8  # 32 for d_model=256
@@ -170,6 +187,19 @@ class SequenceGeneratorModel(nn.Module):
         else:
             region_emb = self.body_region_embedding(body_region_info['body_region'])
             parts.append(region_emb)
+
+            if self.use_exam_conditioning:
+                region_t = body_region_info['body_region']
+                # sequence_type / serial_idx default to 0 ('other' / first
+                # scanner) when a caller does not supply them.
+                seq_t = body_region_info.get('sequence_type')
+                if seq_t is None:
+                    seq_t = torch.zeros_like(region_t)
+                ser_t = body_region_info.get('serial_idx')
+                if ser_t is None:
+                    ser_t = torch.zeros_like(region_t)
+                parts.append(self.sequence_type_embedding(seq_t))
+                parts.append(self.serial_embedding(ser_t))
 
         if self.has_phase_type and phase_type is not None:
             phase_emb = self.phase_type_embedding(phase_type)
@@ -382,18 +412,29 @@ class SequenceGeneratorModel(nn.Module):
             result[key] = val
         return result
 
-    def compute_loss(self, logits, targets, ignore_index=None, label_smoothing=0.0):
-        """Compute cross-entropy loss with optional label smoothing."""
+    def compute_loss(self, logits, targets, ignore_index=None, label_smoothing=0.0,
+                     class_weights=None):
+        """Compute cross-entropy loss with optional label smoothing.
+
+        class_weights: optional [vocab_size] tensor up-weighting rare tokens
+        (e.g. the MRI_MSR_34 abort token) so they are not crowded out of the
+        softmax by frequent workflow events.
+        """
         if ignore_index is None:
             ignore_index = PAD_TOKEN_ID
 
         logits_flat = logits.reshape(-1, self.vocab_size)
         targets_flat = targets.reshape(-1)
 
+        weight = None
+        if class_weights is not None:
+            weight = class_weights.to(logits_flat.device, dtype=logits_flat.dtype)
+
         return F.cross_entropy(
             logits_flat, targets_flat,
             ignore_index=ignore_index,
             label_smoothing=label_smoothing,
+            weight=weight,
         )
 
     def compute_duration_loss(self, mu, sigma, target_durations, ignore_mask=None):

@@ -122,6 +122,42 @@ BODY_REGIONS = [
 BODY_REGION_TO_ID = {r: i for i, r in enumerate(BODY_REGIONS)}
 
 # ============================================================================
+# SEQUENCE-TYPE VOCABULARY (examination scan-type conditioning)
+# ============================================================================
+# MRI pulse-sequence families parsed from the `Sequence` field of MRI_MSR_100
+# messages. step 03 writes the classified ID into each examination sequence
+# of preprocessed_data.pkl; the examination model conditions duration on it.
+#
+# NOTE: MUST stay byte-identical to the copy in AlternatingPipeline/config.py.
+SEQUENCE_TYPE_VOCAB = {
+    'other': 0, 'scout': 1, 'localizer': 2, 'tse': 3, 'space': 4,
+    'haste': 5, 'gre': 6, 'flash': 7, 'epi': 8, 'tfl': 9, 'tirm': 10,
+    'vibe': 11, 'dixon': 12, 'swi': 13, 'medic': 14,
+}
+NUM_SEQUENCE_TYPES = len(SEQUENCE_TYPE_VOCAB)
+
+_SEQUENCE_TYPE_KEYS = [
+    'localizer', 'scout', 'haste', 'space', 'tirm', 'vibe', 'dixon',
+    'medic', 'swi', 'tfl', 'flash', 'tse', 'gre',
+]
+
+
+def classify_sequence_type(raw):
+    """Map a raw `Sequence` string to a SEQUENCE_TYPE_VOCAB id."""
+    s = str(raw or '').lower()
+    if not s:
+        return SEQUENCE_TYPE_VOCAB['other']
+    for key in _SEQUENCE_TYPE_KEYS:
+        if key in s:
+            return SEQUENCE_TYPE_VOCAB[key]
+    if 'ep2d' in s or 'epi' in s or 'bold' in s or 'diff' in s or 'dwi' in s:
+        return SEQUENCE_TYPE_VOCAB['epi']
+    return SEQUENCE_TYPE_VOCAB['other']
+
+
+ID_TO_SEQUENCE_TYPE = {v: k for k, v in SEQUENCE_TYPE_VOCAB.items()}
+
+# ============================================================================
 # CONSTANTS FORMERLY IN DatabricksPipeline/config.py (now removed)
 # Required by 03_build_preprocessed_pkl.py
 # ============================================================================

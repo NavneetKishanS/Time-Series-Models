@@ -97,6 +97,19 @@ def _conditioning(row, dt=None):
         **temp,
     }
 
+
+def _seq_type_from_msg(msg):
+    """Classify the MRI sequence family from an MRI_MSR_100 message.
+
+    MRI_MSR_100 messages carry `Sequence: '<name>'` (e.g. '%SiemensSeq%\\tse').
+    Feeding the family to the examination model gives it the signal it needs
+    to predict short scouts vs long TSE/SPACE scans instead of one flat mean.
+    """
+    if not isinstance(msg, str):
+        return SEQUENCE_TYPE_VOCAB['other']
+    m = re.search(r"Sequence:\s*'([^']*)'", msg)
+    return classify_sequence_type(m.group(1) if m else '')
+
 # COMMAND ----------
 
 # =============================================================================
@@ -310,6 +323,21 @@ df_exams_pd['BodyGroup'] = df_exams_pd['BodyPartExamined'].apply(
 )
 print(f"Examination rows: {len(df_exams_pd):,}")
 
+# Report BodyPart values that fell through to UNKNOWN — these are gaps in
+# bodyupdated.xlsx. Extending the xlsx to cover them is the data-side fix for
+# the "too many UNKNOWN body groups" finding (a model change cannot recover
+# a body part the mapping never resolved).
+_unmapped = (
+    df_exams_pd.loc[df_exams_pd['BodyGroup'] == 'UNKNOWN', 'BodyPartExamined']
+    .dropna().astype(str).str.strip().str.upper()
+)
+_unmapped = _unmapped[_unmapped != ''].value_counts()
+if len(_unmapped):
+    print(f"  ⚠ {len(_unmapped)} distinct BodyPart values are UNMAPPED → UNKNOWN "
+          f"({int(_unmapped.sum()):,} rows). Add these to bodyupdated.xlsx:")
+    for _bp, _cnt in _unmapped.head(25).items():
+        print(f"      {_bp:<32} {_cnt:>6,}")
+
 
 # ---- 2d. Coil parsing helpers (from DatabricksPipeline/02_extract_examination.py) ----
 
@@ -385,6 +413,7 @@ examination_sequences = []
 
 for serial in SERIAL_NUMBERS:
     print(f"\n  --- {serial} ---")
+    serial_idx = SERIAL_NUMBERS.index(serial)   # index into the embedding table
     df_sc = df_eventlog_pd[df_eventlog_pd['SerialNumber'] == int(serial)].copy()
     df_ex = df_exams_pd[df_exams_pd['SerialNumber'] == int(serial)].copy()
 
@@ -454,17 +483,27 @@ for serial in SERIAL_NUMBERS:
         durations = [min(MAX_PER_TOKEN_DURATION, max(0.0, d)) for d in durations]
         total_duration = float(timediffs[-1] - timediffs[0]) if len(timediffs) > 1 else 0.0
 
+        # Whether this segment ends on an MRI_MSR_34 "Stopped by User" abort.
+        is_abort = (str(df_merged.iloc[end_row].get('MessageIdentification', '')) ==
+                    'MRI_MSR_34')
+
         # Drop segments whose total duration is implausibly long — these
         # are missed change-points (cross-day / cross-patient spans) that
         # would still bias training even with the per-token cap above.
         if total_duration > MAX_EXAMINATION_DURATION:
             continue
-        # Also drop trivially-short segments (localizer pings, aborts,
-        # calibrations). Without this filter, ~66% of training segments
-        # are <10 s and pull the model's learned mean ~2.4× below the
-        # step-02 per-measurement reference distribution.
-        if total_duration < MIN_EXAMINATION_DURATION:
+        # Drop trivially-short segments (localizer pings, calibrations).
+        # Without this filter, ~66% of training segments are <10 s and pull
+        # the model's learned mean ~2.4× below the step-02 reference.
+        # EXCEPTION: keep short ABORT segments — aborts are genuinely short,
+        # and discarding them is why "Stopped by User" never appears in
+        # synthetic data. We want the model to learn the abort token.
+        if total_duration < MIN_EXAMINATION_DURATION and not is_abort:
             continue
+
+        # Sequence family (scout/tse/...) parsed from the MRI_MSR_100 row
+        # that opens this segment — examination model duration conditioning.
+        seq_type = _seq_type_from_msg(segment.iloc[0].get('Message'))
 
         # Body region: prefer last MRI_EXU_95 before start
         body_region_str = str(segment.iloc[0].get('BodyGroup_to', 'UNKNOWN')).upper()
@@ -501,6 +540,8 @@ for serial in SERIAL_NUMBERS:
             'durations':      durations,
             'conditioning':   conditioning,
             'body_region':    body_region,
+            'sequence_type':  int(seq_type),
+            'serial_idx':     int(serial_idx),
             'coil_config':    coil_config,
             'total_duration': total_duration,
             'start_datetime': start_dt,
@@ -643,7 +684,7 @@ print("SECTION 5: Assemble and save")
 print("="*60)
 
 preprocessed_data = {
-    'version':            3,
+    'version':            4,   # v4: examination sequence_type + serial_idx
     'exchange':           exchange_sequences,
     'examination':        examination_sequences,
     'daily_summaries':    daily_summaries,
@@ -682,6 +723,36 @@ if examination_sequences:
     for s in examination_sequences:
         region_counts[s['body_region']] = region_counts.get(s['body_region'], 0) + 1
     print(f"  Examination regions:  {dict(sorted(region_counts.items()))}")
+
+    # Sequence-type distribution — confirms the scan-type signal made it in.
+    st_counts = {}
+    for s in examination_sequences:
+        name = ID_TO_SEQUENCE_TYPE.get(s.get('sequence_type', 0), 'other')
+        st_counts[name] = st_counts.get(name, 0) + 1
+    print(f"  Examination seq types: {dict(sorted(st_counts.items(), key=lambda kv: -kv[1]))}")
+
+    # Abort count — MRI_MSR_34 segments now retained for the abort token.
+    _msr34 = SOURCEID_VOCAB.get('MRI_MSR_34', 15)
+    n_abort = sum(1 for s in examination_sequences if _msr34 in s['sequence'])
+    print(f"  Examination aborts:   {n_abort} segments contain MRI_MSR_34 "
+          f"({100*n_abort/len(examination_sequences):.1f}%)")
+
+# Exchange per-token duration diagnostic — feeds the Workstream-B decision on
+# the 20-30% synthetic exchange-time over-prediction. If P99 per-token is far
+# above P90, segment-boundary artifacts are still leaking into training and an
+# exchange per-token cap is warranted.
+if exchange_sequences:
+    _ex_durs = np.array([d for s in exchange_sequences for d in s['durations']],
+                        dtype=float)
+    _ex_tot = np.array([s['total_duration'] for s in exchange_sequences], dtype=float)
+    if _ex_durs.size:
+        print(f"\n  Exchange per-token duration (s): "
+              f"mean={_ex_durs.mean():.1f} median={np.median(_ex_durs):.1f} "
+              f"p90={np.percentile(_ex_durs,90):.1f} "
+              f"p99={np.percentile(_ex_durs,99):.1f} max={_ex_durs.max():.0f}")
+        print(f"  Exchange total duration (s):     "
+              f"mean={_ex_tot.mean():.1f} median={np.median(_ex_tot):.1f} "
+              f"p90={np.percentile(_ex_tot,90):.1f} max={_ex_tot.max():.0f}")
 
 # Download link
 displayHTML('<a href="/files/csv_pipeline/preprocessed_data.pkl">Download preprocessed_data.pkl</a>')

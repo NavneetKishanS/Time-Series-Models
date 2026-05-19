@@ -268,15 +268,25 @@ class OrchestrationModel(nn.Module):
 
         return generated
 
-    def compute_loss(self, logits, targets, label_smoothing=0.0):
-        """Compute cross-entropy loss ignoring PAD tokens."""
+    def compute_loss(self, logits, targets, label_smoothing=0.0, class_weights=None):
+        """Compute cross-entropy loss ignoring PAD tokens.
+
+        class_weights: optional [vocab_size] tensor up-weighting rare body
+        regions so the model does not collapse to the few common ones and
+        actually emits the long tail (e.g. Heart/Knee).
+        """
         logits_flat = logits.reshape(-1, self.vocab_size)
         targets_flat = targets.reshape(-1)
+
+        weight = None
+        if class_weights is not None:
+            weight = class_weights.to(logits_flat.device, dtype=logits_flat.dtype)
 
         return F.cross_entropy(
             logits_flat, targets_flat,
             ignore_index=self.pad_token_id,
             label_smoothing=label_smoothing,
+            weight=weight,
         )
 
 

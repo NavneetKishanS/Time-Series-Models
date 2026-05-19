@@ -73,6 +73,29 @@ class OrchestrationDataset(Dataset):
         )
 
 
+def compute_region_class_weights(samples, vocab_size, pad_token_id, smoothing=0.5):
+    """Inverse-frequency class weights for the orchestration token loss.
+
+    Without weighting the day-level softmax collapses to the few common body
+    regions and never emits the long tail (the "model predicts no Heart/Knee"
+    finding). Weights are normalised to mean ≈ 1.0 so the loss scale is
+    unchanged; `smoothing` keeps a very rare region from dominating gradients.
+    """
+    counts = np.zeros(vocab_size, dtype=np.float64)
+    for sample in samples:
+        for tok in sample['tokens']:
+            if 0 <= tok < vocab_size:
+                counts[tok] += 1
+        counts[END_REGION_ID] += 1  # every sample's target ends with END
+    counts = counts + counts.sum() * 1e-6
+    freq = counts / counts.sum()
+    weights = (1.0 / freq) ** smoothing
+    weights[pad_token_id] = 0.0
+    nonzero = weights[weights > 0]
+    weights = weights / nonzero.mean()
+    return torch.tensor(weights, dtype=torch.float32)
+
+
 def train_orchestration_model(data_path=None, config=None, training_config=None,
                                save_dir=None, verbose=True):
     """
@@ -161,6 +184,15 @@ def train_orchestration_model(data_path=None, config=None, training_config=None,
     if verbose:
         print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
 
+    # Inverse-frequency body-region weights — pulls the long tail (rare
+    # regions) back into the model's output distribution.
+    region_class_weights = compute_region_class_weights(
+        train_samples, config['vocab_size'], ORCH_PAD_TOKEN_ID
+    ).to(device)
+    if verbose:
+        print(f"Region class weights (mean≈1.0): "
+              f"min={region_class_weights.min():.2f} max={region_class_weights.max():.2f}")
+
     # Optimizer with warmup
     optimizer = optim.AdamW(
         model.parameters(),
@@ -206,6 +238,7 @@ def train_orchestration_model(data_path=None, config=None, training_config=None,
             loss = model.compute_loss(
                 logits, target_seq,
                 label_smoothing=training_config['label_smoothing'],
+                class_weights=region_class_weights,
             )
 
             loss.backward()
@@ -235,7 +268,9 @@ def train_orchestration_model(data_path=None, config=None, training_config=None,
 
                 logits = model(conditioning, scanner_ids, input_seq)
 
-                loss = model.compute_loss(logits, target_seq)
+                loss = model.compute_loss(
+                    logits, target_seq, class_weights=region_class_weights
+                )
                 val_loss += loss.item()
 
         val_loss /= len(val_loader)

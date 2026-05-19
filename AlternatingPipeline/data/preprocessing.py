@@ -459,11 +459,14 @@ def extract_examination_events(df, verbose=False):
         # change-points (multi-day / cross-patient) that bias training.
         if total_duration > 4000.0:
             continue
-        # Also drop trivially-short segments (localizers, aborts,
-        # calibration pings) — ~66% of raw segments fall under 10 s on
-        # production data and pull the learned distribution mean far
-        # below the per-measurement step-02 reference.
-        if total_duration < 10.0:
+        # Drop trivially-short segments (localizers, calibration pings) —
+        # ~66% of raw segments fall under 10 s on production data and pull
+        # the learned distribution mean far below the step-02 reference.
+        # EXCEPTION: keep short segments that contain an MRI_MSR_34 abort
+        # token — aborts are genuinely short, and dropping them is why
+        # "Stopped by User" never appears in synthetic data.
+        is_abort = SOURCEID_VOCAB['MRI_MSR_34'] in sequence
+        if total_duration < 10.0 and not is_abort:
             continue
 
         examination_sequences.append({
@@ -471,6 +474,8 @@ def extract_examination_events(df, verbose=False):
             'durations': durations,
             'conditioning': conditioning,
             'body_region': body_region,
+            'sequence_type': 0,   # 'other' — raw event-log CSVs carry no Sequence field
+            'serial_idx': 0,
             'coil_config': coil_config,
             'total_duration': total_duration,
             'start_datetime': row['datetime'],

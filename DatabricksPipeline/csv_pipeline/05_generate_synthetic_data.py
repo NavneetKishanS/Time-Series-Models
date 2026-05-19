@@ -138,6 +138,24 @@ SYNTH_DATE_END       = "2024-02-28"
 WEEKDAYS_ONLY        = True          # skip Saturdays/Sundays (MRI scanners are rarely used then)
 NUM_DAYS_PER_SCANNER = 30            # cap if the date range produces more days than needed
 
+# ── Optional: controlled body-group schedule ────────────────────────────────
+# Leave as None for the realistic default — the orchestration model decides
+# each day's patient mix and ordering (this captures real inter-body-group
+# dynamics, which is what you want for shipping synthetic data).
+#
+# To run a *controlled experiment* — e.g. "10 head, 10 knee, 5 abdomen" — set
+# this to a list of body-region names. Every synthetic day is then built from
+# exactly that mix instead of the orchestration output.
+#
+#   CONTROLLED_SCHEDULE = ['HEAD']*10 + ['LEG']*10 + ['ABDOMEN']*5
+#
+# This changes ONLY the day's patient list. It does not retrain or alter any
+# model: the Exchange model is still conditioned on every body_from→body_to
+# transition, so inter-body-group exchange dynamics are fully preserved. What
+# you give up is the realistic day shape (counts/ordering) the orchestration
+# model learned — so use this for targeted tests, not for shipped data.
+CONTROLLED_SCHEDULE  = None
+
 # COMMAND ----------
 
 # =============================================================================
@@ -155,6 +173,7 @@ from AlternatingPipeline.config import (
     START_REGION_ID, END_REGION_ID, PHASE_TYPES, GENERATION_CONFIG,
     START_TOKEN_ID, END_TOKEN_ID, PAD_TOKEN_ID, BREAK_TOKEN_ID,
     NUM_BODY_REGIONS, ORCH_PAD_TOKEN_ID,
+    SEQUENCE_TYPE_VOCAB, ID_TO_SEQUENCE_TYPE, NUM_SEQUENCE_TYPES, NUM_SERIALS,
 )
 
 # Duration unscaling — models were trained on (raw_seconds / duration_scale),
@@ -209,6 +228,26 @@ print("Orchestration model loaded.")
 # --- demographic distributions per body region (sampled from real data) ---
 orch_samples, _ = extract_orchestration_samples(data)
 demographic_distributions = build_demographic_distributions(data)
+
+# --- per-body-region sequence-type distribution (real frequencies) ---
+# The examination model now conditions on scan type (scout/tse/...). For each
+# generated scan we draw a scan type from the real per-region mix, so the
+# synthetic data reproduces the real scout/TSE balance — and, because the
+# model's duration is conditioned on it, the real per-type duration spread.
+from collections import defaultdict as _defaultdict
+
+_region_seqtypes = _defaultdict(list)
+for _s in data.get('examination', []):
+    _region_seqtypes[int(_s.get('body_region', 10))].append(int(_s.get('sequence_type', 0)))
+_all_seqtypes = [st for sts in _region_seqtypes.values() for st in sts] or [0]
+print(f"Sequence-type pool: {len(_all_seqtypes):,} scans across "
+      f"{len(_region_seqtypes)} body regions")
+
+
+def _sample_sequence_type(region_id):
+    """Draw a sequence-type id from the real distribution for this region."""
+    pool = _region_seqtypes.get(int(region_id)) or _all_seqtypes
+    return int(np.random.choice(pool))
 
 # COMMAND ----------
 
@@ -373,7 +412,8 @@ def _generate_exchange_rows(tokens, durations, mu, sigma, day_start, t_offset,
 
 def _generate_exam_rows(tokens, durations, mu, sigma, day_start, t_offset,
                          patient_id, body_region_id, patient_info,
-                         serial, step_counter, customer_idx, sample_idx):
+                         serial, step_counter, customer_idx, sample_idx,
+                         sequence_type_name='other'):
     """
     Convert a generated examination token sequence into measurement-level rows
     matching the exam CSV format from 02_exam_preprocessing.py, with model
@@ -435,7 +475,9 @@ def _generate_exam_rows(tokens, durations, mu, sigma, day_start, t_offset,
                 'duration':       int(duration_sec),
                 'timediff':       round(msr_start_t, 2),
                 'sourceID':       ID_TO_SOURCEID.get(tok, 'UNK'),
-                'Sequence':       np.random.choice(_SEQUENCES),
+                # Sequence reflects the scan type the model was conditioned
+                # on for this scan (no longer a random pick).
+                'Sequence':       sequence_type_name,
                 'Protocol':       np.random.choice(_PROTOCOLS),
                 'PatientID':      patient_id,
                 'BodyPart':       body_name,
@@ -543,6 +585,10 @@ for customer_idx, (serial_str, daily_schedules) in enumerate(customer_schedules.
     print(f"\n{'='*60}\nSerial: {serial_str}\n{'='*60}")
 
     scanner_idx = scanner_to_idx.get(serial_str, 0)
+    # serial_idx indexes the examination model's serial embedding. customer
+    # iteration order matches step 03's SERIAL_NUMBERS order, so customer_idx
+    # is the serial_idx step 03 wrote into the pkl.
+    serial_idx = min(customer_idx, NUM_SERIALS - 1)
 
     all_exchange_rows  = []
     all_exam_rows      = []
@@ -568,8 +614,14 @@ for customer_idx, (serial_str, daily_schedules) in enumerate(customer_schedules.
         print(f"  Day: {date_str}")
         day_start = datetime.strptime(date_str, '%Y-%m-%d').replace(hour=7, minute=0)
 
-        # --- Use orchestration model to decide patient body region sequence ---
-        orch_tokens = _generate_orch_tokens(scanner_idx, date_str, demographic_distributions)
+        # --- Decide the day's patient body-region sequence ---
+        if CONTROLLED_SCHEDULE is not None:
+            # Controlled experiment: use the hand-authored mix verbatim.
+            orch_tokens = [BODY_REGION_TO_ID.get(str(r).upper(), 10)
+                           for r in CONTROLLED_SCHEDULE]
+        else:
+            # Realistic default: let the orchestration model decide.
+            orch_tokens = _generate_orch_tokens(scanner_idx, date_str, demographic_distributions)
         if not orch_tokens:
             print(f"    Orchestration returned no tokens — skipping day.")
             continue
@@ -633,11 +685,16 @@ for customer_idx, (serial_str, daily_schedules) in enumerate(customer_schedules.
             num_scans = max(1, int(np.random.poisson(8)))
             num_scans = min(num_scans, 20)          # clamp the tail
             for _scan in range(num_scans):
+                # Draw a scan type from this region's real mix and condition
+                # the model on it — this is what gives duration variability
+                # (short scouts vs long TSE/SPACE) instead of a flat mean.
+                seq_type = _sample_sequence_type(region_id)
                 cond = _build_cond_tensor(patient, current_t, day_start)
                 with torch.no_grad():
                     exam_tokens, exam_durations, exam_mu, exam_sigma = examination_model.generate(
                         cond,
-                        {'body_region': region_id},
+                        {'body_region': region_id,
+                         'sequence_type': seq_type, 'serial_idx': serial_idx},
                         max_length=gen_config['max_length'],
                         temperature=gen_config['temperature'],
                         top_k=gen_config['top_k'],
@@ -650,6 +707,7 @@ for customer_idx, (serial_str, daily_schedules) in enumerate(customer_schedules.
                     day_start, current_t,
                     pat_id, region_id, patient,
                     serial_str, step_counter, customer_idx, exam_sample_idx,
+                    sequence_type_name=ID_TO_SEQUENCE_TYPE.get(seq_type, 'other'),
                 )
                 all_exam_rows.extend(exam_rows)
             exam_sample_idx += 1   # one sample_idx per patient (matches step 02)
@@ -973,6 +1031,33 @@ if not df_exam_all.empty and 'duration' in df_exam_all.columns:
             f'  Quality flags: {n_short} exams <1 min ({_pct(n_short,len(dur_all))}),  '
             f'{n_long} exams >60 min ({_pct(n_long,len(dur_all))})',
         ]
+
+# ── 4b. DURATION BY SEQUENCE TYPE ────────────────────────────────────────────
+# Verifies Workstream A: a scout should be much shorter than a TSE/SPACE.
+# If every row here has near-identical mean duration, the examination model
+# is still not responding to the scan-type conditioning.
+lines += ['', _HR, ' 4b. EXAMINATION DURATION BY SEQUENCE TYPE (minutes)', _HR]
+if not df_exam_all.empty and {'duration', 'Sequence'}.issubset(df_exam_all.columns):
+    lines.append(f'  {"Sequence":<14} {"N":>6} {"Mean":>6} {"Std":>6} {"p50":>6}')
+    _st_means = []
+    for stype, grp in df_exam_all.groupby('Sequence'):
+        d = grp['duration'].dropna().values / 60.0
+        d = d[(d > 0) & (d < 4000 / 60)]
+        if len(d) == 0:
+            continue
+        _st_means.append(d.mean())
+        lines.append(
+            f'  {str(stype):<14} {len(d):>6} {d.mean():>6.1f} {d.std():>6.1f} '
+            f'{np.percentile(d, 50):>6.1f}'
+        )
+    if len(_st_means) > 1:
+        _spread = max(_st_means) - min(_st_means)
+        lines.append(
+            f'\n  Spread across sequence types: {_spread:.1f} min  '
+            + ('>> good — model varies duration by scan type'
+               if _spread > 1.0 else
+               '<< flat — examination model not responding to scan-type conditioning')
+        )
 
 # ── 5. FINISH EVENT DISTRIBUTION ─────────────────────────────────────────────
 lines += ['', _HR, ' 5. EXAM FINISH EVENT DISTRIBUTION', _HR]
