@@ -62,10 +62,19 @@ TIME_COL = {
 # single constant value) and therefore mislead any Qlik comparison chart.
 DROP_COLS = {
     'exchange': (),
-    # sourceID is present only on synthetic exam rows (step 02 doesn't emit
-    # it) and is always 'MRI_MSR_104' in synthetic, i.e. a constant. The
-    # equivalent comparable field is FinishEvent, which step 02 does emit.
-    'exam':     ('sourceID',),
+    'exam':     (),
+}
+
+# FinishEvent → sourceID mapping. Step 02 doesn't emit sourceID on real exam
+# rows, but FinishEvent encodes the same finish-marker semantic. Backfilling
+# real sourceID from FinishEvent makes the column comparable across sides
+# (synthetic emits MRI_MSR_104 for 'Successful' and MRI_MSR_34 for any abort).
+FINISH_TO_SOURCEID = {
+    'Successful':           'MRI_MSR_104',
+    'Stopped by User':      'MRI_MSR_34',
+    'Stopped by Scanner':   'MRI_MSR_34',
+    'Stopped by ImageR':    'MRI_MSR_34',
+    'Start MeasSys Failed': 'MRI_MSR_34',
 }
 
 # Rename sample_idx to something unambiguous per kind, so Qlik doesn't
@@ -131,6 +140,45 @@ def _backfill_exam_timediff(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _backfill_exam_sourceid(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Step 02 doesn't emit a `sourceID` column for real exam rows, but step 05
+    does (always 'MRI_MSR_104' on success, 'MRI_MSR_34' on abort). To make
+    the column comparable across Real and Synthetic in Qlik, derive it from
+    FinishEvent on rows where it's missing.
+    """
+    if 'FinishEvent' not in df.columns:
+        return df
+    if 'sourceID' not in df.columns:
+        df['sourceID'] = pd.NA
+    needs_fill = df['sourceID'].isna()
+    if not needs_fill.any():
+        return df
+    df.loc[needs_fill, 'sourceID'] = (
+        df.loc[needs_fill, 'FinishEvent'].map(FINISH_TO_SOURCEID).fillna('MRI_MSR_34')
+    )
+    return df
+
+
+def _add_exam_sequence_count(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Add a per-visit total measurement count, replicated to every row of the
+    visit. Distinct from StepCount (which is the within-visit row index):
+    SequenceCount tells you 'this patient visit had N total scans' on every
+    row, which is what Qlik needs to slice a histogram of scans-per-visit.
+
+    Grouping key is (DataSource, SN, sample_idx) — that's one patient visit
+    on one scanner from one source. Done before SAMPLE_IDX_RENAME, since we
+    still have the raw sample_idx column at this stage.
+    """
+    if 'sample_idx' not in df.columns:
+        return df
+    df['SequenceCount'] = df.groupby(
+        ['DataSource', 'SN', 'sample_idx'], sort=False
+    )['sample_idx'].transform('size')
+    return df
+
+
 def consolidate(kind: str) -> str | None:
     """
     Merge per-scanner CSVs for one kind (exchange or exam) into one file.
@@ -175,6 +223,11 @@ def consolidate(kind: str) -> str | None:
     # patch has been rerun on Databricks and the fresh files are downloaded.
     if kind == 'exam':
         combined = _backfill_exam_timediff(combined)
+        # Backfill sourceID on real (step 02 doesn't emit it; derive from
+        # FinishEvent so the column is comparable in Qlik). Run before the
+        # sample_idx rename so SequenceCount can group on the raw column.
+        combined = _backfill_exam_sourceid(combined)
+        combined = _add_exam_sequence_count(combined)
 
     # Drop misleading single-side / constant-valued columns
     to_drop = [c for c in DROP_COLS[kind] if c in combined.columns]
