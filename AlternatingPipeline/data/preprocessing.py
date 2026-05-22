@@ -271,7 +271,11 @@ def extract_exchange_events(df, verbose=False):
         timediffs = exchange_segment['timediff'].values.astype(float)
         durations = np.diff(timediffs, prepend=timediffs[0]).tolist()
         durations[0] = 0.0  # first event has no prior reference
-        durations = [max(0.0, d) for d in durations]   # clip boundary-reset artifacts
+        # Clip below at 0 and above at 600 s — the upper cap removes
+        # segment-boundary artifacts (overnight/inter-patient gaps leaking
+        # into one exchange token) that inflate the duration model. Mirror
+        # of MAX_PER_TOKEN_DURATION in DatabricksPipeline/csv_pipeline.
+        durations = [min(600.0, max(0.0, d)) for d in durations]
 
         # Get conditioning from the target (next) patient/examination
         row = segment.iloc[0]  # First row has the target info
@@ -346,7 +350,11 @@ def extract_exchange_events(df, verbose=False):
         timediffs = shutdown_segment['timediff'].values.astype(float)
         durations = np.diff(timediffs, prepend=timediffs[0]).tolist()
         durations[0] = 0.0
-        durations = [max(0.0, d) for d in durations]   # clip boundary-reset artifacts
+        # Clip below at 0 and above at 600 s — the upper cap removes
+        # segment-boundary artifacts (overnight/inter-patient gaps leaking
+        # into one exchange token) that inflate the duration model. Mirror
+        # of MAX_PER_TOKEN_DURATION in DatabricksPipeline/csv_pipeline.
+        durations = [min(600.0, max(0.0, d)) for d in durations]
 
         row = shutdown_segment.iloc[0]
         conditioning = _get_conditioning_from_row(row)

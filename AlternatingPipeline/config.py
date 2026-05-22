@@ -252,6 +252,11 @@ EXCHANGE_MODEL_CONFIG = {
     'has_phase_type': True,
     'body_region_mode': 'from_to',  # Uses body_from AND body_to
     'num_phase_types': NUM_PHASE_TYPES,
+    # Log-space duration head. Real exchange per-token durations are heavily
+    # right-skewed (median ~3 s, mean ~24 s); a Gaussian head fits the
+    # inflated mean and over-predicts every exchange. 'log' makes the head
+    # model log1p(duration), fitting the central tendency instead.
+    'duration_mode': 'log',
 }
 
 EXCHANGE_TRAINING_CONFIG = {
@@ -278,6 +283,7 @@ EXAMINATION_MODEL_CONFIG = {
     'model_type': 'examination',
     'has_phase_type': False,
     'body_region_mode': 'single',  # Uses single body_region
+    'duration_mode': 'gaussian',   # examination duration calibration already OK
     # Scan-type + per-scanner conditioning. When enabled the examination
     # model embeds the MRI sequence type (scout/tse/...) and the scanner
     # serial alongside body_region, so it can produce duration variability

@@ -189,7 +189,11 @@ for serial in SERIAL_NUMBERS:
         timediffs = pd.to_numeric(block['timediff'], errors='coerce').fillna(0).values.astype(float)
         durations = np.diff(timediffs, prepend=timediffs[0]).tolist()
         durations[0] = 0.0
-        durations = [max(0.0, d) for d in durations]
+        # Clip below at 0 and above at MAX_PER_TOKEN_DURATION. The upper cap
+        # removes segment-boundary artifacts (observed up to 6 800 s on a
+        # single exchange token) — overnight/inter-patient gaps leaking into
+        # one token — that otherwise inflate the duration model.
+        durations = [min(MAX_PER_TOKEN_DURATION, max(0.0, d)) for d in durations]
 
         row = block.iloc[0]
         dt  = row['datetime']

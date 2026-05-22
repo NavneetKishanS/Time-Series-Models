@@ -46,6 +46,8 @@ class SequenceGeneratorModel(nn.Module):
         self.max_seq_len = config['max_seq_len']
         self.has_phase_type = config.get('has_phase_type', False)
         self.body_region_mode = config.get('body_region_mode', 'single')
+        # 'gaussian' (default) or 'log' — see compute_duration_loss / generate.
+        self.duration_mode = config.get('duration_mode', 'gaussian')
 
         nhead = config['nhead']
         num_encoder_layers = config['num_encoder_layers']
@@ -392,8 +394,15 @@ class SequenceGeneratorModel(nn.Module):
             generated, conditioning, body_region_info, phase_type
         )
 
-        # Sample durations from Normal(mu, sigma), clamp to non-negative
-        durations = torch.normal(duration_mu, duration_sigma).clamp(min=0.0)
+        # Sample durations. In 'log' mode the head models log1p(duration),
+        # so sample in log space and invert with expm1; otherwise sample the
+        # Normal directly. Both clamp to non-negative.
+        if self.duration_mode == 'log':
+            durations = torch.expm1(
+                torch.normal(duration_mu, duration_sigma)
+            ).clamp(min=0.0)
+        else:
+            durations = torch.normal(duration_mu, duration_sigma).clamp(min=0.0)
 
         if return_stats:
             return generated, durations, duration_mu, duration_sigma
@@ -438,7 +447,15 @@ class SequenceGeneratorModel(nn.Module):
         )
 
     def compute_duration_loss(self, mu, sigma, target_durations, ignore_mask=None):
-        """Compute Gaussian NLL loss for duration prediction."""
+        """Compute Gaussian NLL loss for duration prediction.
+
+        In 'log' mode the target is transformed with log1p, so the head
+        models log-durations. This fits the central tendency of the heavily
+        right-skewed exchange duration distribution instead of the inflated
+        mean. log1p is zero-safe: the 0 s first/END tokens map to 0.
+        """
+        if self.duration_mode == 'log':
+            target_durations = torch.log1p(target_durations.clamp(min=0.0))
         variance = sigma ** 2 + 1e-8
         nll = 0.5 * (torch.log(variance) + (target_durations - mu) ** 2 / variance)
 
