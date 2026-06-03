@@ -18,7 +18,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import (
     EXAMINATION_MODEL_CONFIG, EXAMINATION_TRAINING_CONFIG,
     MODEL_SAVE_DIR, RANDOM_SEED, USE_GPU, MAX_SEQ_LEN,
-    START_TOKEN_ID, END_TOKEN_ID, PAD_TOKEN_ID, VOCAB_SIZE
+    START_TOKEN_ID, END_TOKEN_ID, PAD_TOKEN_ID, VOCAB_SIZE,
+    SOURCEID_VOCAB
 )
 from models.examination_model import create_examination_model
 from data.preprocessing import load_preprocessed_data
@@ -31,7 +32,7 @@ class ExaminationDataset(Dataset):
     """Dataset for examination (scan sequence) training."""
 
     def __init__(self, examination_sequences, max_seq_len=None, augment=False,
-                 oversample=1, duration_scale=1.0):
+                 oversample=1, duration_scale=1.0, abort_oversample=1):
         if max_seq_len is None:
             max_seq_len = MAX_SEQ_LEN
 
@@ -39,6 +40,8 @@ class ExaminationDataset(Dataset):
         self.augment = augment
         self.duration_scale = duration_scale
         self.data = []
+
+        abort_id = SOURCEID_VOCAB['MRI_MSR_34']  # "Stopped by User"
 
         for seq in examination_sequences:
             conditioning = build_conditioning_tensor(seq['conditioning'])
@@ -71,10 +74,23 @@ class ExaminationDataset(Dataset):
                 'input_seq': torch.tensor(input_seq, dtype=torch.long),
                 'target_seq': torch.tensor(target_seq, dtype=torch.long),
                 'target_durations': target_durations,  # kept as list for augmentation
+                'is_abort': abort_id in tokens,
             })
 
         if oversample > 1:
             self.data = self.data * oversample
+
+        # Targeted oversampling of the rare "Stopped by User" (MRI_MSR_34) abort
+        # sequences. This REPLACES the inverse-frequency class weighting that was
+        # removed from the loss: that weighting gave the never-counted START/END/
+        # UNK tokens a phantom inverse-frequency weight, poisoned the mean-1.0
+        # normaliser, and collapsed the token decoder into emitting MSR_104
+        # immediately. Duplicating abort sequences boosts the rare token safely at
+        # the data layer instead of destabilising the cross-entropy scale.
+        self.num_abort_sequences = sum(1 for d in self.data if d['is_abort'])
+        if abort_oversample > 1:
+            abort_items = [d for d in self.data if d['is_abort']]
+            self.data = self.data + abort_items * (abort_oversample - 1)
 
     def __len__(self):
         return len(self.data)
@@ -101,6 +117,19 @@ class ExaminationDataset(Dataset):
 
 def compute_token_class_weights(sequences, vocab_size=VOCAB_SIZE, smoothing=0.5):
     """Inverse-frequency class weights for the token cross-entropy.
+
+    *** CURRENTLY UNUSED — DO NOT RE-ENABLE AS-IS. ***
+    This implementation is buggy: START/END/UNK never appear in
+    `seq['sequence']` (END is appended only in the dataset), so they get count
+    0 and a huge inverse-frequency weight. Those phantom weights dominate the
+    `nonzero.mean()` normaliser (~180x), crushing every real token to ~0.01–0.23
+    and, via PyTorch's mean-reduced weighted cross-entropy, letting the single
+    END target soak up ~96% of the token-loss gradient. The result is a token
+    decoder that never learns structure and collapses to emitting MSR_104
+    immediately (StepCount=1). It also failed at its own goal: MRI_MSR_34 got a
+    weight of ~0.057 (below neutral 1.0). Rare-event surfacing is now handled by
+    targeted abort oversampling in ExaminationDataset. If reintroducing weights,
+    first force PAD/START/END/UNK weight = 1.0 and clip weights to e.g. [0.5, 3].
 
     Rare workflow events — most importantly MRI_MSR_34 ("Stopped by User") —
     are otherwise crowded out of the softmax by frequent tokens and never
@@ -196,17 +225,20 @@ def train_examination_model(data_path=None, config=None, training_config=None,
     augment = training_config.get('augment_training', False)
     oversample = training_config.get('oversample_factor', 1)
     duration_scale = training_config.get('duration_scale', 1.0)
+    abort_oversample = training_config.get('abort_oversample_factor', 1)
     train_dataset = ExaminationDataset(
         train_sequences, augment=augment, oversample=oversample,
-        duration_scale=duration_scale,
+        duration_scale=duration_scale, abort_oversample=abort_oversample,
     )
     val_dataset = ExaminationDataset(
         val_sequences, augment=False, oversample=1,
-        duration_scale=duration_scale,
+        duration_scale=duration_scale, abort_oversample=1,
     )
 
     if verbose:
         print(f"Train dataset: {len(train_dataset)}, Val dataset: {len(val_dataset)}")
+        print(f"  Abort (MRI_MSR_34) sequences in train: {train_dataset.num_abort_sequences} "
+              f"(oversampled x{abort_oversample})")
 
     train_loader = DataLoader(
         train_dataset,
@@ -228,12 +260,10 @@ def train_examination_model(data_path=None, config=None, training_config=None,
     if verbose:
         print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
 
-    # Inverse-frequency token weights — keeps rare events (MRI_MSR_34 abort)
-    # from being crowded out of the softmax. Computed on the training split.
-    token_class_weights = compute_token_class_weights(train_sequences).to(device)
-    if verbose:
-        print(f"Token class weights (mean≈1.0): "
-              f"min={token_class_weights.min():.2f} max={token_class_weights.max():.2f}")
+    # NOTE: inverse-frequency token class weighting was REMOVED here — it
+    # collapsed the token decoder (see compute_token_class_weights docstring).
+    # Rare aborts (MRI_MSR_34) are now surfaced via targeted oversampling in
+    # ExaminationDataset (abort_oversample_factor).
 
     # Optimizer with warmup
     optimizer = optim.AdamW(
@@ -287,7 +317,6 @@ def train_examination_model(data_path=None, config=None, training_config=None,
             token_loss = model.compute_loss(
                 logits, target_seq,
                 label_smoothing=training_config['label_smoothing'],
-                class_weights=token_class_weights,
             )
 
             pad_mask = (target_seq == PAD_TOKEN_ID)
@@ -330,9 +359,7 @@ def train_examination_model(data_path=None, config=None, training_config=None,
                      'sequence_type': sequence_type, 'serial_idx': serial_idx},
                     input_seq,
                 )
-                token_loss = model.compute_loss(
-                    logits, target_seq, class_weights=token_class_weights
-                )
+                token_loss = model.compute_loss(logits, target_seq)
                 pad_mask = (target_seq == PAD_TOKEN_ID)
                 dur_loss = model.compute_duration_loss(
                     duration_mu, duration_sigma, target_durations, ignore_mask=pad_mask

@@ -311,6 +311,14 @@ EXAMINATION_TRAINING_CONFIG = {
     'augment_training': True,
     'duration_jitter_pct': 0.10,
     # oversample_factor removed — 165K sequences is sufficient without duplication
+    # Targeted oversampling of rare "Stopped by User" (MRI_MSR_34) abort
+    # sequences. Replaces the removed inverse-frequency class weighting (which
+    # collapsed the token decoder). Duplicates ONLY abort sequences x this
+    # factor so the rare abort token is not crowded out of the softmax.
+    # Abort sequences are ~3.9% of training; factor 4 -> ~13% share. Tune
+    # against the MRI_MSR_34 rate in step-05 output: raise if aborts still
+    # never appear, lower if they appear too often.
+    'abort_oversample_factor': 4,
 }
 
 # ============================================================================
