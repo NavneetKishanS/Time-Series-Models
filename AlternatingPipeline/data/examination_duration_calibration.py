@@ -1,8 +1,15 @@
 """
 Calibrate examination sequence durations using archive scan statistics.
 
-Replaces near-zero per-token durations (artifacts of rapid sequential scanner events)
-with archive-derived realistic values: archive_mean_for_body_region / num_tokens per token.
+ONLY fills in genuinely missing/near-zero per-token durations. The in-pipeline
+per-token durations are REAL — their sum equals the true span duration and
+varies ~74x by scan type (scout ~19 s, tse ~93 s, space ~232 s). The previous
+implementation rescaled EVERY sequence's total to the body-region archive mean;
+because body_region is currently 100% UNKNOWN, that flattened all durations to
+the single 'Unknown' prior (~49 s) and destroyed the scan-type variation the
+examination model is supposed to reproduce. We now PRESERVE any sequence whose
+durations already sum to a plausible total and only fall back to the archive
+prior for empty/near-zero sequences.
 """
 import os
 import sys
@@ -33,21 +40,27 @@ def calibrate_examination_durations(sequences: list, archive_priors: dict = None
         tokens = seq.get('sequence', [])
         n_tokens = max(1, len(tokens))
         existing = [max(0.0, d) for d in seq.get('durations', [0.0] * n_tokens)]
+        total_existing = sum(existing)
 
-        if prior is not None:
-            # Distribute archive mean uniformly; keep ratio structure from existing if non-zero
-            total_existing = sum(existing)
+        # Plausible-total threshold (seconds). Sequences at/above this keep their
+        # real durations; only empty/near-zero ones fall back to the prior.
+        MIN_PLAUSIBLE_TOTAL = 3.0
+
+        if total_existing >= MIN_PLAUSIBLE_TOTAL:
+            # Real durations — PRESERVE them so scan-type variation survives.
+            new_durations = existing
+        elif prior is not None:
             archive_mean = prior['mean']
             if total_existing > 0:
-                # Scale existing duration ratios to hit archive target total
+                # Tiny but non-zero: scale the existing ratios up to the prior total.
                 scale = archive_mean / total_existing
                 new_durations = [d * scale for d in existing]
             else:
-                # All zeros: distribute uniformly
+                # All zeros: distribute the prior mean uniformly.
                 per_token = archive_mean / n_tokens
                 new_durations = [per_token] * n_tokens
         else:
-            new_durations = existing  # no archive data for this region
+            new_durations = existing  # no real durations and no archive fallback
 
         new_seq = dict(seq)
         new_seq['durations'] = new_durations
