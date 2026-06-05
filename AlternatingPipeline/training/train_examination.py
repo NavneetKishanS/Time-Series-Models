@@ -221,6 +221,44 @@ def train_examination_model(data_path=None, config=None, training_config=None,
     if verbose:
         print("Duration calibration applied to train and val sequences")
 
+    # ---- Self-verifying scan-type duration-spread guard ----------------------
+    # The examination model conditions duration on scan type (use_exam_conditioning),
+    # so the TRAINING TARGETS must still vary by sequence_type AFTER calibration.
+    # Historically the calibration rescaled every sequence to the body_region
+    # archive prior; with body_region 100% UNKNOWN that flattened all scan types
+    # to one ~49 s mean, and the model dutifully learned flat per-type durations
+    # (synthetic mu pinned ~0.215 for scout==tse==space). db44198 fixed the
+    # calibration, but a retrain that does not reflect it silently reintroduces
+    # the bug. This block makes that failure LOUD at train time instead of
+    # surfacing only after a full generate + eval cycle.
+    if verbose:
+        from collections import defaultdict
+        from config import ID_TO_SEQUENCE_TYPE
+        _by_type = defaultdict(list)
+        for _s in train_sequences:
+            _total = sum(_s.get('durations', []) or [0.0])
+            _by_type[int(_s.get('sequence_type', 0))].append(_total)
+        _means = {st: (sum(v) / len(v)) for st, v in _by_type.items() if v}
+        if len(_means) >= 2:
+            _lo, _hi = min(_means.values()), max(_means.values())
+            _spread = _hi / max(1e-9, _lo)
+            print(f"Scan-type duration spread (calibrated train targets): "
+                  f"{_spread:.1f}x across {len(_means)} types "
+                  f"[{_lo:.0f}s .. {_hi:.0f}s]")
+            for st in sorted(_means, key=_means.get):
+                _name = ID_TO_SEQUENCE_TYPE.get(st, str(st))
+                print(f"    {_name:<8} n={len(_by_type[st]):>6}  mean={_means[st]:>7.1f}s")
+            if _spread < 5.0:
+                print("  !! WARNING: per-scan-type duration spread has COLLAPSED "
+                      "(<5x). The duration head will learn flat per-type durations.\n"
+                      "     This is the db44198 calibration-flattening regression — "
+                      "verify calibrate_examination_durations and the source pkl's\n"
+                      "     `durations`/`sequence_type` fields BEFORE spending a retrain.")
+        else:
+            print("  !! WARNING: training sequences carry <2 distinct sequence_type "
+                  "values — scan-type conditioning cannot be learned (stale pkl?).")
+    # --------------------------------------------------------------------------
+
     # Create datasets
     augment = training_config.get('augment_training', False)
     oversample = training_config.get('oversample_factor', 1)
