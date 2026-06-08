@@ -159,9 +159,101 @@ CONTROLLED_SCHEDULE  = None
 # COMMAND ----------
 
 # =============================================================================
+# PRE-FLIGHT — MODEL FRESHNESS GATE  (run BEFORE loading models)
+# -----------------------------------------------------------------------------
+# Guards against silently generating from a STALE model. Verifies that the
+# checkpoints on disk:
+#   (1) match the MODEL_MANIFEST.json that step 04 wrote when it trained them,
+#   (2) are NEWER than the pkl (i.e. not trained on older data), and
+#   (3) come from a pkl whose content is unchanged since training.
+# Any mismatch prints a loud warning. Set env STRICT_FRESHNESS=1 to hard-stop.
+# =============================================================================
+import os, time, json, hashlib
+
+_CHECKPOINTS = {
+    "exchange":      f"{MODELS_DIR}/exchange/exchange_model_best.pt",
+    "examination":   f"{MODELS_DIR}/examination/examination_model_best.pt",
+    "orchestration": f"{MODELS_DIR}/orchestration/orchestration_model_best.pt",
+}
+
+def _file_meta(path):
+    if not os.path.exists(path):
+        return {"path": path, "exists": False}
+    st = os.stat(path)
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return {"path": path, "exists": True,
+            "size_mb": round(st.st_size / 1e6, 2),
+            "mtime": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(st.st_mtime)),
+            "mtime_epoch": st.st_mtime, "sha256": h.hexdigest()[:16]}
+
+print("=" * 64)
+print(" STEP 05 PRE-FLIGHT — MODEL FRESHNESS GATE")
+print("=" * 64)
+
+_warnings = []
+_pkl_meta  = _file_meta(PKL_PATH)
+_ckpt_meta = {k: _file_meta(v) for k, v in _CHECKPOINTS.items()}
+
+print(f"\nPKL  {_pkl_meta.get('path')}")
+if _pkl_meta["exists"]:
+    print(f"     mtime {_pkl_meta['mtime']}   {_pkl_meta['size_mb']} MB   sha {_pkl_meta['sha256']}")
+else:
+    _warnings.append(f"PKL missing at {PKL_PATH}")
+
+print("\nCheckpoints on disk:")
+for _k, _m in _ckpt_meta.items():
+    if not _m["exists"]:
+        _warnings.append(f"{_k} checkpoint MISSING at {_CHECKPOINTS[_k]}")
+        print(f"   {_k:<13} !! MISSING")
+        continue
+    _age_h = (time.time() - _m["mtime_epoch"]) / 3600
+    print(f"   {_k:<13} {_m['mtime']}  ({_age_h:5.1f}h old)  {_m['size_mb']:6.1f} MB  sha {_m['sha256']}")
+    if _pkl_meta["exists"] and _m["mtime_epoch"] < _pkl_meta["mtime_epoch"]:
+        _warnings.append(f"{_k} checkpoint is OLDER than the pkl "
+                         f"({_m['mtime']} < {_pkl_meta['mtime']}) — trained on older data than is loaded now.")
+
+# --- cross-check against the manifest written by step 04 ---
+_man_path = f"{MODELS_DIR}/MODEL_MANIFEST.json"
+if os.path.exists(_man_path):
+    with open(_man_path) as _f:
+        _man = json.load(_f)
+    print(f"\nManifest  trained_at {_man.get('trained_at')}   pkl sha {_man.get('pkl', {}).get('sha256')}")
+    if _man.get("pkl", {}).get("sha256") != _pkl_meta.get("sha256"):
+        _warnings.append("Live pkl sha != manifest pkl sha — step 03 re-ran after training. "
+                         "Re-run step 04 before generating, or the models don't match this pkl.")
+    for _k, _m in _ckpt_meta.items():
+        _man_sha = _man.get("checkpoints", {}).get(_k, {}).get("sha256")
+        if _m["exists"] and _man_sha and _man_sha != _m["sha256"]:
+            _warnings.append(f"{_k} checkpoint sha {_m['sha256']} != manifest {_man_sha} — "
+                             f"checkpoint changed since training was stamped (partial/overwritten run).")
+        if _m["exists"] and _m["mtime_epoch"] > _man.get("trained_at_epoch", 0) + 120:
+            _warnings.append(f"{_k} checkpoint is NEWER than the manifest — retrained without "
+                             f"re-stamping. Re-run step 04's manifest cell.")
+else:
+    _warnings.append("No MODEL_MANIFEST.json found — cannot confirm which pkl/code produced these "
+                     "checkpoints. Re-run step 04 (it now writes the manifest).")
+
+print("\n" + "-" * 64)
+if _warnings:
+    print(f"!! {len(_warnings)} FRESHNESS WARNING(S) — review before trusting this run:")
+    for _w in _warnings:
+        print(f"   - {_w}")
+    if os.environ.get("STRICT_FRESHNESS") == "1":
+        raise RuntimeError("Model freshness gate failed (STRICT_FRESHNESS=1). See warnings above.")
+else:
+    print("OK — checkpoints match the manifest, are newer than the pkl, and the pkl is "
+          "unchanged since training.")
+print("=" * 64)
+
+# COMMAND ----------
+
+# =============================================================================
 # Load data and models
 # =============================================================================
-import sys                                                
+import sys
 sys.path[:] = [p for p in sys.path if 'Patient Exchange and Examination' not in p]
 import AlternatingPipeline as _ap                                                                      
 _ap.__path__[:] = [p for p in _ap.__path__ if 'Patient Exchange and Examination' not in p]

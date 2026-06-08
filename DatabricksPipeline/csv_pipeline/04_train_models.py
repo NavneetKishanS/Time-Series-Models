@@ -104,6 +104,96 @@ print(f"Daily summaries:       {len(data['daily_summaries']):,}")
 # COMMAND ----------
 
 # =============================================================================
+# PRE-FLIGHT PROVENANCE CHECK  (run BEFORE training)
+# -----------------------------------------------------------------------------
+# Confirms WHICH pkl and WHICH code are about to train the models, and how old
+# the existing checkpoints are (this run OVERWRITES them). Inspect this up front
+# so an accidental stale pkl / stale repo clone is caught here — instead of
+# after a full generate + eval cycle. Step 04 also writes a MODEL_MANIFEST.json
+# at the end, which step 05 verifies before it generates anything.
+# =============================================================================
+import os, time, json, hashlib
+from collections import Counter
+
+# Source files whose content actually determines model behaviour. We fingerprint
+# the *loaded* copies (under TMP_ROOT) so the printout reflects the code this run
+# is really using, not whatever happens to be in the repo.
+PROVENANCE_SRC = [
+    "AlternatingPipeline/training/train_examination.py",
+    "AlternatingPipeline/training/train_exchange.py",
+    "AlternatingPipeline/training/train_orchestration.py",
+    "AlternatingPipeline/data/examination_duration_calibration.py",
+    "AlternatingPipeline/models/sequence_generator.py",
+    "AlternatingPipeline/config.py",
+]
+CHECKPOINTS = {
+    "exchange":      f"{MODELS_DIR}/exchange/exchange_model_best.pt",
+    "examination":   f"{MODELS_DIR}/examination/examination_model_best.pt",
+    "orchestration": f"{MODELS_DIR}/orchestration/orchestration_model_best.pt",
+}
+
+def _file_meta(path):
+    """Lightweight provenance fingerprint for a single file."""
+    if not os.path.exists(path):
+        return {"path": path, "exists": False}
+    st = os.stat(path)
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return {
+        "path": path, "exists": True,
+        "size_mb": round(st.st_size / 1e6, 2),
+        "mtime": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(st.st_mtime)),
+        "mtime_epoch": st.st_mtime,
+        "sha256": h.hexdigest()[:16],
+    }
+
+def _pkl_fingerprint(d):
+    return {
+        "examination_seqs": len(d.get("examination", [])),
+        "exchange_seqs": len(d.get("exchange", [])),
+        "distinct_sequence_types": len({int(s.get("sequence_type", 0)) for s in d.get("examination", [])}),
+        "distinct_body_regions": len({int(s.get("body_region", 10)) for s in d.get("examination", [])}),
+    }
+
+print("=" * 64)
+print(" STEP 04 PRE-FLIGHT — TRAINING INPUTS")
+print("=" * 64)
+
+# 1) the pkl that will train the models
+_pkl_meta = _file_meta(PKL_PATH)
+if not _pkl_meta["exists"]:
+    raise FileNotFoundError(f"PKL missing: {PKL_PATH} — run 03_build_preprocessed_pkl.py first")
+_fp = _pkl_fingerprint(data)
+print(f"\nPKL  {_pkl_meta['path']}")
+print(f"     mtime {_pkl_meta['mtime']}   {_pkl_meta['size_mb']} MB   sha {_pkl_meta['sha256']}")
+print(f"     examination_seqs={_fp['examination_seqs']:,}  exchange_seqs={_fp['exchange_seqs']:,}  "
+      f"sequence_types={_fp['distinct_sequence_types']}  body_regions={_fp['distinct_body_regions']}")
+if _fp["distinct_sequence_types"] < 2:
+    print("  !! WARNING: pkl carries <2 sequence types — scan-type conditioning will be dead. "
+          "Re-run step 03 with current code.")
+
+# 2) the code actually loaded into this run
+print("\nCODE (loaded source under TMP_ROOT):")
+for _rel in PROVENANCE_SRC:
+    _m = _file_meta(os.path.join(TMP_ROOT, _rel))
+    print(f"   {_rel:<58} " + (f"sha {_m['sha256']}  {_m['mtime']}" if _m["exists"] else "!! MISSING"))
+
+# 3) existing checkpoints this run will OVERWRITE
+print("\nEXISTING checkpoints (this run OVERWRITES them):")
+for _name, _path in CHECKPOINTS.items():
+    _m = _file_meta(_path)
+    if _m["exists"]:
+        _age_h = (time.time() - _m["mtime_epoch"]) / 3600
+        print(f"   {_name:<13} {_m['mtime']}  ({_age_h:5.1f}h old)  {_m['size_mb']:6.1f} MB  sha {_m['sha256']}")
+    else:
+        print(f"   {_name:<13} (none yet — fresh train)")
+print("=" * 64)
+
+# COMMAND ----------
+
+# =============================================================================
 # TRAIN EXCHANGE MODEL
 # =============================================================================
 
@@ -201,6 +291,36 @@ displayHTML(f'''
 </ul>
 <p>Next: run <b>05_generate_synthetic_data.py</b></p>
 ''')
+
+# COMMAND ----------
+
+# =============================================================================
+# WRITE MODEL MANIFEST  (run AFTER training)
+# -----------------------------------------------------------------------------
+# Stamps WHICH pkl, WHICH code, and WHICH checkpoint hashes this run produced.
+# Step 05 reads this manifest before generating and refuses to silently use a
+# model that no longer matches the pkl/code it was trained from.
+# =============================================================================
+_manifest = {
+    "trained_at":        time.strftime("%Y-%m-%d %H:%M:%S"),
+    "trained_at_epoch":  time.time(),
+    "repo_root":         REPO_ROOT,
+    "pkl":               _file_meta(PKL_PATH),
+    "pkl_fingerprint":   _pkl_fingerprint(data),
+    "code":              {rel: _file_meta(os.path.join(TMP_ROOT, rel)).get("sha256")
+                          for rel in PROVENANCE_SRC},
+    "checkpoints":       {name: _file_meta(path) for name, path in CHECKPOINTS.items()},
+    "val_loss": {
+        "exchange":      float(min(exchange_history["val_loss"])),
+        "examination":   float(min(examination_history["val_loss"])),
+        "orchestration": float(min(orch_history["val_loss"])),
+    },
+}
+_manifest_path = f"{MODELS_DIR}/MODEL_MANIFEST.json"
+with open(_manifest_path, "w") as _f:
+    json.dump(_manifest, _f, indent=2)
+print(f"Wrote model manifest → {_manifest_path}")
+print(json.dumps(_manifest, indent=2))
 
 # COMMAND ----------
 
