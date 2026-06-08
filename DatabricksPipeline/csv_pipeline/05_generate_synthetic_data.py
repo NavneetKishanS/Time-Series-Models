@@ -276,7 +276,8 @@ from AlternatingPipeline.models.exchange_model    import create_exchange_model
 from AlternatingPipeline.models.examination_model import create_examination_model
 from AlternatingPipeline.models.orchestration_model import create_orchestration_model
 from AlternatingPipeline.data.orchestration_preprocessing import (
-    extract_orchestration_samples, build_demographic_distributions
+    extract_orchestration_samples, build_demographic_distributions,
+    _compute_scanner_stats,
 )
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -320,6 +321,18 @@ print("Orchestration model loaded.")
 # --- demographic distributions per body region (sampled from real data) ---
 orch_samples, _ = extract_orchestration_samples(data)
 demographic_distributions = build_demographic_distributions(data)
+
+# --- per-scanner region histograms used as orchestration conditioning ---
+# The orchestration model was TRAINED with each scanner's real body-region
+# distribution as conditioning (train_orchestration via _compute_scanner_stats).
+# Generation must feed the SAME per-scanner histogram — feeding a flat/uniform
+# vector is an out-of-distribution input the model never saw, and it collapses
+# to its unconditional mode (the NECK/FOOT spike). Compute the real stats here.
+scanner_stats = _compute_scanner_stats(customer_schedules)
+_dbg = {sid: [round(float(x), 3) for x in st['region_distribution']]
+        for sid, st in list(scanner_stats.items())[:1]}
+print(f"Per-scanner orchestration conditioning ready for {len(scanner_stats)} scanners "
+      f"(example region_distribution: {_dbg})")
 
 # --- per-body-region sequence-type distribution (real frequencies) ---
 # The examination model now conditions on scan type (scout/tse/...). For each
@@ -635,20 +648,29 @@ def _fill_exam_timediff(rows):
     return rows
 
 
-def _generate_orch_tokens(scanner_idx, date, demographic_distributions):
+def _generate_orch_tokens(scanner_idx, date, demographic_distributions, serial_str=None):
     """
     Use orchestration model to predict the body region sequence for one day.
     Returns a list of body region token IDs (breaks already filtered out).
+
+    The conditioning MUST use this scanner's real region histogram (the same
+    one training fed) — see `scanner_stats` above. A uniform fallback is only
+    used if the scanner is unknown, and it is flagged because it reproduces the
+    body-region collapse the model exhibits under out-of-distribution input.
     """
     from AlternatingPipeline.data.orchestration_preprocessing import _build_orchestration_conditioning
     import math
 
     dt = datetime.strptime(str(date), '%Y-%m-%d')
     dow = dt.weekday()
-    stats = {
-        'avg_patients_per_day': 8.0,
-        'region_distribution':  np.ones(NUM_BODY_REGIONS) / NUM_BODY_REGIONS,
-    }
+    stats = scanner_stats.get(serial_str) if serial_str is not None else None
+    if stats is None:
+        print(f"    !! no scanner_stats for {serial_str} — falling back to UNIFORM "
+              f"conditioning (body-region output will be unreliable).")
+        stats = {
+            'avg_patients_per_day': 8.0,
+            'region_distribution':  np.ones(NUM_BODY_REGIONS) / NUM_BODY_REGIONS,
+        }
     cond = _build_orchestration_conditioning(str(date), dow, stats)
     cond_t = torch.tensor(cond, dtype=torch.float32).unsqueeze(0).to(device)
     scanner_t = torch.tensor([scanner_idx], dtype=torch.long).to(device)
@@ -713,7 +735,8 @@ for customer_idx, (serial_str, daily_schedules) in enumerate(customer_schedules.
                            for r in CONTROLLED_SCHEDULE]
         else:
             # Realistic default: let the orchestration model decide.
-            orch_tokens = _generate_orch_tokens(scanner_idx, date_str, demographic_distributions)
+            orch_tokens = _generate_orch_tokens(scanner_idx, date_str, demographic_distributions,
+                                                serial_str=serial_str)
         if not orch_tokens:
             print(f"    Orchestration returned no tokens — skipping day.")
             continue
