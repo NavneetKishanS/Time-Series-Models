@@ -64,6 +64,19 @@ _api_copy_py(f"{REPO_ROOT}/AlternatingPipeline", f"{TMP_ROOT}/AlternatingPipelin
 print(f"Copied AlternatingPipeline to {TMP_ROOT}")
 sys.path.insert(0, TMP_ROOT)
 
+# Purge any previously-imported copies so a RE-RUN in a long-lived Databricks
+# kernel actually picks up the freshly copied source. Databricks kernels persist
+# across runs: `import` returns the module cached in sys.modules and ignores the
+# file edits _api_copy_py just made — so without this, every re-run silently
+# re-executes whatever code the kernel first imported (stale guard/calibration),
+# even though the pre-flight (which reads files directly) reports the NEW shas.
+# Match by __file__ under TMP_ROOT to catch every loaded copy regardless of the
+# import name (AlternatingPipeline.*, but also top-level config/data/models).
+for _name, _mod in list(sys.modules.items()):
+    _f = getattr(_mod, "__file__", None) or ""
+    if _f.startswith(TMP_ROOT):
+        del sys.modules[_name]
+
 PKL_PATH   = "/dbfs/FileStore/csv_pipeline/preprocessed_data.pkl"
 MODELS_DIR = "/dbfs/FileStore/csv_pipeline/models"
 
