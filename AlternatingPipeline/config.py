@@ -283,7 +283,12 @@ EXAMINATION_MODEL_CONFIG = {
     'model_type': 'examination',
     'has_phase_type': False,
     'body_region_mode': 'single',  # Uses single body_region
-    'duration_mode': 'gaussian',   # examination duration calibration already OK
+    # Log-space duration head (like exchange). The duration target is now the
+    # SPAN TOTAL placed on the finish token (see ExaminationDataset): totals
+    # are right-skewed by scan type (scout ~19 s ... space ~235 s, swi tail
+    # into the 10-min range), so the head models log1p(total/60) where a
+    # Gaussian on the raw scale would be dominated by the tail.
+    'duration_mode': 'log',
     # Scan-type + per-scanner conditioning. When enabled the examination
     # model embeds the MRI sequence type (scout/tse/...) and the scanner
     # serial alongside body_region, so it can produce duration variability

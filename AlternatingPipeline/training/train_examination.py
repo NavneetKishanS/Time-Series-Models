@@ -58,7 +58,24 @@ class ExaminationDataset(Dataset):
             # Target: [tok1, tok2, ..., tokN, END]
             input_seq = [START_TOKEN_ID] + tokens[:max_seq_len - 1]
             target_seq = tokens[:max_seq_len - 1] + [END_TOKEN_ID]
-            target_durations = durations[:max_seq_len - 1] + [0.0]
+
+            # Duration target = SPAN TOTAL on the finish token, zeros elsewhere.
+            # Real per-token gaps are ~10 s for EVERY scan type — the scan-type
+            # duration spread (scout ~19 s ... space ~235 s) lives almost
+            # entirely in the NUMBER of events per span (corr(total, n_tokens)
+            # ≈ 0.83), not in per-token magnitude. Per-token targets therefore
+            # gave the duration head nothing to learn from its scan-type
+            # conditioning (generated mu pinned flat at ~0.215 across all
+            # types), and generated spans of ~3 tokens collapsed every scan to
+            # ~50 s. Concentrating the total on the finish token turns the
+            # length signal into a magnitude signal the conditioned head CAN
+            # learn; generation sums per-token durations across the span, so
+            # the emitted scan duration becomes the predicted total.
+            n_kept = len(tokens[:max_seq_len - 1])
+            span_total = sum(max(0.0, d) for d in durations)
+            target_durations = [0.0] * n_kept + [0.0]
+            if n_kept > 0:
+                target_durations[n_kept - 1] = span_total
 
             # Pad
             pad_len = max_seq_len - len(input_seq)

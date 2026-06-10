@@ -248,8 +248,25 @@ class SequenceGeneratorModel(nn.Module):
         combined = torch.cat([cond_token, tok_emb], dim=1)  # [batch, 1+seq_len, d_model]
         combined = self.duration_pos_encoding(combined)
 
+        # Key-padding mask so PAD positions cannot influence the encoding.
+        # Training feeds max_seq_len padded sequences while generation feeds
+        # short UNPADDED ones; without this mask the encoder learns to lean on
+        # the ~100 PAD embeddings as context, and at generation (no pads) its
+        # output collapses to a flat prior — measured: a model probed with its
+        # own padded training input predicts mu correctly per scan type, the
+        # identical unpadded sequence returns mu≈0 everywhere. The mask makes
+        # both input styles equivalent. Position 0 (conditioning token) is
+        # never masked.
+        pad_mask = (token_ids == PAD_TOKEN_ID)  # [batch, seq_len]
+        full_pad_mask = torch.cat(
+            [torch.zeros(batch_size, 1, dtype=torch.bool, device=token_ids.device),
+             pad_mask], dim=1
+        )
+
         # Bidirectional encoder (NO causal mask)
-        encoded = self.duration_encoder(combined)  # [batch, 1+seq_len, d_model]
+        encoded = self.duration_encoder(
+            combined, src_key_padding_mask=full_pad_mask
+        )  # [batch, 1+seq_len, d_model]
 
         # Extract token positions (skip conditioning token at position 0)
         token_hidden = encoded[:, 1:, :]  # [batch, seq_len, d_model]
