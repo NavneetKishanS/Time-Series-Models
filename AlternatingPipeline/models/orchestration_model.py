@@ -178,7 +178,7 @@ class OrchestrationModel(nn.Module):
 
     @torch.no_grad()
     def generate(self, conditioning, scanner_ids, max_length=None,
-                 temperature=1.0, top_k=0, top_p=0.9):
+                 temperature=1.0, top_k=0, top_p=0.9, allowed_tokens=None):
         """
         Autoregressive generation of body region sequence.
 
@@ -189,6 +189,10 @@ class OrchestrationModel(nn.Module):
             temperature: sampling temperature
             top_k: top-k filtering (0 = disabled)
             top_p: nucleus sampling threshold
+            allowed_tokens: optional iterable of token IDs the sampler may
+                emit (e.g. this scanner's real region support + END/BREAK).
+                Tokens outside the set get -inf logits. Guards against the
+                model emitting regions that never occur on this scanner.
 
         Returns:
             generated_tokens: [batch, seq_len] - token IDs including START/END
@@ -212,6 +216,12 @@ class OrchestrationModel(nn.Module):
         batch_size = conditioning.shape[0]
         device = conditioning.device
 
+        allowed_mask = None
+        if allowed_tokens is not None:
+            allowed_mask = torch.zeros(self.vocab_size, dtype=torch.bool, device=device)
+            allowed_mask[list(allowed_tokens)] = True
+            allowed_mask[self.end_token_id] = True  # must always be able to stop
+
         # Encode conditioning
         memory = self._encode_conditioning(conditioning, scanner_ids)
 
@@ -234,6 +244,10 @@ class OrchestrationModel(nn.Module):
 
             # Mask out PAD token - should never be generated
             next_token_logits[:, self.pad_token_id] = -float('Inf')
+
+            # Restrict to the caller's allowed token set (scanner region support)
+            if allowed_mask is not None:
+                next_token_logits[:, ~allowed_mask] = -float('Inf')
 
             # Top-k filtering
             if top_k > 0:

@@ -675,12 +675,22 @@ def _generate_orch_tokens(scanner_idx, date, demographic_distributions, serial_s
     cond_t = torch.tensor(cond, dtype=torch.float32).unsqueeze(0).to(device)
     scanner_t = torch.tensor([scanner_idx], dtype=torch.long).to(device)
 
+    # Region-support mask: only regions this scanner actually sees in real
+    # schedules may be sampled (plus END/BREAK so sequences still terminate
+    # and pause). Defense-in-depth for the phantom-class-weight collapse: a
+    # residually-biased checkpoint cannot emit NECK/FOOT on a scanner whose
+    # real mix has zero share there.
+    region_dist = np.asarray(stats['region_distribution'], dtype=float)
+    allowed = [i for i in range(NUM_BODY_REGIONS) if region_dist[i] > 0.0]
+    allowed += [END_REGION_ID, BREAK_TOKEN_ID]
+
     with torch.no_grad():
         tokens = orchestration_model.generate(
             cond_t, scanner_t,
             max_length=ORCHESTRATION_MODEL_CONFIG['max_seq_len'],
             temperature=GENERATION_CONFIG['temperature'],
             top_k=GENERATION_CONFIG['top_k'],
+            allowed_tokens=allowed,
         )
     token_list = tokens[0].cpu().tolist()
     # Keep only valid body region IDs

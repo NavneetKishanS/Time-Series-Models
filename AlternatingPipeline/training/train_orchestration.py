@@ -76,10 +76,21 @@ class OrchestrationDataset(Dataset):
 def compute_region_class_weights(samples, vocab_size, pad_token_id, smoothing=0.5):
     """Inverse-frequency class weights for the orchestration token loss.
 
-    Without weighting the day-level softmax collapses to the few common body
-    regions and never emits the long tail (the "model predicts no Heart/Knee"
-    finding). Weights are normalised to mean ≈ 1.0 so the loss scale is
-    unchanged; `smoothing` keeps a very rare region from dominating gradients.
+    *** CURRENTLY UNUSED — DO NOT RE-ENABLE AS-IS. ***
+    This is the same phantom-weight bug that collapsed the examination model
+    (Stage 1): regions with ZERO target counts (NECK/HAND/FOOT/START in real
+    schedules) get the capped inverse-frequency weight (~3.44 after mean
+    normalisation) while every REAL region is crushed to ~0.006-0.025. Combined
+    with label smoothing (0.1), the weighted cross-entropy is MINIMISED by
+    putting ~91% of the softmax mass on the never-seen classes — measured
+    analytically on real schedules: optimum = NECK/START/FOOT/HAND at 22.5%
+    each, vs HEAD 1.7%. That is exactly the NECK+FOOT≈91% collapse observed in
+    synthetic output, and why fixing the serve-time conditioning (7a58aca)
+    changed nothing. Without weights the optimum equals the real region
+    distribution (HEAD 28%, SPINE 20%, UNKNOWN 13%, ...), which is the goal.
+    The "long tail" this weighting was meant to surface is better served by
+    the per-scanner region_distribution conditioning, which is fed correctly
+    at generation since 7a58aca.
     """
     counts = np.zeros(vocab_size, dtype=np.float64)
     for sample in samples:
@@ -184,14 +195,21 @@ def train_orchestration_model(data_path=None, config=None, training_config=None,
     if verbose:
         print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
 
-    # Inverse-frequency body-region weights — pulls the long tail (rare
-    # regions) back into the model's output distribution.
-    region_class_weights = compute_region_class_weights(
-        train_samples, config['vocab_size'], ORCH_PAD_TOKEN_ID
-    ).to(device)
+    # NOTE: inverse-frequency region class weighting was REMOVED here — the
+    # phantom weights on zero-count regions (NECK/HAND/FOOT/START) made the
+    # weighted loss optimal at ~91% mass on regions that never occur in real
+    # schedules (see compute_region_class_weights docstring). The desired
+    # per-scanner region mix is carried by the region_distribution
+    # conditioning instead.
     if verbose:
-        print(f"Region class weights (mean≈1.0): "
-              f"min={region_class_weights.min():.2f} max={region_class_weights.max():.2f}")
+        from collections import Counter
+        _tok_counts = Counter(t for s in train_samples for t in s['tokens'])
+        _region_tot = sum(c for t, c in _tok_counts.items() if 0 <= t < 11) or 1
+        from config import BODY_REGIONS as _BR
+        _top = sorted(((t, c) for t, c in _tok_counts.items() if 0 <= t < 11),
+                      key=lambda x: -x[1])[:5]
+        print("Train region distribution (top 5): " +
+              ", ".join(f"{_BR[t]} {100*c/_region_tot:.0f}%" for t, c in _top))
 
     # Optimizer with warmup
     optimizer = optim.AdamW(
@@ -238,7 +256,6 @@ def train_orchestration_model(data_path=None, config=None, training_config=None,
             loss = model.compute_loss(
                 logits, target_seq,
                 label_smoothing=training_config['label_smoothing'],
-                class_weights=region_class_weights,
             )
 
             loss.backward()
@@ -268,9 +285,7 @@ def train_orchestration_model(data_path=None, config=None, training_config=None,
 
                 logits = model(conditioning, scanner_ids, input_seq)
 
-                loss = model.compute_loss(
-                    logits, target_seq, class_weights=region_class_weights
-                )
+                loss = model.compute_loss(logits, target_seq)
                 val_loss += loss.item()
 
         val_loss /= len(val_loader)
