@@ -684,18 +684,45 @@ def _generate_orch_tokens(scanner_idx, date, demographic_distributions, serial_s
     allowed = [i for i in range(NUM_BODY_REGIONS) if region_dist[i] > 0.0]
     allowed += [END_REGION_ID, BREAK_TOKEN_ID]
 
+    # `allowed_tokens` only exists on OrchestrationModel.generate() since
+    # d354402. In a long-lived Databricks kernel the loaded module can lag the
+    # repo (the step-04/05 purges cover the usual cases, but not every
+    # execution order), and passing the kwarg to a stale module raises
+    # TypeError on the very first day generated. Detect support up front and
+    # fall back to post-filtering the emitted tokens — same support guarantee,
+    # just without in-loop renormalised sampling.
+    import inspect as _inspect
+    _supports_mask = 'allowed_tokens' in _inspect.signature(
+        orchestration_model.generate).parameters
+    gen_kwargs = dict(
+        max_length=ORCHESTRATION_MODEL_CONFIG['max_seq_len'],
+        temperature=GENERATION_CONFIG['temperature'],
+        top_k=GENERATION_CONFIG['top_k'],
+    )
+    if _supports_mask:
+        gen_kwargs['allowed_tokens'] = allowed
+    else:
+        print("    !! orchestration_model.generate() has no allowed_tokens "
+              "(stale module in kernel — restartPython() or rerun 05 from the "
+              "top to get masked sampling); post-filtering tokens instead.")
+
     with torch.no_grad():
-        tokens = orchestration_model.generate(
-            cond_t, scanner_t,
-            max_length=ORCHESTRATION_MODEL_CONFIG['max_seq_len'],
-            temperature=GENERATION_CONFIG['temperature'],
-            top_k=GENERATION_CONFIG['top_k'],
-            allowed_tokens=allowed,
-        )
+        try:
+            tokens = orchestration_model.generate(cond_t, scanner_t, **gen_kwargs)
+        except Exception:
+            # Surface the real error, then retry unmasked so a generation run
+            # is never lost to the mask path alone. If this retry also fails,
+            # the problem is not the mask — let it raise.
+            import traceback
+            print("    !! masked orchestration generate failed — traceback:")
+            traceback.print_exc()
+            gen_kwargs.pop('allowed_tokens', None)
+            tokens = orchestration_model.generate(cond_t, scanner_t, **gen_kwargs)
+
     token_list = tokens[0].cpu().tolist()
-    # Keep only valid body region IDs
-    return [t for t in token_list
-            if 0 <= t < NUM_BODY_REGIONS and t not in (START_REGION_ID, END_REGION_ID)]
+    # Keep only allowed body region IDs (no-op when masked sampling was used)
+    allowed_regions = {t for t in allowed if 0 <= t < NUM_BODY_REGIONS}
+    return [t for t in token_list if t in allowed_regions]
 
 # COMMAND ----------
 
