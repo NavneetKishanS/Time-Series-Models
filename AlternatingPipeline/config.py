@@ -257,6 +257,16 @@ EXCHANGE_MODEL_CONFIG = {
     # inflated mean and over-predicts every exchange. 'log' makes the head
     # model log1p(duration), fitting the central tendency instead.
     'duration_mode': 'log',
+    # Per-feature divisors bringing the raw conditioning vector
+    # (Age, Weight, Height, PTAB, Direction, hour_sin, hour_cos,
+    #  dow_sin, dow_cos, is_morning) to O(1). Raw Age≈50/Weight≈75 blow up
+    # the pre-LayerNorm variance inside conditioning_projection, and the
+    # LayerNorm then crushes the O(0.5) categorical embeddings (body region,
+    # scan type, serial) to ~0.6% relative amplitude — measured: varying
+    # sequence_type moved the encoded conditioning memory by max 0.006 while
+    # activations are O(1), so conditioning was effectively erased.
+    'conditioning_scale': [100.0, 100.0, 2.0, 1.0, 1.0,
+                           1.0, 1.0, 1.0, 1.0, 1.0],
 }
 
 EXCHANGE_TRAINING_CONFIG = {
@@ -296,6 +306,13 @@ EXAMINATION_MODEL_CONFIG = {
     'use_exam_conditioning': True,
     'num_sequence_types': NUM_SEQUENCE_TYPES,
     'num_serials': NUM_SERIALS,
+    # Same O(1) rescale as the exchange model — see EXCHANGE_MODEL_CONFIG.
+    # Without it the scan-type/serial embeddings are LayerNorm-crushed and
+    # the duration head can only read sequence LENGTH, which the token
+    # decoder (also conditioning-blind) generates flat — the root cause of
+    # every flat-duration run through 2026-06-11.
+    'conditioning_scale': [100.0, 100.0, 2.0, 1.0, 1.0,
+                           1.0, 1.0, 1.0, 1.0, 1.0],
 }
 
 EXAMINATION_TRAINING_CONFIG = {

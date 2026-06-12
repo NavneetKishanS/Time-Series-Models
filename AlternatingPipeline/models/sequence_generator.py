@@ -98,6 +98,22 @@ class SequenceGeneratorModel(nn.Module):
             )
             cond_input_dim += phase_emb_dim
 
+        # Optional per-feature divisors bringing raw conditioning features to
+        # O(1) BEFORE they are concatenated with the categorical embeddings.
+        # Raw Age≈50/Weight≈75 dominate the pre-LayerNorm variance of
+        # conditioning_projection, and the LayerNorm then attenuates the
+        # O(0.5) embedding contributions (body region, scan type, serial) to
+        # ~0.6% relative amplitude — conditioning was effectively erased.
+        # Registered as a buffer so train and serve can never disagree.
+        cond_scale = config.get('conditioning_scale')
+        if cond_scale is not None:
+            self.register_buffer(
+                'conditioning_scale',
+                torch.tensor(cond_scale, dtype=torch.float32),
+            )
+        else:
+            self.conditioning_scale = None
+
         self.conditioning_projection = nn.Sequential(
             nn.Linear(cond_input_dim, self.d_model),
             nn.LayerNorm(self.d_model),
@@ -180,6 +196,8 @@ class SequenceGeneratorModel(nn.Module):
         Returns:
             memory: [batch, 1, d_model]
         """
+        if self.conditioning_scale is not None:
+            conditioning = conditioning / self.conditioning_scale
         parts = [conditioning]
 
         if self.body_region_mode == 'from_to':
@@ -257,7 +275,11 @@ class SequenceGeneratorModel(nn.Module):
         # identical unpadded sequence returns mu≈0 everywhere. The mask makes
         # both input styles equivalent. Position 0 (conditioning token) is
         # never masked.
-        pad_mask = (token_ids == PAD_TOKEN_ID)  # [batch, seq_len]
+        # END is masked for the same train/serve parity reason: training input
+        # is [START + tokens] and never contains END (it exists only in the
+        # shifted targets), but generate() passes the full generated sequence
+        # which ends with END — an embedding this encoder never trained on.
+        pad_mask = (token_ids == PAD_TOKEN_ID) | (token_ids == END_TOKEN_ID)  # [batch, seq_len]
         full_pad_mask = torch.cat(
             [torch.zeros(batch_size, 1, dtype=torch.bool, device=token_ids.device),
              pad_mask], dim=1
