@@ -460,13 +460,19 @@ def _generate_exchange_rows(tokens, durations, mu, sigma, day_start, t_offset,
     for i, tok in enumerate(tokens_list):
         if tok in (START_TOKEN_ID, END_TOKEN_ID, PAD_TOKEN_ID):
             continue
-        raw_dur = durations_list[i] if i < len(durations_list) else 0.0
+        # Duration of the token at generated index i is PREDICTED at index
+        # i-1: training aligns mu[j] with target_durations[j], and targets
+        # are the input shifted left by one (input [START, t0, ...] vs
+        # target [t0, ...]), so mu[j] models the duration of token t_j which
+        # sits at generated index j+1.
+        j = i - 1
+        raw_dur = durations_list[j] if 0 <= j < len(durations_list) else 0.0
         dur_sec = max(0.0, raw_dur) * EXCHANGE_DURATION_SCALE
         token_data.append({
             'tok':      tok,
             'raw_dur':  raw_dur,
-            'mu':       mu_list[i] if i < len(mu_list) else 0.0,
-            'sigma':    sigma_list[i] if i < len(sigma_list) else 0.0,
+            'mu':       mu_list[j] if 0 <= j < len(mu_list) else 0.0,
+            'sigma':    sigma_list[j] if 0 <= j < len(sigma_list) else 0.0,
             't':        t,
             'timediff': round(t - block_start, 2),
             'dt':       day_start + timedelta(seconds=t),
@@ -553,21 +559,27 @@ def _generate_exam_rows(tokens, durations, mu, sigma, day_start, t_offset,
         if tok in (START_TOKEN_ID, END_TOKEN_ID, PAD_TOKEN_ID):
             continue
 
-        raw_dur = durations_list[i] if i < len(durations_list) else 0.0
-        dur     = max(0.0, raw_dur) * EXAMINATION_DURATION_SCALE
-
         if tok == MSR_100:
             msr_start   = day_start + timedelta(seconds=t)
             msr_start_t = t
 
         elif tok in FINISH_MAP and msr_start is not None:
-            msr_end      = day_start + timedelta(seconds=t + dur)
-            duration_sec = (msr_end - msr_start).total_seconds()
+            # The span TOTAL is trained at the position BEFORE the finish
+            # token: training aligns mu[j] with target_durations[j], and the
+            # finish token at input position n carries its total at target
+            # index n-1. The duration head is supervised ONLY there — every
+            # other position is unconstrained, so the span duration must be
+            # read from this single index, never summed across the span.
+            j = i - 1
+            raw_span = durations_list[j] if 0 <= j < len(durations_list) else 0.0
+            duration_sec = max(0.0, raw_span) * EXAMINATION_DURATION_SCALE
 
             if duration_sec <= 0 or duration_sec > 4000:
                 msr_start = None
-                t += dur
                 continue
+
+            msr_end = msr_start + timedelta(seconds=duration_sec)
+            t       = msr_start_t + duration_sec
 
             step_counter[patient_id] = step_counter.get(patient_id, 0) + 1
 
@@ -599,9 +611,9 @@ def _generate_exam_rows(tokens, durations, mu, sigma, day_start, t_offset,
                 'Weight':         weight,
                 'Height':         height,
                 'Direction':      direction,
-                'predicted_mu':   mu_list[i] if i < len(mu_list) else 0.0,
-                'predicted_sigma': sigma_list[i] if i < len(sigma_list) else 0.0,
-                'sampled_duration': duration_sec / EXAMINATION_DURATION_SCALE,
+                'predicted_mu':   mu_list[j] if 0 <= j < len(mu_list) else 0.0,
+                'predicted_sigma': sigma_list[j] if 0 <= j < len(sigma_list) else 0.0,
+                'sampled_duration': raw_span,
             }
             # Exam coil binary columns — default False
             for c in _EXAM_COIL_COLS:
@@ -609,8 +621,6 @@ def _generate_exam_rows(tokens, durations, mu, sigma, day_start, t_offset,
 
             rows.append(row)
             msr_start = None
-
-        t += dur
 
     return rows, t
 
