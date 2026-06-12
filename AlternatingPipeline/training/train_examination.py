@@ -374,9 +374,17 @@ def train_examination_model(data_path=None, config=None, training_config=None,
                 label_smoothing=training_config['label_smoothing'],
             )
 
+            # Supervise the duration head ONLY at positions carrying a span
+            # total (target > 0). The span-total encoding zero-fills ~90% of
+            # positions; averaging the NLL over them let the optimizer park
+            # mu≈0 everywhere and hedge sigma on the finish token — the 06-11
+            # run hit dur_loss≈-1.9 that way, exactly the all-zeros optimum,
+            # and generated durations collapsed to ~7 s flat. Masking the
+            # zeros puts 100% of the duration gradient on the signal.
             pad_mask = (target_seq == PAD_TOKEN_ID)
+            dur_mask = pad_mask | (target_durations <= 0)
             duration_loss = model.compute_duration_loss(
-                duration_mu, duration_sigma, target_durations, ignore_mask=pad_mask
+                duration_mu, duration_sigma, target_durations, ignore_mask=dur_mask
             )
 
             duration_weight = training_config.get('duration_loss_weight', 0.3)
@@ -416,8 +424,9 @@ def train_examination_model(data_path=None, config=None, training_config=None,
                 )
                 token_loss = model.compute_loss(logits, target_seq)
                 pad_mask = (target_seq == PAD_TOKEN_ID)
+                dur_mask = pad_mask | (target_durations <= 0)
                 dur_loss = model.compute_duration_loss(
-                    duration_mu, duration_sigma, target_durations, ignore_mask=pad_mask
+                    duration_mu, duration_sigma, target_durations, ignore_mask=dur_mask
                 )
                 duration_weight = training_config.get('duration_loss_weight', 0.3)
                 loss = token_loss + duration_weight * dur_loss
@@ -454,6 +463,59 @@ def train_examination_model(data_path=None, config=None, training_config=None,
 
     with open(os.path.join(save_dir, 'training_history.pkl'), 'wb') as f:
         pickle.dump(history, f)
+
+    # ---- Post-train UNPADDED duration probe (go/no-go canary) ----------------
+    # Step 05 queries estimate_durations with short unpadded sequences and
+    # reads the span total at index len(tokens)-1; every duration collapse so
+    # far was invisible at train time because the losses only ever see padded
+    # batches. This probe asks the BEST checkpoint (the one step 05 loads)
+    # the exact same question on real val sequences and prints predicted vs
+    # target seconds per scan type. If the spread line below is flat, do NOT
+    # spend a generate+eval cycle on this checkpoint.
+    best_path = os.path.join(save_dir, 'examination_model_best.pt')
+    if os.path.exists(best_path):
+        model.load_state_dict(torch.load(best_path, map_location=device))
+    model.eval()
+    if verbose and val_sequences:
+        from collections import defaultdict
+        from config import ID_TO_SEQUENCE_TYPE
+        _probe_by_type = defaultdict(list)
+        for _s in val_sequences:
+            _probe_by_type[int(_s.get('sequence_type', 0))].append(_s)
+        print("\nPost-train duration probe (unpadded input, best checkpoint):")
+        _preds = {}
+        with torch.no_grad():
+            for _st, _seqs in sorted(_probe_by_type.items()):
+                _p, _t = [], []
+                for _s in _seqs[:25]:
+                    _tokens = _s['sequence'][:model.max_seq_len - 1]
+                    if not _tokens:
+                        continue
+                    _inp = torch.tensor([[START_TOKEN_ID] + _tokens],
+                                        dtype=torch.long, device=device)
+                    _cond = build_conditioning_tensor(_s['conditioning']).unsqueeze(0).to(device)
+                    _info = {'body_region': torch.tensor([_s['body_region']], device=device),
+                             'sequence_type': torch.tensor([_st], device=device),
+                             'serial_idx': torch.tensor([int(_s.get('serial_idx', 0))], device=device)}
+                    _mu, _ = model.estimate_durations(_inp, _cond, _info)
+                    _m = _mu[0, len(_tokens) - 1].item()
+                    _pred_sec = (math.expm1(_m) if model.duration_mode == 'log' else _m) * duration_scale
+                    _p.append(_pred_sec)
+                    _t.append(sum(max(0.0, d) for d in _s.get('durations', [])))
+                if _p:
+                    _preds[_st] = sum(_p) / len(_p)
+                    _name = ID_TO_SEQUENCE_TYPE.get(_st, str(_st))
+                    print(f"    {_name:<8} n={len(_p):>3}  predicted={_preds[_st]:>7.1f}s"
+                          f"  target={sum(_t)/len(_t):>7.1f}s")
+        if len(_preds) >= 2:
+            _lo, _hi = min(_preds.values()), max(_preds.values())
+            _spread = _hi / max(1e-9, _lo)
+            print(f"  Probe spread: {_spread:.1f}x  [{_lo:.0f}s .. {_hi:.0f}s]")
+            if _spread < 3.0 or _hi < 30.0:
+                print("  !! WARNING: duration head is NOT separating scan types on "
+                      "unpadded input — this checkpoint will reproduce flat synthetic "
+                      "durations. Stop and investigate before running step 05.")
+    # --------------------------------------------------------------------------
 
     if verbose:
         print(f"\nTraining complete. Models saved to {save_dir}")
