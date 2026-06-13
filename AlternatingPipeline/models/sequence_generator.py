@@ -98,21 +98,27 @@ class SequenceGeneratorModel(nn.Module):
             )
             cond_input_dim += phase_emb_dim
 
-        # Optional per-feature divisors bringing raw conditioning features to
-        # O(1) BEFORE they are concatenated with the categorical embeddings.
-        # Raw Age≈50/Weight≈75 dominate the pre-LayerNorm variance of
+        # Per-feature divisors bringing raw conditioning features to O(1)
+        # BEFORE they are concatenated with the categorical embeddings. Raw
+        # Age≈50/Weight≈75 dominate the pre-LayerNorm variance of
         # conditioning_projection, and the LayerNorm then attenuates the
         # O(0.5) embedding contributions (body region, scan type, serial) to
         # ~0.6% relative amplitude — conditioning was effectively erased.
-        # Registered as a buffer so train and serve can never disagree.
+        #
+        # ALWAYS registered as a persistent buffer (default = identity ones
+        # when a config omits 'conditioning_scale'). The trained values then
+        # travel INSIDE the checkpoint, so a serve-side model built from a
+        # stale config still receives them via load_state_dict — the buffer
+        # slot always exists. Registering it only conditionally caused step 05
+        # to fail with "Unexpected key conditioning_scale" whenever its config
+        # was a step behind the trained checkpoint.
         cond_scale = config.get('conditioning_scale')
-        if cond_scale is not None:
-            self.register_buffer(
-                'conditioning_scale',
-                torch.tensor(cond_scale, dtype=torch.float32),
-            )
-        else:
-            self.conditioning_scale = None
+        if cond_scale is None:
+            cond_scale = [1.0] * base_conditioning_dim
+        self.register_buffer(
+            'conditioning_scale',
+            torch.tensor(cond_scale, dtype=torch.float32),
+        )
 
         self.conditioning_projection = nn.Sequential(
             nn.Linear(cond_input_dim, self.d_model),
@@ -196,8 +202,9 @@ class SequenceGeneratorModel(nn.Module):
         Returns:
             memory: [batch, 1, d_model]
         """
-        if self.conditioning_scale is not None:
-            conditioning = conditioning / self.conditioning_scale
+        # Always a registered buffer (identity ones when unconfigured), so the
+        # division is a no-op for models without a configured scale.
+        conditioning = conditioning / self.conditioning_scale
         parts = [conditioning]
 
         if self.body_region_mode == 'from_to':
