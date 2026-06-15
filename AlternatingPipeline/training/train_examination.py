@@ -6,6 +6,7 @@ Trains the model to generate MRI event sequences for specific body regions.
 import math
 import os
 import sys
+import json
 import torch
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
@@ -476,14 +477,20 @@ def train_examination_model(data_path=None, config=None, training_config=None,
     if os.path.exists(best_path):
         model.load_state_dict(torch.load(best_path, map_location=device))
     model.eval()
-    if verbose and val_sequences:
+    # The probe ALWAYS runs (not gated on verbose) and writes its result to a
+    # small JSON next to the checkpoint on DBFS. Databricks drops cell output
+    # for very long (~24h) runs, so the printed table can be lost on refresh —
+    # duration_probe.json survives exactly like MODEL_MANIFEST.json and is the
+    # decisive go/no-go a human (or the next session) can read after the fact.
+    probe_rows = []
+    if val_sequences:
         from collections import defaultdict
         from config import ID_TO_SEQUENCE_TYPE
         _probe_by_type = defaultdict(list)
         for _s in val_sequences:
             _probe_by_type[int(_s.get('sequence_type', 0))].append(_s)
-        print("\nPost-train duration probe (unpadded input, best checkpoint):")
-        _preds = {}
+        if verbose:
+            print("\nPost-train duration probe (unpadded input, best checkpoint):")
         with torch.no_grad():
             for _st, _seqs in sorted(_probe_by_type.items()):
                 _p, _t = [], []
@@ -503,18 +510,40 @@ def train_examination_model(data_path=None, config=None, training_config=None,
                     _p.append(_pred_sec)
                     _t.append(sum(max(0.0, d) for d in _s.get('durations', [])))
                 if _p:
-                    _preds[_st] = sum(_p) / len(_p)
                     _name = ID_TO_SEQUENCE_TYPE.get(_st, str(_st))
-                    print(f"    {_name:<8} n={len(_p):>3}  predicted={_preds[_st]:>7.1f}s"
-                          f"  target={sum(_t)/len(_t):>7.1f}s")
-        if len(_preds) >= 2:
-            _lo, _hi = min(_preds.values()), max(_preds.values())
-            _spread = _hi / max(1e-9, _lo)
+                    probe_rows.append({
+                        'sequence_type': _name,
+                        'n': len(_p),
+                        'predicted_s': round(sum(_p) / len(_p), 2),
+                        'target_s': round(sum(_t) / len(_t), 2),
+                    })
+                    if verbose:
+                        print(f"    {_name:<8} n={len(_p):>3}  "
+                              f"predicted={probe_rows[-1]['predicted_s']:>7.1f}s"
+                              f"  target={probe_rows[-1]['target_s']:>7.1f}s")
+
+    probe = {'rows': probe_rows}
+    if len(probe_rows) >= 2:
+        _vals = [r['predicted_s'] for r in probe_rows]
+        _lo, _hi = min(_vals), max(_vals)
+        _spread = _hi / max(1e-9, _lo)
+        _flat = _spread < 3.0 or _hi < 30.0
+        probe.update({'predicted_lo_s': _lo, 'predicted_hi_s': _hi,
+                      'spread_x': round(_spread, 2), 'flat_warning': _flat})
+        if verbose:
             print(f"  Probe spread: {_spread:.1f}x  [{_lo:.0f}s .. {_hi:.0f}s]")
-            if _spread < 3.0 or _hi < 30.0:
+            if _flat:
                 print("  !! WARNING: duration head is NOT separating scan types on "
                       "unpadded input — this checkpoint will reproduce flat synthetic "
                       "durations. Stop and investigate before running step 05.")
+    try:
+        with open(os.path.join(save_dir, 'duration_probe.json'), 'w') as _pf:
+            json.dump(probe, _pf, indent=2)
+        if verbose:
+            print(f"  Wrote duration probe → {os.path.join(save_dir, 'duration_probe.json')}")
+    except Exception as _e:  # never let an artifact-write failure kill a 24h train
+        if verbose:
+            print(f"  (could not write duration_probe.json: {_e})")
     # --------------------------------------------------------------------------
 
     if verbose:

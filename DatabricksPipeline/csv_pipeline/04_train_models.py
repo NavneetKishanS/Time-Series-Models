@@ -91,6 +91,54 @@ print(f"Models dir: {MODELS_DIR}")
 # COMMAND ----------
 
 # =============================================================================
+# PERSISTENT RUN LOG  — tee everything to DBFS so a ~24h run is recoverable
+# -----------------------------------------------------------------------------
+# Databricks drops cell output for very long runs; on refresh the streamed
+# training log (pre-flight shas, per-epoch losses, the duration-spread guard,
+# and the post-train probe table) is gone. Tee stdout+stderr to a file on
+# DBFS from here on. The file is written line-buffered and flushed on every
+# write, so even a killed/timed-out run leaves a readable partial log.
+# tqdm progress-bar redraws (\r without \n) are skipped so the file stays
+# small and readable; the final 100% line (ends in \n) is kept.
+# =============================================================================
+import sys, time
+_LOG_DIR  = "/dbfs/FileStore/csv_pipeline/logs"
+os.makedirs(_LOG_DIR, exist_ok=True)
+_LOG_NAME = f"train_04_{time.strftime('%Y%m%d_%H%M%S')}.log"
+_LOG_PATH = f"{_LOG_DIR}/{_LOG_NAME}"
+
+class _Tee:
+    def __init__(self, path, stream):
+        self._f = open(path, "a", buffering=1)
+        self._stream = stream
+    def write(self, s):
+        self._stream.write(s)
+        if s and not ("\r" in s and "\n" not in s):   # skip tqdm redraws
+            self._f.write(s)
+            self._f.flush()
+        return len(s)
+    def flush(self):
+        self._stream.flush()
+        self._f.flush()
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+if not isinstance(sys.stdout, _Tee):
+    sys.stdout = _Tee(_LOG_PATH, sys.__stdout__)
+    sys.stderr = _Tee(_LOG_PATH, sys.__stderr__)
+
+try:
+    _WS = spark.conf.get("spark.databricks.workspaceUrl")
+    _URL = f"https://{_WS}/files/csv_pipeline/logs/{_LOG_NAME}"
+    displayHTML(f'<p><b>Run log (survives refresh):</b> '
+                f'<a href="{_URL}" target="_blank">{_LOG_NAME}</a></p>')
+except Exception:
+    _URL = None
+print(f"[run-log] teeing all output to {_LOG_PATH}")
+
+# COMMAND ----------
+
+# =============================================================================
 # Verify GPU
 # =============================================================================
 
@@ -337,7 +385,47 @@ print(json.dumps(_manifest, indent=2))
 
 # COMMAND ----------
 
-  import os, time                                                                                                                      
+# =============================================================================
+# RECOVERABLE ARTIFACTS  — clickable links + inline echo of the key results
+# -----------------------------------------------------------------------------
+# Everything below is read back FROM DBFS, so it is exactly what survives a
+# notebook refresh. Click the links to download, or just read the echoed
+# probe table / manifest below. Share the duration_probe.json + the run log
+# if the printed output was lost.
+# =============================================================================
+_PROBE_PATH = f"{MODELS_DIR}/examination/duration_probe.json"
+_artifacts = {
+    "run log":         (_LOG_PATH,      f"csv_pipeline/logs/{_LOG_NAME}"),
+    "model manifest":  (_manifest_path, "csv_pipeline/models/MODEL_MANIFEST.json"),
+    "duration probe":  (_PROBE_PATH,    "csv_pipeline/models/examination/duration_probe.json"),
+}
+try:
+    _WS = spark.conf.get("spark.databricks.workspaceUrl")
+    _links = "".join(
+        f'<li><b>{label}:</b> <a href="https://{_WS}/files/{rel}" target="_blank">{os.path.basename(path)}</a></li>'
+        for label, (path, rel) in _artifacts.items() if os.path.exists(path)
+    )
+    displayHTML(f"<h3>Recoverable artifacts (survive refresh)</h3><ul>{_links}</ul>")
+except Exception as _e:
+    print(f"(could not render artifact links: {_e})")
+
+# Echo the decisive duration probe inline so it is in this cell's output too
+if os.path.exists(_PROBE_PATH):
+    with open(_PROBE_PATH) as _pf:
+        _probe = json.load(_pf)
+    print("\n=== DURATION PROBE (the go/no-go gate) ===")
+    for _r in _probe.get("rows", []):
+        print(f"  {_r['sequence_type']:<8} n={_r['n']:>3}  "
+              f"predicted={_r['predicted_s']:>7.1f}s  target={_r['target_s']:>7.1f}s")
+    if "spread_x" in _probe:
+        print(f"  spread {_probe['spread_x']}x  "
+              f"[{_probe['predicted_lo_s']:.0f}s .. {_probe['predicted_hi_s']:.0f}s]  "
+              f"flat_warning={_probe.get('flat_warning')}")
+    print(f"\nPaste {os.path.basename(_PROBE_PATH)} (or the run log) into the chat if the streamed output was lost.")
+
+# COMMAND ----------
+
+  import os, time
                                                                                                                                                                            
   ckpt_dir = "/dbfs/FileStore/csv_pipeline/models/exchange"                                                                                                                
   print("exists:", os.path.isdir(ckpt_dir))                                                                                                                                
