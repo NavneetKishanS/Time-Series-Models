@@ -469,7 +469,8 @@ def extract_examination_events(df, verbose=False):
 
         # Drop segments whose total span is implausibly long — missed
         # change-points (multi-day / cross-patient) that bias training.
-        if total_duration > 4000.0:
+        # Mirrors MAX_EXAMINATION_DURATION (3000 s) in csv_pipeline/config.py.
+        if total_duration > 3000.0:
             continue
         # Drop trivially-short segments (localizers, calibration pings) —
         # ~66% of raw segments fall under 10 s on production data and pull

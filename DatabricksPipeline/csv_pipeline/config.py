@@ -172,9 +172,11 @@ MAX_EXCHANGE_DURATION = 7200
 # Maximum total examination (MSR_100 → MSR_104) duration in seconds. Above
 # this, the segment is almost certainly a missed change-point boundary
 # (multi-day or cross-patient span) and would feed an outlier per-token
-# duration into the Gaussian NLL training loss. Matches the 4000 s sanity
-# filter that 05_generate_synthetic_data.py applies to its own output rows.
-MAX_EXAMINATION_DURATION = 4000
+# duration into the Gaussian NLL training loss, so it is dropped in step 03
+# and never reaches the preprocessed pkl or training. NOTE: this is the
+# training-inclusion cap; 05_generate_synthetic_data.py applies its own
+# separate sanity filter to generated output rows.
+MAX_EXAMINATION_DURATION = 3000
 
 # Minimum total examination duration in seconds. Below this, the segment is
 # almost always a localizer / aborted measurement / calibration ping, not a
