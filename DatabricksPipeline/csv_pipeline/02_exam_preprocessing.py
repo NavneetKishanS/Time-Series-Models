@@ -18,6 +18,7 @@
 
 import re
 import os
+import time
 import numpy as np
 import pandas as pd
 from pyspark.sql import functions as F
@@ -26,6 +27,14 @@ import logging
 logger = logging.getLogger("csv_pipeline.exam")
 os.makedirs(EXAM_OUTPUT_DIR, exist_ok=True)
 print(f"Output directory: {EXAM_OUTPUT_DIR}")
+
+# ---- Lightweight section timing (see step 03 header for rationale) ----
+_TIMINGS = []
+def _timeit(label, t0):
+    dt = time.perf_counter() - t0
+    _TIMINGS.append((label, dt))
+    print(f"[timing] step02  {label:<20} {dt:9.1f}s")
+    return time.perf_counter()
 
 # COMMAND ----------
 # =============================================================================
@@ -359,6 +368,7 @@ print(f"Body mapping rows: {len(df_bp)}")
 # CELL: Per-serial processing loop
 # =============================================================================
 
+_t = time.perf_counter()
 for serial_number in SERIAL_NUMBERS:
     print(f"\n{'='*60}")
     print(f"Processing serial: {serial_number}")
@@ -567,3 +577,11 @@ for serial_number in SERIAL_NUMBERS:
     print(f"  Saved {len(df):,} rows → {csv_path}")
 
 print("\nExam preprocessing complete.")
+_timeit('per-serial loop', _t)
+
+print("\n" + "-"*60)
+print("  TIMING BREAKDOWN")
+print("-"*60)
+for _label, _dt in _TIMINGS:
+    print(f"[timing] step02  {_label:<20} {_dt:9.1f}s")
+print(f"[timing] step02  {'TOTAL':<20} {sum(d for _, d in _TIMINGS):9.1f}s")

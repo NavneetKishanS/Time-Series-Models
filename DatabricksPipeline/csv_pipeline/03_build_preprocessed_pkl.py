@@ -15,6 +15,12 @@
 # Output:
 #   /dbfs/FileStore/csv_pipeline/preprocessed_data.pkl
 #
+# Runtime (10 serials / 1-month window, post-29c30a6 bisect fix): minutes to a
+# couple of hours. Each section prints a "[timing] step03 ..." line. If
+# "exam extraction" is in hours, the bisect fix did not execute (stale Repos
+# clone or warm kernel) — re-sync to 29c30a6+ and dbutils.library.restartPython().
+# The pre-fix O(starts x events) scan took ~19h.
+#
 # After running, download the pkl and point the AlternatingPipeline training
 # scripts at it.
 
@@ -32,6 +38,7 @@ import os
 import re
 import bisect
 import pickle
+import time
 import numpy as np
 import pandas as pd
 from glob import glob
@@ -40,6 +47,18 @@ from pyspark.sql import functions as F
 
 PKL_OUTPUT = "/dbfs/FileStore/csv_pipeline/preprocessed_data.pkl"
 os.makedirs("/dbfs/FileStore/csv_pipeline", exist_ok=True)
+
+# ---- Lightweight section timing -------------------------------------------
+# Turns "preprocessing took 19h" into a per-section breakdown so a future
+# regression (or a stale-code run that skips the bisect fix) is obvious at a
+# glance. The old O(starts x events) examination scan lived in the
+# "exam extraction" section below — that line is the canary.
+_TIMINGS = []
+def _timeit(label, t0):
+    dt = time.perf_counter() - t0
+    _TIMINGS.append((label, dt))
+    print(f"[timing] step03  {label:<20} {dt:9.1f}s")
+    return time.perf_counter()
 
 # AlternatingPipeline body region mapping (same values as parent config)
 _BODY_REGIONS = ['HEAD', 'NECK', 'CHEST', 'ABDOMEN', 'PELVIS',
@@ -125,6 +144,7 @@ print("\n" + "="*60)
 print("SECTION 1: Exchange sequences from CSVs")
 print("="*60)
 
+_t = time.perf_counter()
 exchange_sequences = []
 
 for serial in SERIAL_NUMBERS:
@@ -233,6 +253,7 @@ for serial in SERIAL_NUMBERS:
     print(f"  {serial}: {n_added} exchange sequences")
 
 print(f"\nTotal exchange sequences: {len(exchange_sequences)}")
+_timeit('section1 exchange', _t)
 
 # COMMAND ----------
 
@@ -266,6 +287,7 @@ body_part_to_group = {
 print(f"Body mapping: {len(body_part_to_group)} entries")
 
 # ---- 2b. Query eventlog ----
+_t = time.perf_counter()
 df_eventlog_spark = (
     spark.table(EVENTLOG_TABLE)
     .filter(F.col("SerialNumber").isin([int(s) for s in SERIAL_NUMBERS]))
@@ -286,6 +308,7 @@ df_eventlog_spark = (
 )
 print(f"Eventlog rows: {df_eventlog_spark.count():,}")
 df_eventlog_pd = df_eventlog_spark.toPandas()
+_t = _timeit('eventlog.toPandas', _t)
 
 # ---- 2c. Query examination_workflow ----
 df_exams_spark = (
@@ -314,6 +337,7 @@ df_exams_spark = (
     .orderBy("SerialNumber", "WorkflowStartRefDateTime")
 )
 df_exams_pd = df_exams_spark.toPandas()
+_t = _timeit('exam.toPandas', _t)
 
 for col in ['Age', 'Weight', 'Height']:
     df_exams_pd[col] = pd.to_numeric(df_exams_pd[col], errors='coerce').fillna(0.0)
@@ -414,6 +438,7 @@ def _add_ptab(df):
 
 # ---- 2e. Per-serial extraction loop ----
 
+_t = time.perf_counter()
 examination_sequences = []
 
 for serial in SERIAL_NUMBERS:
@@ -561,6 +586,7 @@ for serial in SERIAL_NUMBERS:
     print(f"  → {len(examination_sequences) - n_before} examination sequences")
 
 print(f"\nTotal examination sequences: {len(examination_sequences)}")
+_timeit('exam extraction', _t)
 
 # COMMAND ----------
 
@@ -572,6 +598,7 @@ print("\n" + "="*60)
 print("SECTION 3: customer_schedules from exam CSVs")
 print("="*60)
 
+_t = time.perf_counter()
 customer_schedules = {}
 
 for serial in SERIAL_NUMBERS:
@@ -632,6 +659,7 @@ for serial in SERIAL_NUMBERS:
     print(f"  {cid}: {n_days} days, {n_pats} patients")
 
 print(f"\nCustomer schedules: {len(customer_schedules)} scanners")
+_timeit('customer_schedules', _t)
 
 # COMMAND ----------
 
@@ -643,6 +671,7 @@ print("\n" + "="*60)
 print("SECTION 4: daily_summaries from exchange CSVs")
 print("="*60)
 
+_t = time.perf_counter()
 daily_summaries = []
 
 for serial in SERIAL_NUMBERS:
@@ -683,6 +712,7 @@ for serial in SERIAL_NUMBERS:
 
 daily_summaries.sort(key=lambda x: x['date'])
 print(f"Daily summary entries: {len(daily_summaries)}")
+_timeit('daily_summaries', _t)
 
 # COMMAND ----------
 
@@ -702,11 +732,13 @@ preprocessed_data = {
     'customer_schedules': customer_schedules,
 }
 
+_t = time.perf_counter()
 with open(PKL_OUTPUT, 'wb') as f:
     pickle.dump(preprocessed_data, f)
 
 size_mb = os.path.getsize(PKL_OUTPUT) / (1024 * 1024)
 print(f"Saved → {PKL_OUTPUT}  ({size_mb:.1f} MB)")
+_timeit('pickle write', _t)
 
 # COMMAND ----------
 
@@ -721,6 +753,13 @@ print(f"  Exchange sequences:    {len(exchange_sequences):,}")
 print(f"  Examination sequences: {len(examination_sequences):,}")
 print(f"  Daily summaries:       {len(daily_summaries):,}")
 print(f"  Customers:             {len(customer_schedules)}")
+
+print("\n" + "-"*60)
+print("  TIMING BREAKDOWN")
+print("-"*60)
+for _label, _dt in _TIMINGS:
+    print(f"[timing] step03  {_label:<20} {_dt:9.1f}s")
+print(f"[timing] step03  {'TOTAL':<20} {sum(d for _, d in _TIMINGS):9.1f}s")
 
 if exchange_sequences:
     phase_counts = {}

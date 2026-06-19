@@ -17,6 +17,7 @@
 
 import re
 import os
+import time
 import numpy as np
 import pandas as pd
 from pyspark.sql import functions as F
@@ -25,6 +26,14 @@ from pyspark.sql.types import StructType, StructField, StringType
 
 os.makedirs(EXCHANGE_OUTPUT_DIR, exist_ok=True)
 print(f"Output directory: {EXCHANGE_OUTPUT_DIR}")
+
+# ---- Lightweight section timing (see step 03 header for rationale) ----
+_TIMINGS = []
+def _timeit(label, t0):
+    dt = time.perf_counter() - t0
+    _TIMINGS.append((label, dt))
+    print(f"[timing] step01  {label:<20} {dt:9.1f}s")
+    return time.perf_counter()
 
 # COMMAND ----------
 # =============================================================================
@@ -316,9 +325,11 @@ eventlog_spark = (
     .orderBy(F.col("datetime").asc())
 )
 
+_t = time.perf_counter()
 print(f"Eventlog row count: {eventlog_spark.count():,}")
 eventlog_pd = eventlog_spark.toPandas()
 print("Converted to pandas.")
+_t = _timeit('eventlog.toPandas', _t)
 
 # COMMAND ----------
 # =============================================================================
@@ -520,3 +531,11 @@ for serial_number in SERIAL_NUMBERS:
     print(f"  Saved {len(df_out):,} rows → {csv_path}")
 
 print("\nExchange preprocessing complete.")
+_timeit('per-serial loop', _t)
+
+print("\n" + "-"*60)
+print("  TIMING BREAKDOWN")
+print("-"*60)
+for _label, _dt in _TIMINGS:
+    print(f"[timing] step01  {_label:<20} {_dt:9.1f}s")
+print(f"[timing] step01  {'TOTAL':<20} {sum(d for _, d in _TIMINGS):9.1f}s")
