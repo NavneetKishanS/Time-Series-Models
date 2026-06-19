@@ -253,7 +253,7 @@ for serial in SERIAL_NUMBERS:
     print(f"  {serial}: {n_added} exchange sequences")
 
 print(f"\nTotal exchange sequences: {len(exchange_sequences)}")
-_timeit('section1 exchange', _t)
+_t = _timeit('section1 exchange', _t)
 
 # COMMAND ----------
 
@@ -586,7 +586,7 @@ for serial in SERIAL_NUMBERS:
     print(f"  → {len(examination_sequences) - n_before} examination sequences")
 
 print(f"\nTotal examination sequences: {len(examination_sequences)}")
-_timeit('exam extraction', _t)
+_t = _timeit('exam extraction', _t)
 
 # COMMAND ----------
 
@@ -659,7 +659,7 @@ for serial in SERIAL_NUMBERS:
     print(f"  {cid}: {n_days} days, {n_pats} patients")
 
 print(f"\nCustomer schedules: {len(customer_schedules)} scanners")
-_timeit('customer_schedules', _t)
+_t = _timeit('customer_schedules', _t)
 
 # COMMAND ----------
 
@@ -712,7 +712,7 @@ for serial in SERIAL_NUMBERS:
 
 daily_summaries.sort(key=lambda x: x['date'])
 print(f"Daily summary entries: {len(daily_summaries)}")
-_timeit('daily_summaries', _t)
+_t = _timeit('daily_summaries', _t)
 
 # COMMAND ----------
 
@@ -738,7 +738,7 @@ with open(PKL_OUTPUT, 'wb') as f:
 
 size_mb = os.path.getsize(PKL_OUTPUT) / (1024 * 1024)
 print(f"Saved → {PKL_OUTPUT}  ({size_mb:.1f} MB)")
-_timeit('pickle write', _t)
+_t = _timeit('pickle write', _t)
 
 # COMMAND ----------
 
