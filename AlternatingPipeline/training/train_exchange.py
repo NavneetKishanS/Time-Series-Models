@@ -23,7 +23,7 @@ from config import (
 )
 from models.exchange_model import create_exchange_model
 from data.preprocessing import load_preprocessed_data
-from training.utils import temporal_split, build_conditioning_tensor
+from training.utils import temporal_split, build_conditioning_tensor, make_pad_collate
 
 # Maximum exchange duration cap (2 hours) to filter overnight gaps
 MAX_EXCHANGE_DURATION = 7200
@@ -168,17 +168,25 @@ def train_exchange_model(data_path=None, config=None, training_config=None,
     if verbose:
         print(f"Train dataset: {len(train_dataset)}, Val dataset: {len(val_dataset)}")
 
+    # Trim each batch to its longest real sequence — the tuple layout is
+    # (conditioning, body_from, body_to, phase_type, input_seq, target_seq,
+    # durations); positions 4/5/6 are the per-token fields, measured off the
+    # PAD-terminated input_seq at position 4. See make_pad_collate.
+    collate = make_pad_collate(seq_indices=(4, 5, 6), length_index=4,
+                               pad_token_id=PAD_TOKEN_ID)
     train_loader = DataLoader(
         train_dataset,
         batch_size=training_config['batch_size'],
         shuffle=True,
-        num_workers=0
+        num_workers=0,
+        collate_fn=collate,
     )
     val_loader = DataLoader(
         val_dataset,
         batch_size=training_config['batch_size'],
         shuffle=False,
-        num_workers=0
+        num_workers=0,
+        collate_fn=collate,
     )
 
     # Create model

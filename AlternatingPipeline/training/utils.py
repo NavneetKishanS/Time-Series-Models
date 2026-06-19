@@ -1,9 +1,61 @@
 """
 Shared training utilities for exchange and examination models.
 """
+import functools
+
 import numpy as np
 import torch
 from datetime import timedelta
+
+
+def dynamic_pad_collate(batch, seq_indices, length_index, pad_token_id):
+    """Collate that trims a batch down to its longest real (non-pad) sequence.
+
+    The datasets pre-pad every sequence to the global MAX_SEQ_LEN (128 for the
+    exchange/examination models). The transformer's self-attention is O(L^2),
+    so on a CPU cluster (no GPU available — see step 04) padding a ~15-token
+    scan out to 128 burns ~70x the attention FLOPs it needs. This collate
+    stacks the batch normally, then slices every per-token field
+    (those at `seq_indices`) down to the longest *non-pad* sequence IN THE
+    BATCH.
+
+    The model derives its causal mask, key-padding mask and positional encoding
+    from the input length at runtime, so a batch trimmed to length L is
+    mathematically identical to the same batch padded to 128 — the trailing
+    columns are pure PAD that the masks already zero out. This is a free
+    speedup, not an approximation.
+
+    Args:
+        batch: list of sample tuples from a Dataset.
+        seq_indices: iterable of tuple positions holding per-token tensors
+            shaped [max_seq_len] (input_seq / target_seq / durations).
+        length_index: position of the token tensor used to measure real length
+            (an input/target sequence padded with `pad_token_id`).
+        pad_token_id: id used for padding in the `length_index` field.
+    """
+    fields = list(zip(*batch))  # transpose: one tuple per column
+    length_field = torch.stack(fields[length_index])  # [B, max_seq_len]
+    keep_len = int((length_field != pad_token_id).sum(dim=1).max().item())
+    keep_len = max(1, keep_len)
+
+    seq_indices = set(seq_indices)
+    out = []
+    for i, col in enumerate(fields):
+        stacked = torch.stack(col)
+        if i in seq_indices:
+            stacked = stacked[:, :keep_len]
+        out.append(stacked)
+    return tuple(out)
+
+
+def make_pad_collate(seq_indices, length_index, pad_token_id):
+    """Build a picklable dynamic-padding collate_fn (see dynamic_pad_collate)."""
+    return functools.partial(
+        dynamic_pad_collate,
+        seq_indices=tuple(seq_indices),
+        length_index=length_index,
+        pad_token_id=pad_token_id,
+    )
 
 
 def temporal_split(sequences, val_days=2):

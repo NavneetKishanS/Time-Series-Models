@@ -147,6 +147,29 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Device: {device}")
 if torch.cuda.is_available():
     print(f"GPU: {torch.cuda.get_device_name(0)}")
+else:
+    # LOUD CPU warning. This notebook is designed for a GPU cluster; on CPU the
+    # transformer training is ~10-50x slower and a full 3-model run takes DAYS
+    # (the 2026-06 run took ~4 days on CPU). If you did not intend CPU, stop now
+    # and re-attach a GPU cluster (ML Runtime + GPU) — that alone is the single
+    # biggest speedup available, far larger than any code change.
+    print("\n" + "!" * 70)
+    print("!! WARNING: NO GPU DETECTED — training will run on CPU.")
+    print("!! This notebook expects a GPU cluster. On CPU a full 3-model run")
+    print("!! takes DAYS (the 2026-06 run took ~4 days). Re-attach a GPU cluster")
+    print("!! (Databricks ML Runtime + GPU) unless you deliberately want CPU.")
+    print("!! The dynamic-padding collate (utils.make_pad_collate) still cuts")
+    print("!! CPU time substantially, but cannot match a GPU.")
+    print("!" * 70 + "\n")
+    try:
+        displayHTML(
+            "<div style='padding:12px;border:2px solid #c00;background:#fee;"
+            "color:#900;font-weight:bold'>NO GPU DETECTED — training on CPU. "
+            "A full run takes days. Re-attach a GPU cluster unless CPU is "
+            "intentional.</div>"
+        )
+    except Exception:
+        pass
 
 # COMMAND ----------
 

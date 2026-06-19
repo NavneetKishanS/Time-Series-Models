@@ -26,7 +26,7 @@ from models.examination_model import create_examination_model
 from data.preprocessing import load_preprocessed_data
 from data.archive_duration_priors import load_examination_priors
 from data.examination_duration_calibration import calibrate_examination_durations
-from training.utils import temporal_split, build_conditioning_tensor
+from training.utils import temporal_split, build_conditioning_tensor, make_pad_collate
 
 
 class ExaminationDataset(Dataset):
@@ -296,17 +296,27 @@ def train_examination_model(data_path=None, config=None, training_config=None,
         print(f"  Abort (MRI_MSR_34) sequences in train: {train_dataset.num_abort_sequences} "
               f"(oversampled x{abort_oversample})")
 
+    # Trim each batch to its longest real sequence — the tuple layout is
+    # (conditioning, body_region, sequence_type, serial_idx, input_seq,
+    # target_seq, durations); positions 4/5/6 are the per-token fields,
+    # measured off the PAD-terminated input_seq at position 4. This is the
+    # dominant CPU speedup: examination scans are short but pad to 128, and
+    # attention is O(L^2). See make_pad_collate.
+    collate = make_pad_collate(seq_indices=(4, 5, 6), length_index=4,
+                               pad_token_id=PAD_TOKEN_ID)
     train_loader = DataLoader(
         train_dataset,
         batch_size=training_config['batch_size'],
         shuffle=True,
-        num_workers=0
+        num_workers=0,
+        collate_fn=collate,
     )
     val_loader = DataLoader(
         val_dataset,
         batch_size=training_config['batch_size'],
         shuffle=False,
-        num_workers=0
+        num_workers=0,
+        collate_fn=collate,
     )
 
     # Create model

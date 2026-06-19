@@ -30,6 +30,7 @@
 
 import os
 import re
+import bisect
 import pickle
 import numpy as np
 import pandas as pd
@@ -462,10 +463,16 @@ for serial in SERIAL_NUMBERS:
 
     n_before = len(examination_sequences)
 
+    # start_rows / end_rows / exam_rows / coil_rows are all ascending row
+    # indices into df_merged, so every "first end after start" / "last exam
+    # before start" / "last coil before start" lookup below is a binary search
+    # (bisect), not a full list scan. The old `[r for r in ... if ...]` form was
+    # O(starts x events) per scanner and dominated preprocessing wall-clock on
+    # the ~57k-sequence pkl.
     for idx_in_list, start_row in enumerate(start_rows):
-        end_candidates = [r for r in end_rows if r > start_row]
-        if end_candidates:
-            end_row = end_candidates[0]
+        _ec = bisect.bisect_right(end_rows, start_row)  # first end_row > start_row
+        if _ec < len(end_rows):
+            end_row = end_rows[_ec]
         elif idx_in_list + 1 < len(start_rows):
             end_row = start_rows[idx_in_list + 1] - 1
         else:
@@ -511,18 +518,18 @@ for serial in SERIAL_NUMBERS:
 
         # Body region: prefer last MRI_EXU_95 before start
         body_region_str = str(segment.iloc[0].get('BodyGroup_to', 'UNKNOWN')).upper()
-        prior_exams = [r for r in exam_rows if r < start_row]
-        if prior_exams:
-            bg = str(df_merged.iloc[max(prior_exams)].get('BodyGroup_to', 'UNKNOWN')).upper()
+        _pe = bisect.bisect_left(exam_rows, start_row) - 1  # last exam_row < start_row
+        if _pe >= 0:
+            bg = str(df_merged.iloc[exam_rows[_pe]].get('BodyGroup_to', 'UNKNOWN')).upper()
             if bg != 'UNKNOWN':
                 body_region_str = bg
         body_region = int(_BODY_REGION_TO_ID.get(body_region_str, 10))
 
         # Coil config from most recent MRI_CCS_11
-        prior_coils = [r for r in coil_rows if r < start_row]
+        _pc = bisect.bisect_left(coil_rows, start_row) - 1  # last coil_row < start_row
         coil_config = (
-            _parse_coil_message(df_merged.iloc[max(prior_coils)]['Message'])
-            if prior_coils else {col: 0 for col in COIL_COLUMNS}
+            _parse_coil_message(df_merged.iloc[coil_rows[_pc]]['Message'])
+            if _pc >= 0 else {col: 0 for col in COIL_COLUMNS}
         )
 
         row  = segment.iloc[0]

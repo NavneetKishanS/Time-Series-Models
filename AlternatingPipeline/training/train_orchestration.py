@@ -25,7 +25,7 @@ from config import (
 from models.orchestration_model import create_orchestration_model
 from data.preprocessing import load_preprocessed_data
 from data.orchestration_preprocessing import extract_orchestration_samples
-from training.utils import temporal_split
+from training.utils import temporal_split, make_pad_collate
 
 
 class OrchestrationDataset(Dataset):
@@ -175,17 +175,24 @@ def train_orchestration_model(data_path=None, config=None, training_config=None,
     if verbose:
         print(f"Train dataset: {len(train_dataset)}, Val dataset: {len(val_dataset)}")
 
+    # Trim each batch to its longest real sequence — the tuple layout is
+    # (conditioning, scanner_idx, input_seq, target_seq); positions 2/3 are the
+    # per-token fields, measured off the PAD-terminated input_seq at position 2.
+    collate = make_pad_collate(seq_indices=(2, 3), length_index=2,
+                               pad_token_id=ORCH_PAD_TOKEN_ID)
     train_loader = DataLoader(
         train_dataset,
         batch_size=training_config['batch_size'],
         shuffle=True,
         num_workers=0,
+        collate_fn=collate,
     )
     val_loader = DataLoader(
         val_dataset,
         batch_size=training_config['batch_size'],
         shuffle=False,
         num_workers=0,
+        collate_fn=collate,
     )
 
     # Create model

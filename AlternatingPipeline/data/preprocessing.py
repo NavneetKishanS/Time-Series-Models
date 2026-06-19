@@ -8,6 +8,7 @@ Exchange events: Events that occur during body region transitions (patient setup
 Examination events: Events that occur during MRI scans (MRI_EXU_95 markers)
 """
 import os
+import bisect
 import pandas as pd
 import numpy as np
 from glob import glob
@@ -143,22 +144,21 @@ def _detect_day_boundaries(df):
     Returns:
         List of (day_start_idx, day_end_idx) tuples for each day
     """
+    # Vectorized day-boundary detection. The old row-by-row df.iterrows() walk
+    # was O(rows) in slow Python over the entire event log — the single biggest
+    # cost in this module. `date` is already sorted ascending, so the day
+    # starts are exactly the positions where the date changes.
+    if len(df) == 0:
+        return []
+
+    dates = df['date'].to_numpy()
+    n = len(dates)
+    starts = [0] + (np.nonzero(dates[1:] != dates[:-1])[0] + 1).tolist()
+
     days = []
-    current_date = None
-    day_start = 0
-
-    for idx, row in df.iterrows():
-        if current_date is None:
-            current_date = row['date']
-            day_start = idx
-        elif row['date'] != current_date:
-            days.append((day_start, idx))
-            current_date = row['date']
-            day_start = idx
-
-    # Add the last day
-    if current_date is not None:
-        days.append((day_start, df.index[-1] + 1))
+    for k, sp in enumerate(starts):
+        ep = starts[k + 1] if k + 1 < len(starts) else n
+        days.append((sp, ep))
 
     return days
 
@@ -411,8 +411,13 @@ def extract_examination_events(df, verbose=False):
     if verbose:
         print(f"Found {len(exam_markers)} examination markers")
 
-    # Find change points for boundaries
-    change_indices = set(detect_patient_changes(df))
+    # Find change points for boundaries. Keep them SORTED so the per-marker
+    # "first change after exam_start" lookup below is a binary search instead of
+    # a full scan. The old code iterated a `set` and broke on the first match —
+    # that was both O(markers x changes) AND non-deterministic (set iteration
+    # order), so it could clip an examination at an arbitrary later change
+    # rather than the nearest one. bisect gives the nearest, deterministically.
+    change_indices = sorted(detect_patient_changes(df))
 
     for i, exam_start in enumerate(exam_markers):
         # Find the end of this examination
@@ -422,11 +427,10 @@ def extract_examination_events(df, verbose=False):
         if i + 1 < len(exam_markers):
             exam_end = min(exam_end, exam_markers[i + 1])
 
-        # Check for patient/body change
-        for change_idx in change_indices:
-            if change_idx > exam_start and change_idx < exam_end:
-                exam_end = change_idx
-                break
+        # Clip at the first patient/body change strictly after exam_start
+        _ci = bisect.bisect_right(change_indices, exam_start)
+        if _ci < len(change_indices):
+            exam_end = min(exam_end, change_indices[_ci])
 
         segment = df.iloc[exam_start:exam_end]
 
