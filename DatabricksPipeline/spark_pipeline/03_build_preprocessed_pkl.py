@@ -543,6 +543,32 @@ def extract_exam_sequences(pdf):
 
     df_merged['PatientId']         = df_merged['PatientId'].fillna('__no_patient__')
     df_merged['BodyGroup_to']      = df_merged['BodyGroup'].fillna('UNKNOWN').str.upper()
+
+    # Fallback: where merge_asof left BodyGroup_to UNKNOWN, extract body part
+    # directly from MRI_EXU_95 messages (same regex as step 02 get_body_patient).
+    # Covers the case where WorkflowValues['BodyPartExamined'] is absent or uses
+    # naming conventions not in bodyupdated.xlsx.
+    _mask_evu = df_merged['MessageIdentification'] == 'MRI_EXU_95'
+    def _bg_from_evu95_local(msg):
+        if not isinstance(msg, str):
+            return None
+        try:
+            body = re.search(r'with body part < (.*) >', msg).group(1)
+            if ' ' in body:
+                try:
+                    body = re.search(r'with body part < (.*) > <', msg).group(1)
+                except AttributeError:
+                    pass
+            return body_to_group.get(str(body).strip().upper())
+        except AttributeError:
+            return None
+    df_merged['_bg_msg'] = np.nan
+    df_merged.loc[_mask_evu, '_bg_msg'] = df_merged.loc[_mask_evu, 'Message'].apply(_bg_from_evu95_local)
+    df_merged['_bg_msg'] = df_merged['_bg_msg'].ffill()
+    _needs_bg = df_merged['BodyGroup_to'] == 'UNKNOWN'
+    df_merged.loc[_needs_bg, 'BodyGroup_to'] = df_merged.loc[_needs_bg, '_bg_msg'].fillna('UNKNOWN')
+    df_merged.drop(columns=['_bg_msg'], inplace=True)
+
     df_merged['Age']               = df_merged['Age'].fillna(0.0)
     df_merged['Weight']            = df_merged['Weight'].fillna(0.0)
     df_merged['Height']            = df_merged['Height'].fillna(0.0)
