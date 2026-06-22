@@ -484,7 +484,7 @@ for serial in SERIAL_NUMBERS:
             return body_part_to_group.get(str(body).strip().upper())
         except AttributeError:
             return None
-    df_merged['_bg_msg'] = np.nan
+    df_merged['_bg_msg'] = None
     df_merged.loc[_mask_evu, '_bg_msg'] = df_merged.loc[_mask_evu, 'Message'].apply(_bg_from_evu95)
     df_merged['_bg_msg'] = df_merged['_bg_msg'].ffill()
     _needs_bg = df_merged['BodyGroup_to'] == 'UNKNOWN'
