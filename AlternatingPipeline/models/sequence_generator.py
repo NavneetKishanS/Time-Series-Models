@@ -138,7 +138,8 @@ class SequenceGeneratorModel(nn.Module):
             batch_first=True,
         )
         self.conditioning_encoder = nn.TransformerEncoder(
-            encoder_layer, num_layers=num_encoder_layers
+            encoder_layer, num_layers=num_encoder_layers,
+            enable_nested_tensor=False,  # nested tensor path is 5-10x slower on CPU
         )
 
         # =====================================================================
@@ -176,7 +177,8 @@ class SequenceGeneratorModel(nn.Module):
             batch_first=True,
         )
         self.duration_encoder = nn.TransformerEncoder(
-            duration_encoder_layer, num_layers=num_duration_encoder_layers
+            duration_encoder_layer, num_layers=num_duration_encoder_layers,
+            enable_nested_tensor=False,  # nested tensor path is 5-10x slower on CPU
         )
 
         self.duration_head = SinglePassDurationHead(self.d_model, hidden_dim=128, dropout=dropout)

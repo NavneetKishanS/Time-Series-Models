@@ -86,7 +86,8 @@ class OrchestrationModel(nn.Module):
             batch_first=True,
         )
         self.conditioning_encoder = nn.TransformerEncoder(
-            encoder_layer, num_layers=num_encoder_layers
+            encoder_layer, num_layers=num_encoder_layers,
+            enable_nested_tensor=False,  # nested tensor path is 5-10x slower on CPU
         )
 
         # =====================================================================

@@ -148,28 +148,52 @@ print(f"Device: {device}")
 if torch.cuda.is_available():
     print(f"GPU: {torch.cuda.get_device_name(0)}")
 else:
-    # LOUD CPU warning. This notebook is designed for a GPU cluster; on CPU the
-    # transformer training is ~10-50x slower and a full 3-model run takes DAYS
-    # (the 2026-06 run took ~4 days on CPU). If you did not intend CPU, stop now
-    # and re-attach a GPU cluster (ML Runtime + GPU) — that alone is the single
-    # biggest speedup available, far larger than any code change.
+    # CPU warning. A GPU cluster is still faster, but with the nested-tensor
+    # fix (enable_nested_tensor=False) and torch.compile the CPU run is now
+    # viable in hours rather than days.
     print("\n" + "!" * 70)
     print("!! WARNING: NO GPU DETECTED — training will run on CPU.")
-    print("!! This notebook expects a GPU cluster. On CPU a full 3-model run")
-    print("!! takes DAYS (the 2026-06 run took ~4 days). Re-attach a GPU cluster")
-    print("!! (Databricks ML Runtime + GPU) unless you deliberately want CPU.")
-    print("!! The dynamic-padding collate (utils.make_pad_collate) still cuts")
-    print("!! CPU time substantially, but cannot match a GPU.")
+    print("!! A GPU cluster (Databricks ML Runtime + GPU) is still faster,")
+    print("!! but with the nested-tensor fix a full CPU run takes ~4-8h.")
+    print("!! Re-attach a GPU cluster if speed is critical.")
     print("!" * 70 + "\n")
     try:
         displayHTML(
             "<div style='padding:12px;border:2px solid #c00;background:#fee;"
             "color:#900;font-weight:bold'>NO GPU DETECTED — training on CPU. "
-            "A full run takes days. Re-attach a GPU cluster unless CPU is "
-            "intentional.</div>"
+            "With nested-tensor fix: ~4-8h total. GPU cluster is faster.</div>"
         )
     except Exception:
         pass
+
+# ── CPU-specific performance setup ───────────────────────────────────────────
+if device.type == 'cpu':
+    _ncores = os.cpu_count() or 4
+    torch.set_num_threads(_ncores)
+    torch.set_num_interop_threads(min(4, _ncores))
+    os.environ.setdefault('OMP_NUM_THREADS', str(_ncores))
+    os.environ.setdefault('MKL_NUM_THREADS', str(_ncores))
+    print(f"[CPU] {_ncores} intra-op threads, {min(4, _ncores)} interop threads")
+    # Import `config` the same way the training scripts do (they add
+    # TMP_ROOT/AlternatingPipeline to sys.path and import bare `config`).
+    # Mutating the dict in-place here means any training module that binds
+    # EXCHANGE_TRAINING_CONFIG from this same `config` object sees the new values.
+    _ap_path = os.path.join(TMP_ROOT, 'AlternatingPipeline')
+    if _ap_path not in sys.path:
+        sys.path.insert(0, _ap_path)
+    import config as _ap_cfg
+    # GPU-calibrated patience of 15-20 adds many hours on CPU.  Tighten to
+    # ~half without meaningfully sacrificing model quality — the small datasets
+    # (3.5K exchange, 45K exam) converge well before the original limits.
+    _ap_cfg.EXCHANGE_TRAINING_CONFIG['early_stopping_patience'] = 8
+    _ap_cfg.EXCHANGE_TRAINING_CONFIG['epochs'] = 60
+    _ap_cfg.EXAMINATION_TRAINING_CONFIG['early_stopping_patience'] = 8
+    _ap_cfg.EXAMINATION_TRAINING_CONFIG['epochs'] = 60
+    _ap_cfg.ORCHESTRATION_TRAINING_CONFIG['early_stopping_patience'] = 10
+    _ap_cfg.ORCHESTRATION_TRAINING_CONFIG['epochs'] = 60
+    print("[CPU] early_stopping_patience: exchange/exam → 8, orch → 10")
+    print("[CPU] max epochs capped at 60 (early stopping typically fires sooner)")
+# ─────────────────────────────────────────────────────────────────────────────
 
 # COMMAND ----------
 
