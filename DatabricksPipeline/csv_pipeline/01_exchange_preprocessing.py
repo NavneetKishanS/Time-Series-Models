@@ -70,12 +70,13 @@ def interpatient(df):
     first_pat      = True
     first_ptab     = None
 
+    indices_100 = df.index[df['sourceID'] == 'MRI_MSR_100'].tolist()
+
     for index, row in df.iterrows():
         code = row['sourceID']
         text = row['text']
         date = row['datetime'].date()
         end_idx = None
-        indices_100 = df.index[df['sourceID'] == 'MRI_MSR_100'].tolist()
 
         if date0 != date:           # New calendar day — reset per-day counters
             patients    = 0
