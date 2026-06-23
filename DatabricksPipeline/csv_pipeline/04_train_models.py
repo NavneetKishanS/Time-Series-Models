@@ -112,14 +112,36 @@ class _Tee:
         self._f = open(path, "a", buffering=1)
         self._stream = stream
     def write(self, s):
-        self._stream.write(s)
-        if s and not ("\r" in s and "\n" not in s):   # skip tqdm redraws
-            self._f.write(s)
-            self._f.flush()
+        # Write to the notebook stream first, but NEVER block on it.  After
+        # "Custom TB Handler failed, unregistering" Databricks stops draining
+        # its output pipe; the next stream.write() fills the pipe buffer and
+        # hangs the Python thread permanently — the log file write on the next
+        # line is then never reached and training appears completely frozen for
+        # hours.  Catching all exceptions (BrokenPipeError, OSError, …) keeps
+        # the log file alive even when the notebook UI is dead.
+        try:
+            self._stream.write(s)
+        except Exception:
+            pass
+        # Always write non-tqdm lines to the DBFS log file.  tqdm redraw lines
+        # contain \r but no \n; everything else (epoch summaries, print() calls)
+        # is preserved.
+        if s and not ("\r" in s and "\n" not in s):
+            try:
+                self._f.write(s)
+                self._f.flush()
+            except Exception:
+                pass
         return len(s)
     def flush(self):
-        self._stream.flush()
-        self._f.flush()
+        try:
+            self._stream.flush()
+        except Exception:
+            pass
+        try:
+            self._f.flush()
+        except Exception:
+            pass
     def __getattr__(self, name):
         return getattr(self._stream, name)
 
