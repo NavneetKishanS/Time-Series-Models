@@ -25,9 +25,9 @@ done
 
 # LaTeX compile (two passes for cross-references)
 echo "Compiling LaTeX (pass 1)..."
-pdflatex -interaction=nonstopmode main.tex > /dev/null
+xelatex -interaction=nonstopmode main.tex > /dev/null
 echo "Compiling LaTeX (pass 2)..."
-pdflatex -interaction=nonstopmode main.tex > /dev/null
+xelatex -interaction=nonstopmode main.tex > /dev/null
 
 echo ""
 echo "Done → presentation/main.pdf"

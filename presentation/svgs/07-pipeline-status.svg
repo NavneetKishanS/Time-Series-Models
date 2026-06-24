@@ -12,16 +12,16 @@
   <rect width="800" height="450" fill="url(#bg)"/>
 
   <!-- Title -->
-  <text x="400" y="34" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="18" font-weight="700" fill="#003087">Pipeline Status: What's Built and Running</text>
+  <text x="400" y="34" text-anchor="middle" font-family="FreeSans,sans-serif" font-size="18" font-weight="700" fill="#003087">Pipeline Status: What's Built and Running</text>
   <line x1="180" y1="44" x2="620" y2="44" stroke="#009999" stroke-width="2"/>
 
   <!-- Legend -->
   <circle cx="230" cy="60" r="7" fill="#009999"/>
-  <text x="243" y="65" font-family="'Helvetica Neue',Arial,sans-serif" font-size="10" fill="#006666">Complete</text>
+  <text x="243" y="65" font-family="FreeSans,sans-serif" font-size="10" fill="#006666">Complete</text>
   <circle cx="320" cy="60" r="7" fill="#EC6602"/>
-  <text x="333" y="65" font-family="'Helvetica Neue',Arial,sans-serif" font-size="10" fill="#884400">Active / Refining</text>
+  <text x="333" y="65" font-family="FreeSans,sans-serif" font-size="10" fill="#884400">Active / Refining</text>
   <circle cx="445" cy="60" r="7" fill="#AAAAAA"/>
-  <text x="458" y="65" font-family="'Helvetica Neue',Arial,sans-serif" font-size="10" fill="#555555">Planned</text>
+  <text x="458" y="65" font-family="FreeSans,sans-serif" font-size="10" fill="#555555">Planned</text>
 
   <!-- Vertical rail -->
   <line x1="80" y1="85" x2="80" y2="420" stroke="#CCDDEE" stroke-width="2"/>
@@ -31,81 +31,81 @@
   ======================== -->
   <!-- Step 1 -->
   <circle cx="80" cy="96" r="14" fill="#009999" filter="url(#shadow)"/>
-  <text x="80" y="101" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="10" font-weight="700" fill="#FFFFFF">1</text>
+  <text x="80" y="101" text-anchor="middle" font-family="FreeSans,sans-serif" font-size="10" font-weight="700" fill="#FFFFFF">1</text>
   <line x1="95" y1="96" x2="140" y2="96" stroke="#009999" stroke-width="1.5"/>
   <rect x="142" y="80" width="610" height="32" rx="6" fill="#E6F5F5" stroke="#009999" stroke-width="1" filter="url(#shadow)"/>
-  <text x="160" y="93" font-family="'Helvetica Neue',Arial,sans-serif" font-size="10" font-weight="700" fill="#006666">Preprocessing</text>
-  <text x="160" y="107" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#338888">Extract Exchange &amp; Examination sequences from 40 raw MRI CSVs · Duration priors · Body region labeling</text>
+  <text x="160" y="93" font-family="FreeSans,sans-serif" font-size="10" font-weight="700" fill="#006666">Preprocessing</text>
+  <text x="160" y="107" font-family="FreeSans,sans-serif" font-size="9" fill="#338888">Extract Exchange &amp; Examination sequences from 40 raw MRI CSVs · Duration priors · Body region labeling</text>
   <rect x="690" y="83" width="56" height="18" rx="9" fill="#009999"/>
-  <text x="718" y="95" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="8" font-weight="700" fill="#FFFFFF">DONE</text>
+  <text x="718" y="95" text-anchor="middle" font-family="FreeSans,sans-serif" font-size="8" font-weight="700" fill="#FFFFFF">DONE</text>
 
   <!-- Step 1b -->
   <circle cx="80" cy="138" r="14" fill="#009999" filter="url(#shadow)"/>
-  <text x="80" y="143" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" font-weight="700" fill="#FFFFFF">1b</text>
+  <text x="80" y="143" text-anchor="middle" font-family="FreeSans,sans-serif" font-size="9" font-weight="700" fill="#FFFFFF">1b</text>
   <line x1="95" y1="138" x2="140" y2="138" stroke="#009999" stroke-width="1.5"/>
   <rect x="142" y="122" width="610" height="32" rx="6" fill="#E6F5F5" stroke="#009999" stroke-width="1" filter="url(#shadow)"/>
-  <text x="160" y="135" font-family="'Helvetica Neue',Arial,sans-serif" font-size="10" font-weight="700" fill="#006666">Orchestration Preprocessing</text>
-  <text x="160" y="149" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#338888">Extract day-level body region sequences · BREAK token injection · Patient-level grouping</text>
+  <text x="160" y="135" font-family="FreeSans,sans-serif" font-size="10" font-weight="700" fill="#006666">Orchestration Preprocessing</text>
+  <text x="160" y="149" font-family="FreeSans,sans-serif" font-size="9" fill="#338888">Extract day-level body region sequences · BREAK token injection · Patient-level grouping</text>
   <rect x="690" y="125" width="56" height="18" rx="9" fill="#009999"/>
-  <text x="718" y="137" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="8" font-weight="700" fill="#FFFFFF">DONE</text>
+  <text x="718" y="137" text-anchor="middle" font-family="FreeSans,sans-serif" font-size="8" font-weight="700" fill="#FFFFFF">DONE</text>
 
   <!-- Step 2 -->
   <circle cx="80" cy="180" r="14" fill="#009999" filter="url(#shadow)"/>
-  <text x="80" y="185" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="10" font-weight="700" fill="#FFFFFF">2</text>
+  <text x="80" y="185" text-anchor="middle" font-family="FreeSans,sans-serif" font-size="10" font-weight="700" fill="#FFFFFF">2</text>
   <line x1="95" y1="180" x2="140" y2="180" stroke="#009999" stroke-width="1.5"/>
   <rect x="142" y="164" width="610" height="32" rx="6" fill="#E6F5F5" stroke="#009999" stroke-width="1" filter="url(#shadow)"/>
-  <text x="160" y="177" font-family="'Helvetica Neue',Arial,sans-serif" font-size="10" font-weight="700" fill="#006666">Train Exchange Model</text>
-  <text x="160" y="191" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#338888">Unified Transformer · patient setup and body-region transitions · log-space durations</text>
+  <text x="160" y="177" font-family="FreeSans,sans-serif" font-size="10" font-weight="700" fill="#006666">Train Exchange Model</text>
+  <text x="160" y="191" font-family="FreeSans,sans-serif" font-size="9" fill="#338888">Unified Transformer · patient setup and body-region transitions · log-space durations</text>
   <rect x="690" y="167" width="56" height="18" rx="9" fill="#009999"/>
-  <text x="718" y="179" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="8" font-weight="700" fill="#FFFFFF">DONE</text>
+  <text x="718" y="179" text-anchor="middle" font-family="FreeSans,sans-serif" font-size="8" font-weight="700" fill="#FFFFFF">DONE</text>
 
   <!-- Step 3 -->
   <circle cx="80" cy="222" r="14" fill="#009999" filter="url(#shadow)"/>
-  <text x="80" y="227" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="10" font-weight="700" fill="#FFFFFF">3</text>
+  <text x="80" y="227" text-anchor="middle" font-family="FreeSans,sans-serif" font-size="10" font-weight="700" fill="#FFFFFF">3</text>
   <line x1="95" y1="222" x2="140" y2="222" stroke="#009999" stroke-width="1.5"/>
   <rect x="142" y="206" width="610" height="32" rx="6" fill="#E6F5F5" stroke="#009999" stroke-width="1" filter="url(#shadow)"/>
-  <text x="160" y="219" font-family="'Helvetica Neue',Arial,sans-serif" font-size="10" font-weight="700" fill="#006666">Train Examination Model</text>
-  <text x="160" y="233" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#338888">Unified Transformer · MRI scan sequences per body region · sequence type + serial conditioning</text>
+  <text x="160" y="219" font-family="FreeSans,sans-serif" font-size="10" font-weight="700" fill="#006666">Train Examination Model</text>
+  <text x="160" y="233" font-family="FreeSans,sans-serif" font-size="9" fill="#338888">Unified Transformer · MRI scan sequences per body region · sequence type + serial conditioning</text>
   <rect x="690" y="209" width="56" height="18" rx="9" fill="#009999"/>
-  <text x="718" y="221" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="8" font-weight="700" fill="#FFFFFF">DONE</text>
+  <text x="718" y="221" text-anchor="middle" font-family="FreeSans,sans-serif" font-size="8" font-weight="700" fill="#FFFFFF">DONE</text>
 
   <!-- Step 2c -->
   <circle cx="80" cy="264" r="14" fill="#009999" filter="url(#shadow)"/>
-  <text x="80" y="269" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="8" font-weight="700" fill="#FFFFFF">2c</text>
+  <text x="80" y="269" text-anchor="middle" font-family="FreeSans,sans-serif" font-size="8" font-weight="700" fill="#FFFFFF">2c</text>
   <line x1="95" y1="264" x2="140" y2="264" stroke="#009999" stroke-width="1.5"/>
   <rect x="142" y="248" width="610" height="32" rx="6" fill="#E6F5F5" stroke="#009999" stroke-width="1" filter="url(#shadow)"/>
-  <text x="160" y="261" font-family="'Helvetica Neue',Arial,sans-serif" font-size="10" font-weight="700" fill="#006666">Train Orchestration Model</text>
-  <text x="160" y="275" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#338888">Day-level body region sequencer · BREAK token · scanner embedding</text>
+  <text x="160" y="261" font-family="FreeSans,sans-serif" font-size="10" font-weight="700" fill="#006666">Train Orchestration Model</text>
+  <text x="160" y="275" font-family="FreeSans,sans-serif" font-size="9" fill="#338888">Day-level body region sequencer · BREAK token · scanner embedding</text>
   <rect x="690" y="251" width="56" height="18" rx="9" fill="#009999"/>
-  <text x="718" y="263" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="8" font-weight="700" fill="#FFFFFF">DONE</text>
+  <text x="718" y="263" text-anchor="middle" font-family="FreeSans,sans-serif" font-size="8" font-weight="700" fill="#FFFFFF">DONE</text>
 
   <!-- Step 4 -->
   <circle cx="80" cy="306" r="14" fill="#EC6602" filter="url(#shadow)"/>
-  <text x="80" y="311" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="10" font-weight="700" fill="#FFFFFF">4</text>
+  <text x="80" y="311" text-anchor="middle" font-family="FreeSans,sans-serif" font-size="10" font-weight="700" fill="#FFFFFF">4</text>
   <line x1="95" y1="306" x2="140" y2="306" stroke="#EC6602" stroke-width="1.5"/>
   <rect x="142" y="290" width="610" height="32" rx="6" fill="#FFF3E8" stroke="#EC6602" stroke-width="1" filter="url(#shadow)"/>
-  <text x="160" y="303" font-family="'Helvetica Neue',Arial,sans-serif" font-size="10" font-weight="700" fill="#884400">Simulate Days (Ground Truth Patients)</text>
-  <text x="160" y="317" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#AA6622">Alternating Exchange↔Examination pipeline · CSV output · Gantt visualizations</text>
+  <text x="160" y="303" font-family="FreeSans,sans-serif" font-size="10" font-weight="700" fill="#884400">Simulate Days (Ground Truth Patients)</text>
+  <text x="160" y="317" font-family="FreeSans,sans-serif" font-size="9" fill="#AA6622">Alternating Exchange↔Examination pipeline · CSV output · Gantt visualizations</text>
   <rect x="684" y="293" width="66" height="18" rx="9" fill="#EC6602"/>
-  <text x="717" y="305" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="8" font-weight="700" fill="#FFFFFF">REFINING</text>
+  <text x="717" y="305" text-anchor="middle" font-family="FreeSans,sans-serif" font-size="8" font-weight="700" fill="#FFFFFF">REFINING</text>
 
   <!-- Step 4b -->
   <circle cx="80" cy="348" r="14" fill="#EC6602" filter="url(#shadow)"/>
-  <text x="80" y="353" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" font-weight="700" fill="#FFFFFF">4b</text>
+  <text x="80" y="353" text-anchor="middle" font-family="FreeSans,sans-serif" font-size="9" font-weight="700" fill="#FFFFFF">4b</text>
   <line x1="95" y1="348" x2="140" y2="348" stroke="#EC6602" stroke-width="1.5"/>
   <rect x="142" y="332" width="610" height="32" rx="6" fill="#FFF3E8" stroke="#EC6602" stroke-width="1" filter="url(#shadow)"/>
-  <text x="160" y="345" font-family="'Helvetica Neue',Arial,sans-serif" font-size="10" font-weight="700" fill="#884400">Orchestrated Day Simulation (Autonomous)</text>
-  <text x="160" y="359" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#AA6622">Orchestrator generates patient list · fully autonomous day generation end-to-end</text>
+  <text x="160" y="345" font-family="FreeSans,sans-serif" font-size="10" font-weight="700" fill="#884400">Orchestrated Day Simulation (Autonomous)</text>
+  <text x="160" y="359" font-family="FreeSans,sans-serif" font-size="9" fill="#AA6622">Orchestrator generates patient list · fully autonomous day generation end-to-end</text>
   <rect x="684" y="335" width="66" height="18" rx="9" fill="#EC6602"/>
-  <text x="717" y="347" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="8" font-weight="700" fill="#FFFFFF">REFINING</text>
+  <text x="717" y="347" text-anchor="middle" font-family="FreeSans,sans-serif" font-size="8" font-weight="700" fill="#FFFFFF">REFINING</text>
 
   <!-- Step 5 -->
   <circle cx="80" cy="390" r="14" fill="#AAAAAA" filter="url(#shadow)"/>
-  <text x="80" y="395" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="10" font-weight="700" fill="#FFFFFF">5</text>
+  <text x="80" y="395" text-anchor="middle" font-family="FreeSans,sans-serif" font-size="10" font-weight="700" fill="#FFFFFF">5</text>
   <line x1="95" y1="390" x2="140" y2="390" stroke="#AAAAAA" stroke-width="1.5"/>
   <rect x="142" y="374" width="610" height="32" rx="6" fill="#F5F5F5" stroke="#AAAAAA" stroke-width="1" filter="url(#shadow)"/>
-  <text x="160" y="387" font-family="'Helvetica Neue',Arial,sans-serif" font-size="10" font-weight="700" fill="#555555">Bucket Generation + Per-Customer Fine-Tuning</text>
-  <text x="160" y="401" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#777777">Pre-generate 1000 samples per bucket · customer-specific model heads · MRRT agent integration</text>
+  <text x="160" y="387" font-family="FreeSans,sans-serif" font-size="10" font-weight="700" fill="#555555">Bucket Generation + Per-Customer Fine-Tuning</text>
+  <text x="160" y="401" font-family="FreeSans,sans-serif" font-size="9" fill="#777777">Pre-generate 1000 samples per bucket · customer-specific model heads · MRRT agent integration</text>
   <rect x="688" y="377" width="58" height="18" rx="9" fill="#AAAAAA"/>
-  <text x="717" y="389" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="8" font-weight="700" fill="#FFFFFF">PLANNED</text>
+  <text x="717" y="389" text-anchor="middle" font-family="FreeSans,sans-serif" font-size="8" font-weight="700" fill="#FFFFFF">PLANNED</text>
 </svg>

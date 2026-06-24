@@ -15,6 +15,7 @@
 \usepackage{booktabs}
 \usepackage{xcolor}
 \usepackage{tikz}
+\usetikzlibrary{calc}
 \usepackage{array}
 \usepackage{colortbl}
 \usepackage{microtype}
@@ -49,7 +50,42 @@
 \setbeamercolor{block title example}{bg=SiemensTeal,fg=white}
 \setbeamercolor{block body example}{bg=SiemensLight,fg=SiemensDark}
 
-\metroset{titleformat=regular,progressbar=frametitle,block=fill,sectionpage=simple}
+\metroset{titleformat=regular,progressbar=frametitle,block=fill,sectionpage=none}
+
+%% ---- Custom section separator slides ----
+\AtBeginSection{%
+  \begin{frame}[plain]
+    \begin{tikzpicture}[remember picture, overlay]
+      %% Full navy background
+      \fill[SiemensNavy] (current page.south west) rectangle (current page.north east);
+      %% Teal accent bar — left edge, full height
+      \fill[SiemensTeal] (current page.south west) rectangle ($(current page.north west)+(0.28,0)$);
+      %% Subtle light band across middle
+      \fill[white,opacity=0.04]
+        ($(current page.west)+(0,-0.9)$) rectangle ($(current page.east)+(0,0.9)$);
+      %% Decorative circle — upper right
+      \draw[SiemensTeal,line width=1.2pt,opacity=0.35]
+        ($(current page.north east)+(-1.4,-1.4)$) circle (2.2cm);
+      \draw[SiemensTeal,line width=0.6pt,opacity=0.2]
+        ($(current page.north east)+(-1.4,-1.4)$) circle (3.2cm);
+      %% Section number pill
+      \node[fill=SiemensTeal,rounded corners=4pt,
+            text=white,font=\bfseries\large,
+            inner xsep=10pt,inner ysep=5pt]
+        at ($(current page.west)+(2.8,0.55)$)
+        {\insertsectionnumber};
+      %% Section title
+      \node[text=white,font=\bfseries\LARGE,
+            text width=12cm,align=left]
+        at ($(current page.center)+(1.2,0)$)
+        {\insertsectionhead};
+      %% Thin teal line under title
+      \draw[SiemensTeal,line width=1.5pt]
+        ($(current page.center)+(-3.8,-0.75)$) --
+        ($(current page.center)+(6.2,-0.75)$);
+    \end{tikzpicture}
+  \end{frame}%
+}
 
 %% ---- Helper: coloured rule ----
 \newcommand{\tealsep}{\vspace{1pt}\textcolor{SiemensTeal}{\rule{\linewidth}{1pt}}\vspace{4pt}}
@@ -57,10 +93,10 @@
 
 %% ---- Title info ----
 \title{MRI Digital Twin}
-\subtitle{Generative Simulation \& Semantic Intelligence\\for Siemens Healthineers}
-\author{Customer Twin Project Team}
+\subtitle{Generative Simulation \& Semantic Intelligence for Siemens Healthineers}
+\author{Customer Twin Project Team \quad\textcolor{SiemensTeal}{$\cdot$}\quad Siemens Healthineers}
 \date{June 2026}
-\institute{Siemens Healthineers $\cdot$ AI \& Digital Health}
+\institute{}
 
 %% ============================================================
 \begin{document}
@@ -68,17 +104,32 @@
 %% ----------------------------------------------------------
 %% SLIDE 1 — Title
 %% ----------------------------------------------------------
-\maketitle
+\begin{frame}[plain,noframenumbering]
+  \begin{tikzpicture}[remember picture, overlay]
+    \fill[SiemensNavy] (current page.south west) rectangle (current page.north east);
+    \fill[SiemensTeal] (current page.south west) rectangle ($(current page.north west)+(0.35,0)$);
+    \draw[SiemensTeal,line width=1pt,opacity=0.3]
+      ($(current page.north east)+(-1.8,-1.8)$) circle (2.6cm);
+    \draw[SiemensTeal,line width=0.5pt,opacity=0.18]
+      ($(current page.north east)+(-1.8,-1.8)$) circle (3.8cm);
+  \end{tikzpicture}
+  \vspace{1.6cm}
+  \centering
+  {\color{white}\fontsize{26}{30}\selectfont\bfseries MRI Digital Twin}\par\vspace{0.4cm}
+  {\color{SiemensTeal}\fontsize{12}{15}\selectfont Generative Simulation \& Semantic Intelligence for Siemens Healthineers}\par\vspace{0.7cm}
+  \textcolor{white!70!SiemensNavy}{\small Customer Twin Project Team \quad\textcolor{SiemensTeal}{$\cdot$}\quad Siemens Healthineers}\par\vspace{0.2cm}
+  \textcolor{SiemensMuted}{\small June 2026}
+\end{frame}
 
 %% ----------------------------------------------------------
 %% SLIDE 2 — Agenda
 %% ----------------------------------------------------------
-\begin{frame}{Agenda}
-\vspace{-4pt}
+\begin{frame}[shrink=5]{Agenda}
+\vspace{-6pt}
 \tealsep
 \begin{columns}[T]
 \column{0.48\textwidth}
-\begin{enumerate}\setlength\itemsep{5pt}
+\begin{enumerate}\setlength\itemsep{2pt}
   \item[\textcolor{SiemensTeal}{\textbf{1.}}] \textbf{Strategic Context} — The Four Twins mandate
   \item[\textcolor{SiemensTeal}{\textbf{2.}}] \textbf{The Problem} — Cost of scheduling inefficiency
   \item[\textcolor{SiemensTeal}{\textbf{3.}}] \textbf{What We're Building} — The Customer Twin
@@ -86,7 +137,7 @@
   \item[\textcolor{SiemensTeal}{\textbf{5.}}] \textbf{MRRT Insight Agent} — Semantic intelligence
 \end{enumerate}
 \column{0.48\textwidth}
-\begin{enumerate}\setlength\itemsep{5pt}
+\begin{enumerate}\setlength\itemsep{2pt}
   \item[\textcolor{SiemensOrange}{\textbf{6.}}] \textbf{Current Status} — What's built \& running
   \item[\textcolor{SiemensOrange}{\textbf{7.}}] \textbf{Demonstrated Results} — Validation evidence
   \item[\textcolor{SiemensOrange}{\textbf{8.}}] \textbf{How Things Are Run} — Infrastructure
@@ -330,7 +381,7 @@ Manual R\&D feedback triage & Automated semantic pain extraction &
 \begin{columns}[T]
 \column{0.46\textwidth}
 \begin{alertblock}{Typical Black-Box Approach}
-  \begin{itemize}\setlength\itemsep{5pt}
+  \begin{itemize}\setlength\itemsep{2pt}
     \item Single neural network end-to-end
     \item No explanation of predictions
     \item No uncertainty bounds
@@ -342,7 +393,7 @@ Manual R\&D feedback triage & Automated semantic pain extraction &
 
 \column{0.46\textwidth}
 \begin{exampleblock}{Our White-Box Architecture}
-  \begin{itemize}\setlength\itemsep{5pt}
+  \begin{itemize}\setlength\itemsep{2pt}
     \item \textbf{Three explicit tiers}: Conditioning Encoder $\to$ Token Decoder $\to$ Duration Head
     \item Every prediction includes $\boldsymbol{\mu \pm \sigma}$ uncertainty
     \item Conditioning features are \textbf{named} and interpretable
@@ -366,7 +417,7 @@ Manual R\&D feedback triage & Automated semantic pain extraction &
 \begin{columns}[T]
 \column{0.50\textwidth}
 \textbf{The Challenge:}
-\begin{itemize}\setlength\itemsep{5pt}
+\begin{itemize}\setlength\itemsep{2pt}
   \item Thousands of unstructured customer comments in MRRT database
   \item Manual triage of R\&D ``pains'' is slow and subjective
   \item Key signals (coil friction, workflow gaps) are buried in free text
@@ -375,7 +426,7 @@ Manual R\&D feedback triage & Automated semantic pain extraction &
 
 \vspace{8pt}
 \textbf{The Agent:}
-\begin{itemize}\setlength\itemsep{5pt}
+\begin{itemize}\setlength\itemsep{2pt}
   \item LLM-based semantic retrieval over the full corpus
   \item Extracts structured pain reports: \texttt{type}, \texttt{component}, \texttt{body\_region}, \texttt{frequency}
   \item Ranks by occurrence and clinical impact
@@ -648,7 +699,7 @@ Manual R\&D feedback triage & Automated semantic pain extraction &
 \begin{columns}[T]
 \column{0.50\textwidth}
 \textbf{What the Orchestrator must learn:}
-\begin{itemize}\setlength\itemsep{5pt}
+\begin{itemize}\setlength\itemsep{2pt}
   \item Given a scanner's history, predict the \emph{sequence} of body regions for a new day
   \item Must handle BREAK tokens (lunch, handover gaps)
   \item Must respect clinical patterns (HEAD/NECK tend to cluster in the morning)
@@ -838,7 +889,7 @@ Manual R\&D feedback triage & Automated semantic pain extraction &
 \column{0.44\textwidth}
 \textbf{Current — Single-Customer Architecture:}
 \vspace{6pt}
-\begin{itemize}\setlength\itemsep{5pt}
+\begin{itemize}\setlength\itemsep{2pt}
   \item One set of model weights per scanner serial
   \item All 40 scanners share the same \emph{population-level} backbone
   \item Customer-level distinction: serial embedding in Examination model
@@ -848,7 +899,7 @@ Manual R\&D feedback triage & Automated semantic pain extraction &
 \column{0.50\textwidth}
 \textbf{Target — Multi-Site Architecture:}
 \vspace{6pt}
-\begin{itemize}\setlength\itemsep{5pt}
+\begin{itemize}\setlength\itemsep{2pt}
   \item \textbf{Shared backbone}: large pre-trained Exchange + Examination models across all sites
   \item \textbf{Site-specific heads}: lightweight adapter layers fine-tuned on $\leq$4 weeks of local data
   \item \textbf{Customer ID embedding}: unique vector per site, passed as conditioning

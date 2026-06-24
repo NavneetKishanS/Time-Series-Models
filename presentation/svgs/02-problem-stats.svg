@@ -28,48 +28,88 @@
   <rect width="800" height="450" fill="url(#bg)"/>
 
   <!-- Title -->
-  <text x="400" y="38" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="18" font-weight="700" fill="#003087">The Hidden Cost of MRI Scheduling Inefficiency</text>
+  <text x="400" y="38" text-anchor="middle" font-family="FreeSans,sans-serif" font-size="18" font-weight="700" fill="#003087">The Hidden Cost of MRI Scheduling Inefficiency</text>
   <line x1="160" y1="48" x2="640" y2="48" stroke="#009999" stroke-width="2"/>
 
-  <!-- CARD 1: $25K per machine -->
+  <!-- ============================================================
+       CARD 1: $25K per machine  (navy)
+  ============================================================ -->
   <rect x="30" y="70" width="355" height="165" rx="14" fill="url(#card1)" filter="url(#shadow)"/>
-  <!-- Dollar icon -->
-  <circle cx="80" cy="120" r="28" fill="#FFFFFF" fill-opacity="0.15"/>
-  <text x="80" y="128" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="26" font-weight="700" fill="#FFFFFF">$</text>
+  <!-- Dollar-sign icon circle -->
+  <circle cx="80" cy="120" r="28" fill="#FFFFFF" fill-opacity="0.12"/>
+  <!-- Dollar sign: vertical bar -->
+  <line x1="80" y1="98" x2="80" y2="143" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-opacity="0.85"/>
+  <!-- Dollar sign: top arc -->
+  <path d="M 68,107 Q 68,99 80,99 Q 92,99 92,107 Q 92,115 80,115" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-opacity="0.85"/>
+  <!-- Dollar sign: bottom arc -->
+  <path d="M 68,125 Q 68,133 80,133 Q 92,133 92,125 Q 92,117 80,117" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-opacity="0.85"/>
   <!-- Stat -->
-  <text x="205" y="115" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="42" font-weight="900" fill="#00DDDD">$25K</text>
-  <text x="205" y="140" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="12" font-weight="600" fill="#FFFFFF">per machine / per year</text>
-  <text x="205" y="163" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="10" fill="#B0CCE8">estimated cost of unplanned downtime</text>
-  <text x="205" y="178" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="10" fill="#B0CCE8">and scheduling inefficiency</text>
-  <text x="205" y="216" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#889AB0" font-style="italic">Source: Industry analysis</text>
+  <text x="205" y="115" text-anchor="middle" font-family="FreeSans,sans-serif" font-size="42" font-weight="700" fill="#00DDDD">$25K</text>
+  <text x="205" y="140" text-anchor="middle" font-family="FreeSans,sans-serif" font-size="12" font-weight="600" fill="#FFFFFF">per machine / per year</text>
+  <text x="205" y="163" text-anchor="middle" font-family="FreeSans,sans-serif" font-size="10" fill="#B0CCE8">estimated cost of unplanned downtime</text>
+  <text x="205" y="178" text-anchor="middle" font-family="FreeSans,sans-serif" font-size="10" fill="#B0CCE8">and scheduling inefficiency</text>
+  <text x="205" y="216" text-anchor="middle" font-family="FreeSans,sans-serif" font-size="9" fill="#889AB0" font-style="italic">Source: Industry analysis</text>
 
-  <!-- CARD 2: 44.8% wait reduction -->
+  <!-- ============================================================
+       CARD 2: 44.8% wait reduction  (teal) — CLOCK ICON
+  ============================================================ -->
   <rect x="415" y="70" width="355" height="165" rx="14" fill="url(#card2)" filter="url(#shadow)"/>
-  <circle cx="465" cy="120" r="28" fill="#FFFFFF" fill-opacity="0.15"/>
-  <text x="465" y="130" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="24" font-weight="700" fill="#FFFFFF">⏱</text>
-  <text x="590" y="115" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="42" font-weight="900" fill="#DFFFFF">44.8%</text>
-  <text x="590" y="140" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="12" font-weight="600" fill="#FFFFFF">reduction in patient wait time</text>
-  <text x="590" y="163" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="10" fill="#CCEEFF">achieved with digital twin dynamic</text>
-  <text x="590" y="178" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="10" fill="#CCEEFF">waitlist management</text>
-  <text x="590" y="216" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#99BBCC" font-style="italic">Silva-Aravena et al. (2025)</text>
+  <!-- Clock icon -->
+  <circle cx="465" cy="120" r="28" fill="#FFFFFF" fill-opacity="0.12"/>
+  <circle cx="465" cy="120" r="19" fill="none" stroke="white" stroke-width="2.5" stroke-opacity="0.75"/>
+  <!-- Hour hand pointing ~10 o'clock -->
+  <line x1="465" y1="120" x2="457" y2="105" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-opacity="0.9"/>
+  <!-- Minute hand pointing ~2 o'clock -->
+  <line x1="465" y1="120" x2="476" y2="108" stroke="white" stroke-width="2" stroke-linecap="round" stroke-opacity="0.8"/>
+  <!-- Centre dot -->
+  <circle cx="465" cy="120" r="2.5" fill="white" fill-opacity="0.9"/>
+  <!-- 12 o'clock tick -->
+  <line x1="465" y1="102" x2="465" y2="106" stroke="white" stroke-width="2" stroke-linecap="round" stroke-opacity="0.6"/>
+  <!-- 6 o'clock tick -->
+  <line x1="465" y1="134" x2="465" y2="138" stroke="white" stroke-width="2" stroke-linecap="round" stroke-opacity="0.6"/>
+  <!-- Stat -->
+  <text x="590" y="115" text-anchor="middle" font-family="FreeSans,sans-serif" font-size="42" font-weight="700" fill="#DFFFFF">44.8%</text>
+  <text x="590" y="140" text-anchor="middle" font-family="FreeSans,sans-serif" font-size="12" font-weight="600" fill="#FFFFFF">reduction in patient wait time</text>
+  <text x="590" y="163" text-anchor="middle" font-family="FreeSans,sans-serif" font-size="10" fill="#CCEEFF">achieved with digital twin dynamic</text>
+  <text x="590" y="178" text-anchor="middle" font-family="FreeSans,sans-serif" font-size="10" fill="#CCEEFF">waitlist management</text>
+  <text x="590" y="216" text-anchor="middle" font-family="FreeSans,sans-serif" font-size="9" fill="#99BBCC" font-style="italic">Silva-Aravena et al. (2025)</text>
 
-  <!-- CARD 3: 14.5% utilization -->
+  <!-- ============================================================
+       CARD 3: 14.5% utilisation  (blue) — RISING CHART ICON
+  ============================================================ -->
   <rect x="30" y="255" width="355" height="165" rx="14" fill="url(#card3)" filter="url(#shadow)"/>
-  <circle cx="80" cy="305" r="28" fill="#FFFFFF" fill-opacity="0.15"/>
-  <text x="80" y="313" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="22" font-weight="700" fill="#FFFFFF">📈</text>
-  <text x="205" y="300" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="42" font-weight="900" fill="#AADDFF">14.5%</text>
-  <text x="205" y="325" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="12" font-weight="600" fill="#FFFFFF">increase in machine utilization</text>
-  <text x="205" y="348" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="10" fill="#AACCEE">proven via reinforcement learning</text>
-  <text x="205" y="363" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="10" fill="#AACCEE">in digital twin environments</text>
-  <text x="205" y="400" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#7799AA" font-style="italic">Silva-Aravena et al. (2025)</text>
+  <!-- Rising chart icon -->
+  <circle cx="80" cy="305" r="28" fill="#FFFFFF" fill-opacity="0.12"/>
+  <!-- Chart axes -->
+  <line x1="62" y1="322" x2="98" y2="322" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-opacity="0.6"/>
+  <line x1="62" y1="290" x2="62" y2="322" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-opacity="0.6"/>
+  <!-- Rising trend line -->
+  <polyline points="65,318 72,309 79,313 88,296 97,298" fill="none" stroke="white" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.9"/>
+  <!-- Arrow tip at end of trend -->
+  <polyline points="95,294 98,291 101,294" fill="none" stroke="white" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.9"/>
+  <!-- Stat -->
+  <text x="205" y="300" text-anchor="middle" font-family="FreeSans,sans-serif" font-size="42" font-weight="700" fill="#AADDFF">14.5%</text>
+  <text x="205" y="325" text-anchor="middle" font-family="FreeSans,sans-serif" font-size="12" font-weight="600" fill="#FFFFFF">increase in machine utilization</text>
+  <text x="205" y="348" text-anchor="middle" font-family="FreeSans,sans-serif" font-size="10" fill="#AACCEE">proven via reinforcement learning</text>
+  <text x="205" y="363" text-anchor="middle" font-family="FreeSans,sans-serif" font-size="10" fill="#AACCEE">in digital twin environments</text>
+  <text x="205" y="400" text-anchor="middle" font-family="FreeSans,sans-serif" font-size="9" fill="#7799AA" font-style="italic">Silva-Aravena et al. (2025)</text>
 
-  <!-- CARD 4: 2-week advance warning -->
+  <!-- ============================================================
+       CARD 4: 2 weeks warning  (orange) — WARNING TRIANGLE ICON
+  ============================================================ -->
   <rect x="415" y="255" width="355" height="165" rx="14" fill="url(#card4)" filter="url(#shadow)"/>
-  <circle cx="465" cy="305" r="28" fill="#FFFFFF" fill-opacity="0.15"/>
-  <text x="465" y="315" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="24" font-weight="700" fill="#FFFFFF">⚠</text>
-  <text x="590" y="300" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="42" font-weight="900" fill="#FFEEDD">2 weeks</text>
-  <text x="590" y="325" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="12" font-weight="600" fill="#FFFFFF">advance hardware failure warning</text>
-  <text x="590" y="348" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="10" fill="#FFD8BB">by monitoring tube life and arcing</text>
-  <text x="590" y="363" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="10" fill="#FFD8BB">events — turning crisis into plan</text>
-  <text x="590" y="400" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#CC9977" font-style="italic">Predictive maintenance module</text>
+  <!-- Warning triangle icon -->
+  <circle cx="465" cy="305" r="28" fill="#FFFFFF" fill-opacity="0.12"/>
+  <!-- Triangle -->
+  <path d="M 465,284 L 486,320 L 444,320 Z" fill="none" stroke="white" stroke-width="2.8" stroke-linejoin="round" stroke-opacity="0.85"/>
+  <!-- Exclamation body -->
+  <line x1="465" y1="295" x2="465" y2="311" stroke="white" stroke-width="2.8" stroke-linecap="round" stroke-opacity="0.9"/>
+  <!-- Exclamation dot -->
+  <circle cx="465" cy="316" r="2" fill="white" fill-opacity="0.9"/>
+  <!-- Stat -->
+  <text x="590" y="300" text-anchor="middle" font-family="FreeSans,sans-serif" font-size="42" font-weight="700" fill="#FFEEDD">2 weeks</text>
+  <text x="590" y="325" text-anchor="middle" font-family="FreeSans,sans-serif" font-size="12" font-weight="600" fill="#FFFFFF">advance hardware failure warning</text>
+  <text x="590" y="348" text-anchor="middle" font-family="FreeSans,sans-serif" font-size="10" fill="#FFD8BB">by monitoring tube life and arcing</text>
+  <text x="590" y="363" text-anchor="middle" font-family="FreeSans,sans-serif" font-size="10" fill="#FFD8BB">events - turning crisis into plan</text>
+  <text x="590" y="400" text-anchor="middle" font-family="FreeSans,sans-serif" font-size="9" fill="#CC9977" font-style="italic">Predictive maintenance module</text>
 </svg>
