@@ -1,0 +1,80 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 450" width="800" height="450">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#F0F7F7;stop-opacity:1"/>
+      <stop offset="100%" style="stop-color:#FFFFFF;stop-opacity:1"/>
+    </linearGradient>
+    <linearGradient id="hubGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#003087;stop-opacity:1"/>
+      <stop offset="100%" style="stop-color:#005599;stop-opacity:1"/>
+    </linearGradient>
+    <linearGradient id="tealGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#009999;stop-opacity:1"/>
+      <stop offset="100%" style="stop-color:#00CCCC;stop-opacity:1"/>
+    </linearGradient>
+    <linearGradient id="navyGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#003087;stop-opacity:1"/>
+      <stop offset="100%" style="stop-color:#0050AA;stop-opacity:1"/>
+    </linearGradient>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="4" result="coloredBlur"/>
+      <feMerge>
+        <feMergeNode in="coloredBlur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="shadow">
+      <feDropShadow dx="2" dy="3" stdDeviation="4" flood-color="#00000022"/>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect width="800" height="450" fill="url(#bgGrad)"/>
+
+  <!-- Title -->
+  <text x="400" y="38" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="18" font-weight="700" fill="#003087">The Four Twins Ecosystem</text>
+  <line x1="200" y1="48" x2="600" y2="48" stroke="#009999" stroke-width="2"/>
+
+  <!-- Central hub -->
+  <circle cx="400" cy="230" r="58" fill="url(#hubGrad)" filter="url(#shadow)"/>
+  <text x="400" y="224" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="10" font-weight="700" fill="#FFFFFF">Siemens</text>
+  <text x="400" y="237" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="10" font-weight="700" fill="#009999">Digital</text>
+  <text x="400" y="250" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="10" font-weight="700" fill="#FFFFFF">Platform</text>
+
+  <!-- Connector lines (from center to each node) -->
+  <line x1="400" y1="172" x2="400" y2="118" stroke="#009999" stroke-width="1.5" stroke-dasharray="5,3" opacity="0.7"/>
+  <line x1="400" y1="288" x2="400" y2="340" stroke="#009999" stroke-width="1.5" stroke-dasharray="5,3" opacity="0.7"/>
+  <line x1="342" y1="230" x2="248" y2="230" stroke="#009999" stroke-width="1.5" stroke-dasharray="5,3" opacity="0.7"/>
+  <line x1="458" y1="230" x2="552" y2="230" stroke="#EC6602" stroke-width="2.5" stroke-dasharray="5,3" opacity="0.9"/>
+
+  <!-- TOP: Device Twin -->
+  <rect x="320" y="58" width="160" height="60" rx="10" fill="url(#navyGrad)" filter="url(#shadow)"/>
+  <text x="400" y="83" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="13" font-weight="700" fill="#FFFFFF">Device Twin</text>
+  <text x="400" y="101" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9.5" fill="#B0C4E8">Hardware monitoring &amp; maintenance</text>
+
+  <!-- BOTTOM: Patient Twin -->
+  <rect x="320" y="340" width="160" height="60" rx="10" fill="url(#navyGrad)" filter="url(#shadow)"/>
+  <text x="400" y="365" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="13" font-weight="700" fill="#FFFFFF">Patient Twin</text>
+  <text x="400" y="383" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9.5" fill="#B0C4E8">Care pathway &amp; clinical outcomes</text>
+
+  <!-- LEFT: Factory Twin -->
+  <rect x="80" y="200" width="148" height="60" rx="10" fill="url(#navyGrad)" filter="url(#shadow)"/>
+  <text x="154" y="225" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="13" font-weight="700" fill="#FFFFFF">Factory Twin</text>
+  <text x="154" y="243" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9.5" fill="#B0C4E8">Production &amp; supply chain</text>
+
+  <!-- RIGHT: Customer Twin (HIGHLIGHTED) -->
+  <rect x="569" y="196" width="160" height="68" rx="10" fill="url(#tealGrad)" filter="url(#glow)" stroke="#00FFFF" stroke-width="2" stroke-opacity="0.6"/>
+  <text x="649" y="222" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="13" font-weight="700" fill="#FFFFFF">Customer Twin</text>
+  <text x="649" y="239" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9.5" fill="#DEFFFF">Workflow simulation &amp;</text>
+  <text x="649" y="253" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9.5" fill="#DEFFFF">schedule optimization</text>
+
+  <!-- "YOU ARE HERE" badge on Customer Twin -->
+  <rect x="597" y="175" width="104" height="20" rx="10" fill="#EC6602"/>
+  <text x="649" y="188" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" font-weight="700" fill="#FFFFFF">▶ ACTIVE PROJECT</text>
+
+  <!-- Legend -->
+  <rect x="20" y="400" width="14" height="14" rx="3" fill="url(#tealGrad)"/>
+  <text x="40" y="412" font-family="'Helvetica Neue',Arial,sans-serif" font-size="10" fill="#003087">Current focus</text>
+  <rect x="130" y="400" width="14" height="14" rx="3" fill="url(#navyGrad)"/>
+  <text x="150" y="412" font-family="'Helvetica Neue',Arial,sans-serif" font-size="10" fill="#003087">Future roadmap</text>
+</svg>

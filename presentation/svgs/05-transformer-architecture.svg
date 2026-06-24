@@ -1,0 +1,131 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 450" width="800" height="450">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#F0F7F7"/>
+      <stop offset="100%" style="stop-color:#FFFFFF"/>
+    </linearGradient>
+    <linearGradient id="tier1" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#003087"/>
+      <stop offset="100%" style="stop-color:#0050AA"/>
+    </linearGradient>
+    <linearGradient id="tier2" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#006666"/>
+      <stop offset="100%" style="stop-color:#009999"/>
+    </linearGradient>
+    <linearGradient id="tier3" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#885500"/>
+      <stop offset="100%" style="stop-color:#BB7700"/>
+    </linearGradient>
+    <filter id="shadow">
+      <feDropShadow dx="0" dy="3" stdDeviation="5" flood-color="#00000028"/>
+    </filter>
+    <marker id="arrR" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#009999"/>
+    </marker>
+    <marker id="arrD" markerWidth="6" markerHeight="8" refX="3" refY="7" orient="auto">
+      <polygon points="0 0, 6 0, 3 8" fill="#009999"/>
+    </marker>
+    <marker id="arrOr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#EC6602"/>
+    </marker>
+  </defs>
+
+  <rect width="800" height="450" fill="url(#bg)"/>
+
+  <!-- Title -->
+  <text x="400" y="34" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="18" font-weight="700" fill="#003087">Unified Transformer Architecture</text>
+  <line x1="200" y1="44" x2="600" y2="44" stroke="#009999" stroke-width="2"/>
+  <text x="400" y="62" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="10.5" fill="#6B7B7B">Three-tier design shared by both Exchange and Examination models</text>
+
+  <!-- ============================================================
+       TIER 1: CONDITIONING ENCODER (left box)
+  ============================================================ -->
+  <rect x="30" y="80" width="210" height="290" rx="12" fill="url(#tier1)" filter="url(#shadow)"/>
+  <rect x="38" y="88" width="194" height="274" rx="8" fill="none" stroke="#4488CC" stroke-width="0.8" stroke-opacity="0.5"/>
+  <text x="135" y="108" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="10" font-weight="700" fill="#AACCFF" letter-spacing="1">TIER 1</text>
+  <text x="135" y="126" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="12" font-weight="700" fill="#FFFFFF">Conditioning</text>
+  <text x="135" y="143" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="12" font-weight="700" fill="#FFFFFF">Encoder</text>
+  <line x1="55" y1="152" x2="215" y2="152" stroke="#4488CC" stroke-width="0.7" stroke-opacity="0.5"/>
+
+  <!-- Input features list -->
+  <text x="135" y="170" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#DDEEFF">Patient features (×5)</text>
+  <text x="135" y="183" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="8" fill="#99BBDD">Age · Weight · Height · PTAB · Direction</text>
+  <text x="135" y="200" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#DDEEFF">Temporal features (×5)</text>
+  <text x="135" y="213" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="8" fill="#99BBDD">Hour · DOW · Week · sin/cos encoding</text>
+  <text x="135" y="230" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#DDEEFF">Coil features (×30)</text>
+  <text x="135" y="243" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="8" fill="#99BBDD">BC · SP1–8 · HE1–4 · body region emb.</text>
+  <text x="135" y="263" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#DDEEFF">Conditioning scale buffer</text>
+  <text x="135" y="276" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="8" fill="#99BBDD">prevents LayerNorm erasure of</text>
+  <text x="135" y="289" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="8" fill="#99BBDD">categorical embeddings</text>
+  <line x1="55" y1="300" x2="215" y2="300" stroke="#4488CC" stroke-width="0.7" stroke-opacity="0.5"/>
+  <text x="135" y="318" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#AACCFF">Output: memory vectors</text>
+  <text x="135" y="333" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="11" font-weight="700" fill="#00DDDD">d_model = 128</text>
+  <text x="135" y="349" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="8" fill="#88AACC">3 encoder layers · 4 heads · FF=512</text>
+
+  <!-- Arrow: Tier1 → Tier2 (cross-attention) -->
+  <line x1="242" y1="225" x2="286" y2="225" stroke="#00CCCC" stroke-width="2.5" marker-end="url(#arrR)"/>
+  <text x="264" y="218" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="8" fill="#007777">memory</text>
+
+  <!-- ============================================================
+       TIER 2: TOKEN DECODER (center box)
+  ============================================================ -->
+  <rect x="288" y="80" width="224" height="290" rx="12" fill="url(#tier2)" filter="url(#shadow)"/>
+  <rect x="296" y="88" width="208" height="274" rx="8" fill="none" stroke="#00CCCC" stroke-width="0.8" stroke-opacity="0.5"/>
+  <text x="400" y="108" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="10" font-weight="700" fill="#AAFFFF" letter-spacing="1">TIER 2</text>
+  <text x="400" y="126" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="12" font-weight="700" fill="#FFFFFF">Token Decoder</text>
+  <text x="400" y="143" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="10" fill="#CCFFFF">(Autoregressive)</text>
+  <line x1="305" y1="152" x2="505" y2="152" stroke="#00CCCC" stroke-width="0.7" stroke-opacity="0.5"/>
+
+  <text x="400" y="172" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#CCFFFF">Input: previous tokens (left-to-right)</text>
+  <!-- Causal mask diagram -->
+  <rect x="330" y="180" width="140" height="52" rx="6" fill="#004444" stroke="#00AAAA" stroke-width="0.8"/>
+  <text x="400" y="196" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="8.5" fill="#AAFFFF">Causal self-attention mask</text>
+  <text x="400" y="210" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="8" fill="#99DDDD">token_i → context: tokens 0..i−1</text>
+  <text x="400" y="224" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="8" fill="#99DDDD">Cross-attention ← Tier 1 memory</text>
+
+  <text x="400" y="250" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#CCFFFF">Vocabulary size: 18 source IDs</text>
+  <text x="400" y="265" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="8" fill="#99DDDD">MRI_CCS · MRI_EXU · MRI_MSR · MRI_MPT · PAD</text>
+
+  <line x1="305" y1="278" x2="505" y2="278" stroke="#00CCCC" stroke-width="0.7" stroke-opacity="0.5"/>
+  <text x="400" y="297" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#AAFFFF">3 decoder layers · 4 heads · FF=512</text>
+  <text x="400" y="316" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#CCFFFF">Output: next-token logits</text>
+  <text x="400" y="336" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="11" font-weight="700" fill="#00FFCC">→ event token sequence</text>
+  <text x="400" y="353" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="8" fill="#99DDDD">softmax · top-k sampling</text>
+
+  <!-- Arrow: Tier2 → Tier3 -->
+  <line x1="514" y1="225" x2="558" y2="225" stroke="#CC8800" stroke-width="2.5" marker-end="url(#arrOr)"/>
+  <text x="536" y="218" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="8" fill="#BB7700">sequence</text>
+
+  <!-- ============================================================
+       TIER 3: DURATION HEAD (right box)
+  ============================================================ -->
+  <rect x="560" y="80" width="210" height="290" rx="12" fill="url(#tier3)" filter="url(#shadow)"/>
+  <rect x="568" y="88" width="194" height="274" rx="8" fill="none" stroke="#EEAA00" stroke-width="0.8" stroke-opacity="0.5"/>
+  <text x="665" y="108" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="10" font-weight="700" fill="#FFDDAA" letter-spacing="1">TIER 3</text>
+  <text x="665" y="126" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="12" font-weight="700" fill="#FFFFFF">Duration Head</text>
+  <text x="665" y="143" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="10" fill="#FFEECC">(Single-Pass Bidirectional)</text>
+  <line x1="578" y1="152" x2="758" y2="152" stroke="#EEAA00" stroke-width="0.7" stroke-opacity="0.5"/>
+
+  <text x="665" y="172" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#FFEECC">Input: full decoded sequence</text>
+  <text x="665" y="188" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="8" fill="#DDCCAA">Key-padding masks hide PAD + END</text>
+  <text x="665" y="206" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#FFEECC">Bidirectional attention</text>
+  <text x="665" y="222" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="8" fill="#DDCCAA">each token sees full context</text>
+  <line x1="578" y1="238" x2="758" y2="238" stroke="#EEAA00" stroke-width="0.7" stroke-opacity="0.5"/>
+  <text x="665" y="256" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#FFEECC">Duration mode: log-space</text>
+  <text x="665" y="272" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="8" fill="#DDCCAA">log1p transform handles right-skew</text>
+  <text x="665" y="288" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="8" fill="#DDCCAA">duration_scale = 60 s</text>
+  <line x1="578" y1="300" x2="758" y2="300" stroke="#EEAA00" stroke-width="0.7" stroke-opacity="0.5"/>
+  <text x="665" y="318" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#FFDDAA">Output per token:</text>
+  <!-- μ ± σ display -->
+  <rect x="595" y="325" width="140" height="36" rx="8" fill="#553300" stroke="#CC8800" stroke-width="1"/>
+  <text x="665" y="342" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="14" font-weight="700" fill="#FFCC44">μ ± σ</text>
+  <text x="665" y="356" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="8" fill="#FFDDAA">duration mean &amp; std (seconds)</text>
+
+  <!-- Loss weight note -->
+  <text x="400" y="400" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9.5" fill="#6B7B7B">Loss = token_CE + 0.3 × duration_MSE (log-space)   ·   Training: early stopping, validation split per scanner</text>
+
+  <!-- Tier labels at bottom -->
+  <text x="135" y="420" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#003087" font-weight="600">Patient context →  memory</text>
+  <text x="400" y="420" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#007777" font-weight="600">Autoregressive sequence generation</text>
+  <text x="665" y="420" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#885500" font-weight="600">Duration uncertainty per token</text>
+</svg>

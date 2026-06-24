@@ -1,0 +1,128 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 450" width="800" height="450">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#F0F7F7"/>
+      <stop offset="100%" style="stop-color:#FFFFFF"/>
+    </linearGradient>
+    <linearGradient id="statGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#003087"/>
+      <stop offset="100%" style="stop-color:#009999"/>
+    </linearGradient>
+    <filter id="shadow">
+      <feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="#00000025"/>
+    </filter>
+  </defs>
+
+  <rect width="800" height="450" fill="url(#bg)"/>
+
+  <!-- Title -->
+  <text x="400" y="34" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="18" font-weight="700" fill="#003087">Data Foundation</text>
+  <line x1="280" y1="44" x2="520" y2="44" stroke="#009999" stroke-width="2"/>
+
+  <!-- ===================== SCANNER GRID ===================== -->
+  <!-- 8 columns × 5 rows = 40 scanner icons -->
+  <!-- Each cell: 28×28, starting at x=30, y=70, gap=8 -->
+
+  <text x="152" y="68" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="11" font-weight="700" fill="#003087">40 MRI Scanners</text>
+
+  <!-- Draw 40 scanner rectangles (8×5 grid) -->
+  <!-- Row 1 -->
+  <rect x="30" y="76" width="28" height="36" rx="4" fill="#003087" opacity="0.85" filter="url(#shadow)"/>
+  <rect x="66" y="76" width="28" height="36" rx="4" fill="#003087" opacity="0.85" filter="url(#shadow)"/>
+  <rect x="102" y="76" width="28" height="36" rx="4" fill="#003087" opacity="0.85" filter="url(#shadow)"/>
+  <rect x="138" y="76" width="28" height="36" rx="4" fill="#003087" opacity="0.85" filter="url(#shadow)"/>
+  <rect x="174" y="76" width="28" height="36" rx="4" fill="#003087" opacity="0.85" filter="url(#shadow)"/>
+  <rect x="210" y="76" width="28" height="36" rx="4" fill="#003087" opacity="0.85" filter="url(#shadow)"/>
+  <rect x="246" y="76" width="28" height="36" rx="4" fill="#003087" opacity="0.85" filter="url(#shadow)"/>
+  <rect x="282" y="76" width="28" height="36" rx="4" fill="#003087" opacity="0.85" filter="url(#shadow)"/>
+  <!-- Row 2 -->
+  <rect x="30" y="120" width="28" height="36" rx="4" fill="#005588" opacity="0.85" filter="url(#shadow)"/>
+  <rect x="66" y="120" width="28" height="36" rx="4" fill="#005588" opacity="0.85" filter="url(#shadow)"/>
+  <rect x="102" y="120" width="28" height="36" rx="4" fill="#005588" opacity="0.85" filter="url(#shadow)"/>
+  <rect x="138" y="120" width="28" height="36" rx="4" fill="#005588" opacity="0.85" filter="url(#shadow)"/>
+  <rect x="174" y="120" width="28" height="36" rx="4" fill="#005588" opacity="0.85" filter="url(#shadow)"/>
+  <rect x="210" y="120" width="28" height="36" rx="4" fill="#005588" opacity="0.85" filter="url(#shadow)"/>
+  <rect x="246" y="120" width="28" height="36" rx="4" fill="#005588" opacity="0.85" filter="url(#shadow)"/>
+  <rect x="282" y="120" width="28" height="36" rx="4" fill="#005588" opacity="0.85" filter="url(#shadow)"/>
+  <!-- Row 3 -->
+  <rect x="30" y="164" width="28" height="36" rx="4" fill="#007777" opacity="0.85" filter="url(#shadow)"/>
+  <rect x="66" y="164" width="28" height="36" rx="4" fill="#007777" opacity="0.85" filter="url(#shadow)"/>
+  <rect x="102" y="164" width="28" height="36" rx="4" fill="#007777" opacity="0.85" filter="url(#shadow)"/>
+  <rect x="138" y="164" width="28" height="36" rx="4" fill="#007777" opacity="0.85" filter="url(#shadow)"/>
+  <rect x="174" y="164" width="28" height="36" rx="4" fill="#007777" opacity="0.85" filter="url(#shadow)"/>
+  <rect x="210" y="164" width="28" height="36" rx="4" fill="#007777" opacity="0.85" filter="url(#shadow)"/>
+  <rect x="246" y="164" width="28" height="36" rx="4" fill="#007777" opacity="0.85" filter="url(#shadow)"/>
+  <rect x="282" y="164" width="28" height="36" rx="4" fill="#007777" opacity="0.85" filter="url(#shadow)"/>
+  <!-- Row 4 -->
+  <rect x="30" y="208" width="28" height="36" rx="4" fill="#009999" opacity="0.85" filter="url(#shadow)"/>
+  <rect x="66" y="208" width="28" height="36" rx="4" fill="#009999" opacity="0.85" filter="url(#shadow)"/>
+  <rect x="102" y="208" width="28" height="36" rx="4" fill="#009999" opacity="0.85" filter="url(#shadow)"/>
+  <rect x="138" y="208" width="28" height="36" rx="4" fill="#009999" opacity="0.85" filter="url(#shadow)"/>
+  <rect x="174" y="208" width="28" height="36" rx="4" fill="#009999" opacity="0.85" filter="url(#shadow)"/>
+  <rect x="210" y="208" width="28" height="36" rx="4" fill="#009999" opacity="0.85" filter="url(#shadow)"/>
+  <rect x="246" y="208" width="28" height="36" rx="4" fill="#009999" opacity="0.85" filter="url(#shadow)"/>
+  <rect x="282" y="208" width="28" height="36" rx="4" fill="#009999" opacity="0.85" filter="url(#shadow)"/>
+  <!-- Row 5 -->
+  <rect x="30" y="252" width="28" height="36" rx="4" fill="#00BBBB" opacity="0.85" filter="url(#shadow)"/>
+  <rect x="66" y="252" width="28" height="36" rx="4" fill="#00BBBB" opacity="0.85" filter="url(#shadow)"/>
+  <rect x="102" y="252" width="28" height="36" rx="4" fill="#00BBBB" opacity="0.85" filter="url(#shadow)"/>
+  <rect x="138" y="252" width="28" height="36" rx="4" fill="#00BBBB" opacity="0.85" filter="url(#shadow)"/>
+  <rect x="174" y="252" width="28" height="36" rx="4" fill="#00BBBB" opacity="0.85" filter="url(#shadow)"/>
+  <rect x="210" y="252" width="28" height="36" rx="4" fill="#00BBBB" opacity="0.85" filter="url(#shadow)"/>
+  <rect x="246" y="252" width="28" height="36" rx="4" fill="#00BBBB" opacity="0.85" filter="url(#shadow)"/>
+  <rect x="282" y="252" width="28" height="36" rx="4" fill="#00BBBB" opacity="0.85" filter="url(#shadow)"/>
+
+  <!-- Small "scanner" screen line on each cell row 1 -->
+  <!-- (simplified — just a horizontal line near top of each rect) -->
+
+  <!-- ===================== STAT CARDS ===================== -->
+  <!-- Right side: 2x2 grid of stat cards -->
+
+  <!-- Card: Date Range -->
+  <rect x="340" y="70" width="200" height="85" rx="10" fill="#003087" filter="url(#shadow)"/>
+  <text x="440" y="98" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="28" font-weight="900" fill="#00DDDD">2 months</text>
+  <text x="440" y="118" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="10" fill="#AACCEE">of raw event logs</text>
+  <text x="440" y="134" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#7799BB">April – May 2024</text>
+
+  <!-- Card: Token vocabulary -->
+  <rect x="560" y="70" width="200" height="85" rx="10" fill="#005577" filter="url(#shadow)"/>
+  <text x="660" y="98" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="28" font-weight="900" fill="#AAFFFF">18 tokens</text>
+  <text x="660" y="118" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="10" fill="#CCEEFF">source ID vocabulary</text>
+  <text x="660" y="134" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#99BBCC">MRI_CCS · EXU · MSR · MPT · FRR</text>
+
+  <!-- Card: Body regions -->
+  <rect x="340" y="170" width="200" height="85" rx="10" fill="#007777" filter="url(#shadow)"/>
+  <text x="440" y="198" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="28" font-weight="900" fill="#DFFFFF">11 regions</text>
+  <text x="440" y="218" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="10" fill="#CCFFFF">body region classes</text>
+  <text x="440" y="234" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#99DDDD">HEAD·NECK·CHEST·ABD·PELVIS·SPINE...</text>
+
+  <!-- Card: Sequence types -->
+  <rect x="560" y="170" width="200" height="85" rx="10" fill="#009999" filter="url(#shadow)"/>
+  <text x="660" y="198" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="28" font-weight="900" fill="#FFFFFF">15 types</text>
+  <text x="660" y="218" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="10" fill="#DFFFFF">MRI pulse sequence types</text>
+  <text x="660" y="234" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#AAFFFF">TSE · SPACE · HASTE · GRE · EPI · TFL…</text>
+
+  <!-- Execution environments -->
+  <text x="580" y="282" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="11" font-weight="700" fill="#003087">Execution Environments</text>
+  <line x1="350" y1="288" x2="810" y2="288" stroke="#CCDDEE" stroke-width="1"/>
+
+  <rect x="345" y="298" width="195" height="72" rx="10" fill="#F0F7F7" stroke="#003087" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="442" y="320" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="11" font-weight="700" fill="#003087">Local (CPU)</text>
+  <text x="442" y="338" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#445577">run_all.py · steps 1–7</text>
+  <text x="442" y="353" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#445577">PyTorch · TeX Live 2023</text>
+  <text x="442" y="365" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#445577">Fedora Linux</text>
+
+  <rect x="562" y="298" width="210" height="72" rx="10" fill="#F0F7F7" stroke="#009999" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="667" y="320" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="11" font-weight="700" fill="#007777">Databricks (Spark)</text>
+  <text x="667" y="338" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#338888">spark_pipeline.py</text>
+  <text x="667" y="353" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#338888">applyInPandas · parallel preprocessing</text>
+  <text x="667" y="365" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#338888">Same model weights</text>
+
+  <!-- Bottom note -->
+  <text x="400" y="400" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#6B7B7B" font-style="italic">Each CSV contains thousands of timestamped hardware events: coil changes, patient tracking, scan markers, and duration telemetry</text>
+
+  <!-- Grid label -->
+  <text x="156" y="308" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="10" fill="#003087" font-weight="600">Serial IDs: 141049, 155687,</text>
+  <text x="156" y="322" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="10" fill="#003087" font-weight="600">175693, 175727, 175832…</text>
+  <text x="156" y="340" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#6B7B7B">and 34 more scanners</text>
+</svg>

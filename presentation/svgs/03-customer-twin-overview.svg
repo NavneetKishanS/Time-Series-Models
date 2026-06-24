@@ -1,0 +1,124 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 450" width="800" height="450">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#F0F7F7"/>
+      <stop offset="100%" style="stop-color:#FFFFFF"/>
+    </linearGradient>
+    <linearGradient id="engineGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#003087"/>
+      <stop offset="100%" style="stop-color:#009999"/>
+    </linearGradient>
+    <linearGradient id="inputGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#E6F0F8"/>
+      <stop offset="100%" style="stop-color:#D0E8F0"/>
+    </linearGradient>
+    <linearGradient id="outputGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#D0F0F0"/>
+      <stop offset="100%" style="stop-color:#C0E8E8"/>
+    </linearGradient>
+    <linearGradient id="arrowGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#003087"/>
+      <stop offset="100%" style="stop-color:#009999"/>
+    </linearGradient>
+    <filter id="shadow">
+      <feDropShadow dx="0" dy="3" stdDeviation="5" flood-color="#00000025"/>
+    </filter>
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#009999"/>
+    </marker>
+    <marker id="arrowhead2" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#009999"/>
+    </marker>
+  </defs>
+
+  <rect width="800" height="450" fill="url(#bg)"/>
+
+  <!-- Title -->
+  <text x="400" y="36" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="18" font-weight="700" fill="#003087">The Customer Twin: System Overview</text>
+  <line x1="180" y1="46" x2="620" y2="46" stroke="#009999" stroke-width="2"/>
+
+  <!-- === INPUT COLUMN === -->
+  <text x="120" y="72" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="12" font-weight="700" fill="#003087">DATA INPUTS</text>
+
+  <!-- Input boxes -->
+  <rect x="20" y="82" width="200" height="44" rx="8" fill="url(#inputGrad)" stroke="#003087" stroke-width="1.2" filter="url(#shadow)"/>
+  <text x="120" y="99" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="11" font-weight="700" fill="#003087">MRI Event Logs</text>
+  <text x="120" y="115" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#445577">40 scanners · Apr–May 2024</text>
+
+  <rect x="20" y="140" width="200" height="44" rx="8" fill="url(#inputGrad)" stroke="#003087" stroke-width="1.2" filter="url(#shadow)"/>
+  <text x="120" y="157" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="11" font-weight="700" fill="#003087">Patient Demographics</text>
+  <text x="120" y="173" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#445577">Age · Weight · Height · Direction</text>
+
+  <rect x="20" y="198" width="200" height="44" rx="8" fill="url(#inputGrad)" stroke="#003087" stroke-width="1.2" filter="url(#shadow)"/>
+  <text x="120" y="215" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="11" font-weight="700" fill="#003087">Coil State Signals</text>
+  <text x="120" y="231" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#445577">MRI_CCS_11 · BC · SP1–SP8 · HE1–HE4</text>
+
+  <rect x="20" y="256" width="200" height="44" rx="8" fill="url(#inputGrad)" stroke="#003087" stroke-width="1.2" filter="url(#shadow)"/>
+  <text x="120" y="273" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="11" font-weight="700" fill="#003087">Hardware Signals</text>
+  <text x="120" y="289" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#445577">Tube life · Arcing events · FRR codes</text>
+
+  <rect x="20" y="314" width="200" height="44" rx="8" fill="url(#inputGrad)" stroke="#003087" stroke-width="1.2" filter="url(#shadow)"/>
+  <text x="120" y="331" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="11" font-weight="700" fill="#003087">Body Region Sequences</text>
+  <text x="120" y="347" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#445577">HEAD · SPINE · PELVIS · 11 regions</text>
+
+  <!-- Arrow: inputs → engine -->
+  <line x1="222" y1="225" x2="278" y2="225" stroke="url(#arrowGrad)" stroke-width="3" marker-end="url(#arrowhead)"/>
+
+  <!-- === ENGINE (CENTER) === -->
+  <rect x="280" y="80" width="240" height="300" rx="16" fill="url(#engineGrad)" filter="url(#shadow)"/>
+  <!-- Inner glow ring -->
+  <rect x="290" y="90" width="220" height="280" rx="12" fill="none" stroke="#00CCCC" stroke-width="1" stroke-opacity="0.4"/>
+
+  <text x="400" y="122" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="10" font-weight="700" fill="#009999" letter-spacing="2">CUSTOMER TWIN</text>
+  <text x="400" y="142" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#AADDEE">Unified Transformer Architecture</text>
+
+  <!-- Divider -->
+  <line x1="300" y1="152" x2="500" y2="152" stroke="#00CCCC" stroke-width="0.8" stroke-opacity="0.5"/>
+
+  <text x="400" y="178" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="11" font-weight="600" fill="#DFFFFF">Orchestration Model</text>
+  <text x="400" y="195" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#99CCDD">Day-level body region sequencing</text>
+
+  <line x1="320" y1="208" x2="480" y2="208" stroke="#009999" stroke-width="0.6" stroke-opacity="0.4"/>
+
+  <text x="400" y="232" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="11" font-weight="600" fill="#DFFFFF">Exchange Model</text>
+  <text x="400" y="249" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#99CCDD">Patient setup &amp; transitions</text>
+
+  <line x1="320" y1="262" x2="480" y2="262" stroke="#009999" stroke-width="0.6" stroke-opacity="0.4"/>
+
+  <text x="400" y="286" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="11" font-weight="600" fill="#DFFFFF">Examination Model</text>
+  <text x="400" y="303" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#99CCDD">MRI scan sequence generation</text>
+
+  <line x1="320" y1="316" x2="480" y2="316" stroke="#009999" stroke-width="0.6" stroke-opacity="0.4"/>
+
+  <text x="400" y="338" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="10" font-weight="600" fill="#EC9955">μ ± σ  Uncertainty Quantification</text>
+  <text x="400" y="355" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#99CCDD">Per-token duration prediction</text>
+
+  <!-- Arrow: engine → outputs -->
+  <line x1="522" y1="225" x2="578" y2="225" stroke="url(#arrowGrad)" stroke-width="3" marker-end="url(#arrowhead2)"/>
+
+  <!-- === OUTPUT COLUMN === -->
+  <text x="680" y="72" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="12" font-weight="700" fill="#007777">OUTPUTS</text>
+
+  <rect x="580" y="82" width="200" height="44" rx="8" fill="url(#outputGrad)" stroke="#009999" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="680" y="99" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="11" font-weight="700" fill="#006666">Synthetic Schedules</text>
+  <text x="680" y="115" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#338888">Full simulated days with timestamps</text>
+
+  <rect x="580" y="140" width="200" height="44" rx="8" fill="url(#outputGrad)" stroke="#009999" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="680" y="157" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="11" font-weight="700" fill="#006666">ROI Simulation</text>
+  <text x="680" y="173" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#338888">Model coil/upgrade impact pre-purchase</text>
+
+  <rect x="580" y="198" width="200" height="44" rx="8" fill="url(#outputGrad)" stroke="#009999" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="680" y="215" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="11" font-weight="700" fill="#006666">Predictive Maintenance</text>
+  <text x="680" y="231" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#338888">2-week advance failure warning</text>
+
+  <rect x="580" y="256" width="200" height="44" rx="8" fill="url(#outputGrad)" stroke="#009999" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="680" y="273" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="11" font-weight="700" fill="#006666">Semantic Insight Agent</text>
+  <text x="680" y="289" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#338888">R&amp;D pain extraction from comments</text>
+
+  <rect x="580" y="314" width="200" height="44" rx="8" fill="url(#outputGrad)" stroke="#009999" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="680" y="331" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="11" font-weight="700" fill="#006666">VR Training Simulation</text>
+  <text x="680" y="347" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#338888">Unity · Meta Quest technician training</text>
+
+  <!-- Footer note -->
+  <text x="400" y="430" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#6B7B7B" font-style="italic">White-box AI: all predictions include uncertainty bounds and interpretable conditioning features</text>
+</svg>

@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 450" width="800" height="450">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#F0F7F7"/>
+      <stop offset="100%" style="stop-color:#FFFFFF"/>
+    </linearGradient>
+    <linearGradient id="card1" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#003087"/>
+      <stop offset="100%" style="stop-color:#004DAA"/>
+    </linearGradient>
+    <linearGradient id="card2" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#007777"/>
+      <stop offset="100%" style="stop-color:#009999"/>
+    </linearGradient>
+    <linearGradient id="card3" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#005588"/>
+      <stop offset="100%" style="stop-color:#0077BB"/>
+    </linearGradient>
+    <linearGradient id="card4" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#BB4400"/>
+      <stop offset="100%" style="stop-color:#EC6602"/>
+    </linearGradient>
+    <filter id="shadow">
+      <feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#00000030"/>
+    </filter>
+  </defs>
+
+  <rect width="800" height="450" fill="url(#bg)"/>
+
+  <!-- Title -->
+  <text x="400" y="38" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="18" font-weight="700" fill="#003087">The Hidden Cost of MRI Scheduling Inefficiency</text>
+  <line x1="160" y1="48" x2="640" y2="48" stroke="#009999" stroke-width="2"/>
+
+  <!-- CARD 1: $25K per machine -->
+  <rect x="30" y="70" width="355" height="165" rx="14" fill="url(#card1)" filter="url(#shadow)"/>
+  <!-- Dollar icon -->
+  <circle cx="80" cy="120" r="28" fill="#FFFFFF" fill-opacity="0.15"/>
+  <text x="80" y="128" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="26" font-weight="700" fill="#FFFFFF">$</text>
+  <!-- Stat -->
+  <text x="205" y="115" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="42" font-weight="900" fill="#00DDDD">$25K</text>
+  <text x="205" y="140" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="12" font-weight="600" fill="#FFFFFF">per machine / per year</text>
+  <text x="205" y="163" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="10" fill="#B0CCE8">estimated cost of unplanned downtime</text>
+  <text x="205" y="178" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="10" fill="#B0CCE8">and scheduling inefficiency</text>
+  <text x="205" y="216" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#889AB0" font-style="italic">Source: Industry analysis</text>
+
+  <!-- CARD 2: 44.8% wait reduction -->
+  <rect x="415" y="70" width="355" height="165" rx="14" fill="url(#card2)" filter="url(#shadow)"/>
+  <circle cx="465" cy="120" r="28" fill="#FFFFFF" fill-opacity="0.15"/>
+  <text x="465" y="130" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="24" font-weight="700" fill="#FFFFFF">⏱</text>
+  <text x="590" y="115" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="42" font-weight="900" fill="#DFFFFF">44.8%</text>
+  <text x="590" y="140" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="12" font-weight="600" fill="#FFFFFF">reduction in patient wait time</text>
+  <text x="590" y="163" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="10" fill="#CCEEFF">achieved with digital twin dynamic</text>
+  <text x="590" y="178" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="10" fill="#CCEEFF">waitlist management</text>
+  <text x="590" y="216" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#99BBCC" font-style="italic">Silva-Aravena et al. (2025)</text>
+
+  <!-- CARD 3: 14.5% utilization -->
+  <rect x="30" y="255" width="355" height="165" rx="14" fill="url(#card3)" filter="url(#shadow)"/>
+  <circle cx="80" cy="305" r="28" fill="#FFFFFF" fill-opacity="0.15"/>
+  <text x="80" y="313" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="22" font-weight="700" fill="#FFFFFF">📈</text>
+  <text x="205" y="300" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="42" font-weight="900" fill="#AADDFF">14.5%</text>
+  <text x="205" y="325" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="12" font-weight="600" fill="#FFFFFF">increase in machine utilization</text>
+  <text x="205" y="348" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="10" fill="#AACCEE">proven via reinforcement learning</text>
+  <text x="205" y="363" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="10" fill="#AACCEE">in digital twin environments</text>
+  <text x="205" y="400" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#7799AA" font-style="italic">Silva-Aravena et al. (2025)</text>
+
+  <!-- CARD 4: 2-week advance warning -->
+  <rect x="415" y="255" width="355" height="165" rx="14" fill="url(#card4)" filter="url(#shadow)"/>
+  <circle cx="465" cy="305" r="28" fill="#FFFFFF" fill-opacity="0.15"/>
+  <text x="465" y="315" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="24" font-weight="700" fill="#FFFFFF">⚠</text>
+  <text x="590" y="300" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="42" font-weight="900" fill="#FFEEDD">2 weeks</text>
+  <text x="590" y="325" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="12" font-weight="600" fill="#FFFFFF">advance hardware failure warning</text>
+  <text x="590" y="348" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="10" fill="#FFD8BB">by monitoring tube life and arcing</text>
+  <text x="590" y="363" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="10" fill="#FFD8BB">events — turning crisis into plan</text>
+  <text x="590" y="400" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#CC9977" font-style="italic">Predictive maintenance module</text>
+</svg>

@@ -1,0 +1,101 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 450" width="800" height="450">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#F0F7F7"/>
+      <stop offset="100%" style="stop-color:#FFFFFF"/>
+    </linearGradient>
+    <linearGradient id="baseBar" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#AA3300"/>
+      <stop offset="100%" style="stop-color:#CC4400"/>
+    </linearGradient>
+    <linearGradient id="saveBar" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#007777"/>
+      <stop offset="100%" style="stop-color:#009999"/>
+    </linearGradient>
+    <linearGradient id="netBar" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#003087"/>
+      <stop offset="100%" style="stop-color:#0055BB"/>
+    </linearGradient>
+    <filter id="shadow">
+      <feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="#00000025"/>
+    </filter>
+  </defs>
+
+  <rect width="800" height="450" fill="url(#bg)"/>
+
+  <!-- Title -->
+  <text x="400" y="34" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="18" font-weight="700" fill="#003087">Financial Impact per MRI Machine per Year</text>
+  <line x1="175" y1="44" x2="625" y2="44" stroke="#009999" stroke-width="2"/>
+
+  <!-- Chart area -->
+  <!-- Y axis -->
+  <line x1="80" y1="55" x2="80" y2="340" stroke="#333333" stroke-width="1.5"/>
+  <!-- X axis -->
+  <line x1="80" y1="340" x2="760" y2="340" stroke="#333333" stroke-width="1.5"/>
+
+  <!-- Y axis labels -->
+  <text x="72" y="340" text-anchor="end" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#555">$0</text>
+  <text x="72" y="290" text-anchor="end" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#555">$5K</text>
+  <text x="72" y="240" text-anchor="end" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#555">$10K</text>
+  <text x="72" y="190" text-anchor="end" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#555">$15K</text>
+  <text x="72" y="140" text-anchor="end" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#555">$20K</text>
+  <text x="72" y="90" text-anchor="end" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#555">$25K</text>
+  <!-- Y grid lines -->
+  <line x1="80" y1="290" x2="760" y2="290" stroke="#DDDDDD" stroke-width="0.8"/>
+  <line x1="80" y1="240" x2="760" y2="240" stroke="#DDDDDD" stroke-width="0.8"/>
+  <line x1="80" y1="190" x2="760" y2="190" stroke="#DDDDDD" stroke-width="0.8"/>
+  <line x1="80" y1="140" x2="760" y2="140" stroke="#DDDDDD" stroke-width="0.8"/>
+  <line x1="80" y1="90" x2="760" y2="90" stroke="#DDDDDD" stroke-width="0.8"/>
+
+  <!-- Y label -->
+  <text x="28" y="200" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="10" fill="#555" transform="rotate(-90,28,200)">Annual Value (USD)</text>
+
+  <!-- === BAR 1: Baseline Cost (red, full height $25K) -->
+  <!-- Height = 250px for $25K → 10px per $1K -->
+  <rect x="110" y="90" width="90" height="250" fill="url(#baseBar)" rx="4" filter="url(#shadow)"/>
+  <text x="155" y="108" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="13" font-weight="700" fill="#FFFFFF">$25K</text>
+  <text x="155" y="355" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#AA3300" font-weight="600">Baseline</text>
+  <text x="155" y="367" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="8" fill="#777">Annual loss</text>
+
+  <!-- Connector line floating -->
+  <line x1="202" y1="215" x2="245" y2="215" stroke="#CC4400" stroke-width="1.5" stroke-dasharray="4,3"/>
+
+  <!-- === BAR 2: Downtime savings ($7K) ↓ green saving -->
+  <!-- Base at y=215 (after baseline, waterfall style) -->
+  <!-- $7K = 70px height, from y=145 to y=215 -->
+  <rect x="255" y="145" width="90" height="70" fill="url(#saveBar)" rx="4" filter="url(#shadow)"/>
+  <text x="300" y="180" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="13" font-weight="700" fill="#FFFFFF">−$7K</text>
+  <text x="300" y="355" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#007777" font-weight="600">Downtime</text>
+  <text x="300" y="367" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="8" fill="#777">Predictive maint.</text>
+  <line x1="347" y1="145" x2="390" y2="145" stroke="#009999" stroke-width="1.5" stroke-dasharray="4,3"/>
+
+  <!-- === BAR 3: Wait-time efficiency ($6.2K) ↓ -->
+  <!-- From y=82 (145-63) to y=145 -->
+  <rect x="400" y="82" width="90" height="63" fill="url(#saveBar)" rx="4" filter="url(#shadow)"/>
+  <text x="445" y="118" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="12" font-weight="700" fill="#FFFFFF">−$6.2K</text>
+  <text x="445" y="355" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#007777" font-weight="600">Throughput</text>
+  <text x="445" y="367" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="8" fill="#777">+14.5% utilisation</text>
+  <line x1="492" y1="82" x2="535" y2="82" stroke="#009999" stroke-width="1.5" stroke-dasharray="4,3"/>
+
+  <!-- === BAR 4: Schedule optimisation ($4.5K) ↓ -->
+  <rect x="545" y="37" width="90" height="45" fill="url(#saveBar)" rx="4" filter="url(#shadow)"/>
+  <text x="590" y="65" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="12" font-weight="700" fill="#FFFFFF">−$4.5K</text>
+  <text x="590" y="355" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#007777" font-weight="600">Wait Reduction</text>
+  <text x="590" y="367" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="8" fill="#777">−44.8% patient wait</text>
+  <line x1="637" y1="37" x2="660" y2="37" stroke="#009999" stroke-width="1.5" stroke-dasharray="4,3"/>
+
+  <!-- === FINAL NET BAR: $7.3K remaining cost (navy) -->
+  <rect x="660" y="267" width="90" height="73" fill="url(#netBar)" rx="4" filter="url(#shadow)"/>
+  <text x="705" y="300" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="12" font-weight="700" fill="#FFFFFF">$7.3K</text>
+  <text x="705" y="316" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#CCDDFF">net residual</text>
+  <text x="705" y="355" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="9" fill="#003087" font-weight="600">Net Cost</text>
+  <text x="705" y="367" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="8" fill="#777">After Digital Twin</text>
+
+  <!-- Big savings callout -->
+  <rect x="190" y="380" width="420" height="38" rx="10" fill="#003087"/>
+  <text x="400" y="397" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="11" font-weight="700" fill="#FFFFFF">Total Recoverable Value: </text>
+  <text x="400" y="413" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="11" font-weight="700" fill="#00DDDD">~$17,700 per machine per year  (71% of baseline loss)</text>
+
+  <!-- ROI note -->
+  <text x="400" y="440" text-anchor="middle" font-family="'Helvetica Neue',Arial,sans-serif" font-size="8.5" fill="#6B7B7B" font-style="italic">Figures are estimates based on Silva-Aravena et al. (2025) and industry downtime analysis. Actual ROI varies by site.</text>
+</svg>
