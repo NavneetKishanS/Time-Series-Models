@@ -90,6 +90,17 @@ class SequenceGeneratorModel(nn.Module):
                     config['num_serials'], exam_emb_dim
                 )
                 cond_input_dim += 2 * exam_emb_dim
+                # Per-position bias injected into the duration encoder for every
+                # token. The conditioning token carries sequence_type once, but
+                # one conditioning-token → attention weight per position means
+                # the gradient from the single supervised finish token barely
+                # reaches it. Adding this bias to every position gives the
+                # duration encoder a direct per-type signal at the only place
+                # the NLL gradient flows. Zero-initialized so old checkpoints
+                # loaded with strict=False behave as if the bias does not exist.
+                self.duration_seq_type_bias = nn.Embedding(
+                    config['num_sequence_types'], self.d_model
+                )
 
         if self.has_phase_type:
             phase_emb_dim = self.d_model // 8  # 32 for d_model=256
@@ -186,9 +197,12 @@ class SequenceGeneratorModel(nn.Module):
         self._init_weights()
 
     def _init_weights(self):
-        for p in self.parameters():
+        for name, p in self.named_parameters():
             if p.dim() > 1:
-                nn.init.xavier_uniform_(p)
+                if 'duration_seq_type_bias' in name:
+                    nn.init.zeros_(p)
+                else:
+                    nn.init.xavier_uniform_(p)
 
     def _encode_conditioning(self, conditioning, body_region_info, phase_type=None):
         """
@@ -270,6 +284,16 @@ class SequenceGeneratorModel(nn.Module):
 
         # Embed tokens
         tok_emb = self.duration_token_embedding(token_ids)  # [batch, seq_len, d_model]
+
+        # Inject per-sequence-type bias at every token position when available.
+        # This gives the duration encoder a direct per-type signal at each
+        # position rather than relying solely on the single conditioning token,
+        # whose gradient from the finish-token NLL is diluted across all heads.
+        if self.use_exam_conditioning and hasattr(self, 'duration_seq_type_bias'):
+            seq_t = body_region_info.get('sequence_type')
+            if seq_t is not None:
+                st_bias = self.duration_seq_type_bias(seq_t)  # [batch, d_model]
+                tok_emb = tok_emb + st_bias.unsqueeze(1)      # broadcast over seq dim
 
         # Prepend conditioning token
         combined = torch.cat([cond_token, tok_emb], dim=1)  # [batch, 1+seq_len, d_model]

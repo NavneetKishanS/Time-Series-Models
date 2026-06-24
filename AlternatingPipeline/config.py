@@ -324,7 +324,10 @@ EXAMINATION_TRAINING_CONFIG = {
     'gradient_clip': 1.0,
     'early_stopping_patience': 15,
     'validation_split': 0.2,
-    'duration_loss_weight': 0.3,
+    'duration_loss_weight': 0.5,   # raised from 0.3 — gives duration head more gradient relative
+                                   # to token CE; the June-23 probe showed per-type bias (scout ×4.5
+                                   # over, space/tfl/medic ×2-3 under) caused by the head being
+                                   # undertrained, not by missing conditioning signal.
     'duration_scale': 60.0,       # normalise durations — divide raw seconds by 60 (1 min ref)
                                    # Lowered from 600 — real per-token durations average ~10 s, so
                                    # dividing by 600 compressed targets to ~0.02 and collapsed the

@@ -300,11 +300,41 @@ print("Exchange model loaded.")
 
 # --- load examination model ---
 examination_model = create_examination_model(EXAMINATION_MODEL_CONFIG).to(device)
-examination_model.load_state_dict(
-    torch.load(f"{MODELS_DIR}/examination/examination_model_best.pt", map_location=device)
-)
+_exam_ckpt = torch.load(f"{MODELS_DIR}/examination/examination_model_best.pt", map_location=device)
+_missing, _unexpected = examination_model.load_state_dict(_exam_ckpt, strict=False)
+if _missing:
+    print(f"  Examination model: {len(_missing)} new params not in checkpoint (zero-init): {_missing[:4]}")
+if _unexpected:
+    print(f"  Examination model: {len(_unexpected)} unexpected keys ignored: {_unexpected[:4]}")
 examination_model.eval()
 print("Examination model loaded.")
+
+# --- per-sequence-type duration calibration (from duration_probe.json) ---
+# The duration head predicts the right RELATIVE order of scan types but has
+# systematic per-type bias (scout over-predicted ×4.5; space/tfl/medic under-
+# predicted ×2-3). These multipliers correct the raw model output to the probe
+# target means, bridging the gap until a retrain with improved conditioning
+# absorbs the correction into the weights.
+_duration_probe_path = f"{MODELS_DIR}/examination/duration_probe.json"
+_duration_cal: dict[int, float] = {}  # seq_type_id -> target_s / predicted_s
+try:
+    with open(_duration_probe_path) as _pf:
+        _probe_data = json.load(_pf)
+    for _row in _probe_data.get('rows', []):
+        _st_name = _row['sequence_type']
+        _pred_s  = _row['predicted_s']
+        _tgt_s   = _row['target_s']
+        _st_id   = SEQUENCE_TYPE_VOCAB.get(_st_name, -1)
+        if _st_id >= 0 and _pred_s > 0:
+            _duration_cal[_st_id] = _tgt_s / _pred_s
+    print(f"Duration calibration loaded: {len(_duration_cal)} scan types")
+    _probe_by_name = {r['sequence_type']: r for r in _probe_data.get('rows', [])}
+    for _sid, _mul in sorted(_duration_cal.items()):
+        _nm = ID_TO_SEQUENCE_TYPE.get(_sid, '?')
+        _r = _probe_by_name.get(_nm, {})
+        print(f"  {_nm:<8} ×{_mul:.3f}  ({_r.get('predicted_s', 0):.0f}s → {_r.get('target_s', 0):.0f}s)")
+except Exception as _e:
+    print(f"Duration calibration unavailable ({_e}) — using raw model output")
 
 # --- load orchestration model ---
 with open(f"{MODELS_DIR}/orchestration/scanner_to_idx.json") as f:
@@ -863,6 +893,14 @@ for customer_idx, (serial_str, daily_schedules) in enumerate(customer_schedules.
                         top_p=gen_config['top_p'],
                         return_stats=True,
                     )
+
+                # Correct systematic per-sequence-type duration bias from the probe.
+                # The correction factor brings the raw model output to probe target
+                # means; it's absorbed into the weights once the improved architecture
+                # is retrained.
+                _cal_factor = _duration_cal.get(int(seq_type), 1.0)
+                if _cal_factor != 1.0:
+                    exam_durations = exam_durations * _cal_factor
 
                 exam_rows, current_t = _generate_exam_rows(
                     exam_tokens[0], exam_durations[0], exam_mu[0], exam_sigma[0],
