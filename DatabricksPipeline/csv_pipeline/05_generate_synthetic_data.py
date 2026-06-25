@@ -301,7 +301,8 @@ print("Exchange model loaded.")
 # --- load examination model ---
 examination_model = create_examination_model(EXAMINATION_MODEL_CONFIG).to(device)
 examination_model.load_state_dict(
-    torch.load(f"{MODELS_DIR}/examination/examination_model_best.pt", map_location=device)
+    torch.load(f"{MODELS_DIR}/examination/examination_model_best.pt", map_location=device),
+    strict=False
 )
 examination_model.eval()
 print("Examination model loaded.")
