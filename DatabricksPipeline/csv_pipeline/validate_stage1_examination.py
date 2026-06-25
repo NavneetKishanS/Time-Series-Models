@@ -27,11 +27,13 @@ import sys
 import pandas as pd
 import numpy as np
 
-EXAM_MARKERS = {'sourceID', 'Sequence', 'BodyGroup', 'StepCount', 'predicted_mu'}
+EXAM_MARKERS = {'Sequence', 'BodyGroup', 'StepCount', 'predicted_mu'}
 # Known broken-run baseline (the "(3)" files) for reference in the report.
 BROKEN = dict(total_rows=26, per_serial_max=5, stepcount_max=1, mu_std=4.6e-4, mu_mean=0.00186)
 
 GREEN, RED, YELLOW, RESET = '\033[92m', '\033[91m', '\033[93m', '\033[0m'
+
+DEFAULT_EXAM_GLOB = '/dbfs/FileStore/csv_pipeline/synthetic/exam/DATA_*.csv'
 
 
 def _expand(patterns):
@@ -137,20 +139,35 @@ def validate(df):
     return [(name, (None if ok is None else bool(ok)), detail) for name, ok, detail in results]
 
 
+def _is_databricks_interactive():
+    """Detect if running inside Databricks interactive kernel (not CLI)."""
+    return any('ipykernel' in arg or 'db_ipykernel' in arg for arg in sys.argv)
+
+
 def main():
-    ap = argparse.ArgumentParser(description="Validate Stage-1 examination retrain output.")
-    ap.add_argument('inputs', nargs='+', help="New step-05 examination CSV file(s) or glob(s).")
-    ap.add_argument('--baseline', nargs='*', default=[], help="Optional old/broken (3) CSV(s) for comparison.")
-    args = ap.parse_args()
+    interactive = _is_databricks_interactive()
+
+    # In Databricks interactive mode, sys.argv contains kernel launcher args
+    # that argparse cannot parse. Bypass argument parsing and use defaults.
+    if interactive:
+        input_patterns = [DEFAULT_EXAM_GLOB]
+    else:
+        ap = argparse.ArgumentParser(description="Validate Stage-1 examination retrain output.")
+        ap.add_argument('inputs', nargs='+', help="New step-05 examination CSV file(s) or glob(s).")
+        ap.add_argument('--baseline', nargs='*', default=[], help="Optional old/broken (3) CSV(s) for comparison.")
+        args = ap.parse_args()
+        input_patterns = args.inputs
 
     print("=" * 78)
     print("STAGE-1 EXAMINATION RETRAIN VALIDATION")
     print("=" * 78)
 
-    df, files = _load(args.inputs, 'new')
+    df, files = _load(input_patterns, 'new')
     if df is None:
-        print(f"{RED}No examination-schema CSVs found in: {args.inputs}{RESET}")
-        sys.exit(2)
+        print(f"{RED}No examination-schema CSVs found in: {input_patterns}{RESET}")
+        if not interactive:
+            sys.exit(2)
+        return
     print(f"Loaded {len(files)} file(s), {len(df)} rows.\n")
 
     results = validate(df)
@@ -167,7 +184,8 @@ def main():
     else:
         print(f"{RED}VERDICT: {n_fail} gate(s) FAILED — collapse not resolved. Inspect above.{RESET}")
     print("=" * 78)
-    sys.exit(1 if n_fail else 0)
+    if not interactive:
+        sys.exit(1 if n_fail else 0)
 
 
 if __name__ == '__main__':
