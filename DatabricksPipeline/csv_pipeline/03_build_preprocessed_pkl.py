@@ -67,6 +67,58 @@ _BODY_REGION_TO_ID = {r: i for i, r in enumerate(_BODY_REGIONS)}
 _START_REGION_ID   = 11
 _END_REGION_ID     = 12
 
+# Secondary normalizer: maps BodyGroup names that the Excel emits but that are
+# NOT in the 11-region vocab to their canonical equivalents. Applied after the
+# body_part_to_group Excel lookup (which maps raw BodyPartExamined → BodyGroup)
+# and before the _BODY_REGION_TO_ID lookup. Without this, Excel BodyGroups such
+# as "BRAIN", "KNEE", "LIVER" fall silently to UNKNOWN (id=10) and inflate the
+# UNKNOWN share in training — visible as "UNKNOWN 22%" in the orchestration
+# training distribution.
+_BODYGROUP_NORMALIZE = {
+    # Head
+    'BRAIN': 'HEAD', 'SKULL': 'HEAD', 'FACE': 'HEAD', 'ORBIT': 'HEAD',
+    'SELLA': 'HEAD', 'IAM': 'HEAD', 'EAR': 'HEAD', 'TEMPORAL': 'HEAD',
+    'PITUITARY': 'HEAD',
+    # Neck
+    'THROAT': 'NECK', 'LARYNX': 'NECK', 'THYROID': 'NECK',
+    # Chest
+    'BREAST': 'CHEST', 'CARDIAC': 'CHEST', 'HEART': 'CHEST',
+    'THORAX': 'CHEST', 'LUNG': 'CHEST', 'AORTA': 'CHEST',
+    'MEDIASTINUM': 'CHEST', 'STERNUM': 'CHEST',
+    # Abdomen
+    'LIVER': 'ABDOMEN', 'KIDNEY': 'ABDOMEN', 'PANCREAS': 'ABDOMEN',
+    'ADRENAL': 'ABDOMEN', 'SPLEEN': 'ABDOMEN', 'GI': 'ABDOMEN',
+    'BOWEL': 'ABDOMEN', 'GALLBLADDER': 'ABDOMEN', 'ADRENAL GLAND': 'ABDOMEN',
+    # Pelvis
+    'PROSTATE': 'PELVIS', 'HIP': 'PELVIS', 'UTERUS': 'PELVIS',
+    'OVARY': 'PELVIS', 'BLADDER': 'PELVIS', 'RECTUM': 'PELVIS',
+    'SACRUM': 'PELVIS', 'SACRAL': 'PELVIS', 'COCCYX': 'PELVIS',
+    # Spine
+    'LSPINE': 'SPINE', 'CSPINE': 'SPINE', 'TSPINE': 'SPINE',
+    'LUMBAR': 'SPINE', 'CERVICAL': 'SPINE', 'THORACIC': 'SPINE',
+    'LUMBOSACRAL': 'SPINE', 'WHOLESPINE': 'SPINE', 'WHOLESPINE ': 'SPINE',
+    'WHOLE SPINE': 'SPINE', 'L-SPINE': 'SPINE', 'C-SPINE': 'SPINE',
+    'T-SPINE': 'SPINE', 'LS-SPINE': 'SPINE', 'SACROILIAC': 'SPINE',
+    # Arm
+    'SHOULDER': 'ARM', 'ELBOW': 'ARM', 'WRIST': 'ARM',
+    'FOREARM': 'ARM', 'HUMERUS': 'ARM', 'UPPERARM': 'ARM',
+    'UPPER ARM': 'ARM', 'UPPER_ARM': 'ARM',
+    # Leg
+    'KNEE': 'LEG', 'THIGH': 'LEG', 'ANKLE': 'LEG',
+    'CALF': 'LEG', 'TIBIA': 'LEG', 'FIBULA': 'LEG', 'FEMUR': 'LEG',
+    'LOWER LEG': 'LEG', 'LOWER_LEG': 'LEG',
+    # Hand
+    'FINGER': 'HAND', 'THUMB': 'HAND',
+    # Foot
+    'TOE': 'FOOT', 'HEEL': 'FOOT',
+}
+
+
+def _normalize_bodygroup(bg_str):
+    """Resolve Excel BodyGroup variant names to canonical BODY_REGIONS vocab."""
+    s = str(bg_str).strip().upper()
+    return _BODYGROUP_NORMALIZE.get(s, s)
+
 print(f"Serials:    {SERIAL_NUMBERS}")
 print(f"Date range: {DATE_START} → {DATE_END}")
 print(f"Output:     {PKL_OUTPUT}")
@@ -176,13 +228,16 @@ for serial in SERIAL_NUMBERS:
         df['Direction_encoded'] = 0  # safe default if column absent
 
     # Body group IDs — step 01 writes integer IDs; try numeric parse first,
-    # fall back to string→region mapping for older CSVs with text values
+    # fall back to string→region mapping for older CSVs with text values.
+    # Apply secondary normalization so text values like "BRAIN", "KNEE"
+    # resolve to the correct region rather than falling through to UNKNOWN.
     def _to_region_id(series):
         numeric = pd.to_numeric(series, errors='coerce')
         if numeric.notna().all():
             return numeric.astype(int)
         return series.apply(
-            lambda x: _BODY_REGION_TO_ID.get(str(x).strip().upper(), 10) if pd.notna(x) else 10
+            lambda x: _BODY_REGION_TO_ID.get(_normalize_bodygroup(str(x).strip().upper()), 10)
+            if pd.notna(x) else 10
         )
     df['body_from_id'] = _to_region_id(df['BodyGroup_from'])
     df['body_to_id']   = _to_region_id(df['BodyGroup_to'])
@@ -350,6 +405,9 @@ df_exams_pd['BodyGroup'] = df_exams_pd['BodyPartExamined'].apply(
     lambda x: body_part_to_group.get(str(x).strip().upper(), 'UNKNOWN')
               if pd.notna(x) else 'UNKNOWN'
 )
+# Apply secondary normalization: Excel BodyGroup names that aren't in the
+# 11-region vocab (e.g. "BRAIN", "KNEE", "LIVER") → canonical region names.
+df_exams_pd['BodyGroup'] = df_exams_pd['BodyGroup'].apply(_normalize_bodygroup)
 print(f"Examination rows: {len(df_exams_pd):,}")
 
 # Report BodyPart values that fell through to UNKNOWN — these are gaps in
@@ -366,6 +424,18 @@ if len(_unmapped):
           f"({int(_unmapped.sum()):,} rows). Add these to bodyupdated.xlsx:")
     for _bp, _cnt in _unmapped.head(25).items():
         print(f"      {_bp:<32} {_cnt:>6,}")
+
+# Report any BodyGroup values that are STILL not in the canonical 11 regions
+# after normalization — these are Excel BodyGroup names missing from _BODYGROUP_NORMALIZE.
+_unresolved_bg = df_exams_pd.loc[
+    ~df_exams_pd['BodyGroup'].isin(_BODY_REGIONS), 'BodyGroup'
+].value_counts()
+_unresolved_bg = _unresolved_bg[_unresolved_bg.index != 'UNKNOWN']
+if len(_unresolved_bg):
+    print(f"  ⚠ {len(_unresolved_bg)} BodyGroup values resolved by Excel but not in "
+          f"canonical vocab → add to _BODYGROUP_NORMALIZE in step 03:")
+    for _bg, _cnt in _unresolved_bg.head(20).items():
+        print(f"      {_bg:<32} {_cnt:>6,}")
 
 
 # ---- 2d. Coil parsing helpers (from DatabricksPipeline/02_extract_examination.py) ----
@@ -488,7 +558,13 @@ for serial in SERIAL_NUMBERS:
     df_merged.loc[_mask_evu, '_bg_msg'] = df_merged.loc[_mask_evu, 'Message'].apply(_bg_from_evu95)
     df_merged['_bg_msg'] = df_merged['_bg_msg'].ffill()
     _needs_bg = df_merged['BodyGroup_to'] == 'UNKNOWN'
-    df_merged.loc[_needs_bg, 'BodyGroup_to'] = df_merged.loc[_needs_bg, '_bg_msg'].fillna('UNKNOWN')
+    # Apply secondary normalization to EXU-95-derived group names (same mapping
+    # gap as the Excel values: "BRAIN", "KNEE" etc. need resolving to HEAD/LEG).
+    df_merged.loc[_needs_bg, 'BodyGroup_to'] = (
+        df_merged.loc[_needs_bg, '_bg_msg']
+        .fillna('UNKNOWN')
+        .apply(_normalize_bodygroup)
+    )
     df_merged.drop(columns=['_bg_msg'], inplace=True)
     _n_bg_resolved = int(_needs_bg.sum() - (df_merged['BodyGroup_to'] == 'UNKNOWN').sum())
     if _n_bg_resolved > 0:
@@ -571,10 +647,10 @@ for serial in SERIAL_NUMBERS:
         seq_type = _seq_type_from_msg(segment.iloc[0].get('Message'))
 
         # Body region: prefer last MRI_EXU_95 before start
-        body_region_str = str(segment.iloc[0].get('BodyGroup_to', 'UNKNOWN')).upper()
+        body_region_str = _normalize_bodygroup(str(segment.iloc[0].get('BodyGroup_to', 'UNKNOWN')).upper())
         _pe = bisect.bisect_left(exam_rows, start_row) - 1  # last exam_row < start_row
         if _pe >= 0:
-            bg = str(df_merged.iloc[exam_rows[_pe]].get('BodyGroup_to', 'UNKNOWN')).upper()
+            bg = _normalize_bodygroup(str(df_merged.iloc[exam_rows[_pe]].get('BodyGroup_to', 'UNKNOWN')).upper())
             if bg != 'UNKNOWN':
                 body_region_str = bg
         body_region = int(_BODY_REGION_TO_ID.get(body_region_str, 10))
@@ -661,6 +737,7 @@ for serial in SERIAL_NUMBERS:
             bg_str = str(row.get('BodyGroup', '') or '').strip().upper()
             if not bg_str or bg_str in ('NAN', 'FALSE', 'UNKNOWN', ''):
                 bg_str = body_part_to_group.get(bp_str, 'UNKNOWN')
+            bg_str = _normalize_bodygroup(bg_str)
             bg_id  = _BODY_REGION_TO_ID.get(bg_str, 10)
 
             direction_raw = str(row.get('Direction', '') or '').strip()

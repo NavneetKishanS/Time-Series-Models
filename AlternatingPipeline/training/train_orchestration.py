@@ -168,6 +168,30 @@ def train_orchestration_model(data_path=None, config=None, training_config=None,
             print(f"  Train date range: {min(train_dates)} to {max(train_dates)}")
             print(f"  Val date range: {min(val_dates)} to {max(val_dates)}")
 
+    # Stratification safety-net: if a body region token appears only in val
+    # (possible when rare regions fall entirely in the last 2–3 calendar days),
+    # move the earliest val sample containing that token to training so the model
+    # sees at least one example of every real region.
+    from config import NUM_BODY_REGIONS as _NR, BODY_REGIONS as _BR
+    _train_regions = set(t for s in train_samples for t in s['tokens'] if 0 <= t < _NR)
+    _val_regions   = set(t for s in val_samples   for t in s['tokens'] if 0 <= t < _NR)
+    _missing       = _val_regions - _train_regions
+    if _missing:
+        if verbose:
+            print(f"  Stratification: {len(_missing)} region(s) only in val → "
+                  f"moving earliest val sample per region to train: "
+                  f"{[_BR[t] for t in sorted(_missing)]}")
+        val_by_idx = list(enumerate(val_samples))  # preserve original order
+        for _tok in sorted(_missing):
+            for _i, _vs in val_by_idx:
+                if _tok in _vs['tokens']:
+                    train_samples.append(_vs)
+                    val_by_idx = [(j, s) for j, s in val_by_idx if j != _i]
+                    break
+        val_samples = [s for _, s in val_by_idx]
+        if verbose:
+            print(f"  After stratification: Train={len(train_samples)}, Val={len(val_samples)}")
+
     # Create datasets
     train_dataset = OrchestrationDataset(train_samples)
     val_dataset = OrchestrationDataset(val_samples)

@@ -656,11 +656,19 @@ def _generate_exam_rows(tokens, durations, mu, sigma, day_start, t_offset,
 
 
 def _fill_pause_times(rows):
-    """Compute pauseTime = gap between this measurement's endTime and next's startTime."""
+    """Compute pauseTime = gap between this measurement's endTime and next's startTime.
+
+    Only counts intra-day gaps. Overnight gaps (end and next start on different
+    calendar days) are set to 0 — those are scanner downtime, not examination
+    pauses, and would otherwise inflate the mean by 8–14 hours per day boundary.
+    """
     for i in range(len(rows) - 1):
         end_i   = pd.to_datetime(rows[i]['endTime'])
         start_j = pd.to_datetime(rows[i + 1]['startTime'])
-        rows[i]['pauseTime'] = max(0.0, (start_j - end_i).total_seconds())
+        if end_i.date() == start_j.date():
+            rows[i]['pauseTime'] = max(0.0, (start_j - end_i).total_seconds())
+        else:
+            rows[i]['pauseTime'] = 0.0
     if rows:
         rows[-1]['pauseTime'] = 0.0
     return rows
@@ -1367,21 +1375,33 @@ if not df_exam_all.empty:
     dur = df_exam_all['duration'].dropna().values / 60.0
     dur = dur[(dur > 0) & (dur < 4000/60)]
     if len(dur) > 0:
-        if dur.mean() < 5:
-            flags.append('[EXAM MODEL]  Mean duration {:.1f} min — sequences terminating too early'.format(dur.mean()))
+        # Real mean ≈ 1.75 min (105 s). Threshold < 0.5 min catches genuine collapse
+        # (e.g. model emitting MSR_104 after every MSR_100). The old 5-min threshold
+        # was a false-alarm for healthy output.
+        if dur.mean() < 0.5:
+            flags.append('[EXAM MODEL]  Mean duration {:.1f} min — sequences terminating too early (expected ~1.75 min)'.format(dur.mean()))
         if dur.mean() > 45:
-            flags.append('[EXAM MODEL]  Mean duration {:.1f} min — sequences running too long'.format(dur.mean()))
+            flags.append('[EXAM MODEL]  Mean duration {:.1f} min — sequences running too long (expected ~1.75 min)'.format(dur.mean()))
 
     if 'BodyPart' in df_exam_all.columns:
         probs = df_exam_all['BodyPart'].value_counts(normalize=True).values
         ent   = -np.sum(probs * np.log(probs + 1e-9)) / np.log(len(probs))
         if ent < 0.5:
             flags.append('[ORCH MODEL]  Body region entropy {:.2f} — model collapsing to few regions'.format(ent))
+        unknown_pct = df_exam_all['BodyPart'].eq('UNKNOWN').mean()
+        if unknown_pct > 0.3:
+            flags.append('[ORCH MODEL]  UNKNOWN body region {:.0%} — step-03 body-group normalization may need expanding'.format(unknown_pct))
 
     if 'StepCount' in df_exam_all.columns:
         sc_mean = df_exam_all.groupby('PatientID')['StepCount'].max().mean()
-        if sc_mean > 10:
-            flags.append('[EXAM MODEL]  Mean step count {:.1f} — model not generating END tokens cleanly'.format(sc_mean))
+        if sc_mean > 15:
+            flags.append('[EXAM MODEL]  Mean step count {:.1f} — model may not be generating END tokens (Stage 4 issue)'.format(sc_mean))
+
+    if 'pauseTime' in df_exam_all.columns:
+        _pt = df_exam_all['pauseTime'].dropna().values
+        _pt = _pt[_pt > 0]
+        if len(_pt) and _pt.mean() > 1800:
+            flags.append('[REPORT BUG]  Mean pause time {:.0f} min — overnight gaps likely included; check _fill_pause_times'.format(_pt.mean() / 60))
 
 if not df_ex_all.empty and 'timediff' in df_ex_all.columns:
     td = df_ex_all['timediff'].dropna().values
