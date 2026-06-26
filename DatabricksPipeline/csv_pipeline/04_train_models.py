@@ -192,7 +192,15 @@ else:
 if device.type == 'cpu':
     _ncores = os.cpu_count() or 4
     torch.set_num_threads(_ncores)
-    torch.set_num_interop_threads(min(4, _ncores))
+    # set_num_interop_threads must be called before any parallel work starts.
+    # In a persistent Databricks kernel a prior cell may have already launched
+    # threads (e.g. the %pip cell or an earlier run of this notebook), making
+    # the call raise RuntimeError. Catch and ignore — the default interop-thread
+    # count is fine; intra-op threads (set above) matter more for training.
+    try:
+        torch.set_num_interop_threads(min(4, _ncores))
+    except RuntimeError:
+        pass
     os.environ.setdefault('OMP_NUM_THREADS', str(_ncores))
     os.environ.setdefault('MKL_NUM_THREADS', str(_ncores))
     print(f"[CPU] {_ncores} intra-op threads, {min(4, _ncores)} interop threads")
