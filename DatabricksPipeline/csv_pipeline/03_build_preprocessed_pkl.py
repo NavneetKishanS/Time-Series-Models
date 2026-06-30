@@ -46,7 +46,9 @@ from datetime import datetime
 from pyspark.sql import functions as F
 
 PKL_OUTPUT = "/dbfs/FileStore/csv_pipeline/preprocessed_data.pkl"
+UNKNOWN_BODY_AUDIT_DIR = "/dbfs/FileStore/csv_pipeline/body_mapping_audit"
 os.makedirs("/dbfs/FileStore/csv_pipeline", exist_ok=True)
+os.makedirs(UNKNOWN_BODY_AUDIT_DIR, exist_ok=True)
 
 # ---- Lightweight section timing -------------------------------------------
 # Turns "preprocessing took 19h" into a per-section breakdown so a future
@@ -98,6 +100,47 @@ def _safe_float(val, default=0.0):
         return default if (v != v or np.isinf(v)) else v
     except (TypeError, ValueError):
         return default
+
+
+def _normalize_body_label(val):
+    """Normalise raw body-part text before mapping lookup."""
+    if pd.isna(val):
+        return ''
+    text = str(val).strip().upper()
+    text = re.sub(r'\s+', ' ', text)
+    text = text.replace('BODY PART ', '')
+    text = text.replace('BODYPART ', '')
+    return text
+
+
+def _write_unknown_body_audit(values, label, output_dir=UNKNOWN_BODY_AUDIT_DIR):
+    """
+    Write a CSV audit of unresolved body labels so they can be added to the
+    mapping Excel file.
+    """
+    if not values:
+        return
+
+    counts = (
+        pd.Series(values, dtype="string")
+        .dropna()
+        .map(_normalize_body_label)
+    )
+    counts = counts[counts != '']
+    if counts.empty:
+        return
+
+    counts = counts.value_counts().reset_index()
+    counts.columns = ['body_label', 'row_count']
+    counts['source'] = label
+
+    stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    path = os.path.join(output_dir, f'unknown_body_labels_{label}_{stamp}.csv')
+    counts.to_csv(path, index=False)
+    print(f"  Wrote UNKNOWN body audit: {path}")
+    for _, row in counts.head(25).iterrows():
+        print(f"      {row['body_label']:<40} {int(row['row_count']):>6,}")
+    return path
 
 
 def _conditioning(row, dt=None):
@@ -280,7 +323,7 @@ else:
     _cp, _cg = df_body_excel.columns[0], df_body_excel.columns[1]
 
 body_part_to_group = {
-    str(k).strip().upper(): str(v).strip().upper()
+    _normalize_body_label(k): str(v).strip().upper()
     for k, v in zip(df_body_excel[_cp], df_body_excel[_cg])
     if pd.notna(k) and pd.notna(v)
 }
@@ -347,7 +390,7 @@ df_exams_pd['Direction_encoded'] = df_exams_pd['Direction'].apply(
               else (1 if str(x).strip().lower() == 'feet first' else -1)
 )
 df_exams_pd['BodyGroup'] = df_exams_pd['BodyPartExamined'].apply(
-    lambda x: body_part_to_group.get(str(x).strip().upper(), 'UNKNOWN')
+    lambda x: body_part_to_group.get(_normalize_body_label(x), 'UNKNOWN')
               if pd.notna(x) else 'UNKNOWN'
 )
 print(f"Examination rows: {len(df_exams_pd):,}")
@@ -366,6 +409,10 @@ if len(_unmapped):
           f"({int(_unmapped.sum()):,} rows). Add these to bodyupdated.xlsx:")
     for _bp, _cnt in _unmapped.head(25).items():
         print(f"      {_bp:<32} {_cnt:>6,}")
+    _write_unknown_body_audit(
+        df_exams_pd.loc[df_exams_pd['BodyGroup'] == 'UNKNOWN', 'BodyPartExamined'].tolist(),
+        'exam_workflow',
+    )
 
 
 # ---- 2d. Coil parsing helpers (from DatabricksPipeline/02_extract_examination.py) ----
@@ -481,7 +528,7 @@ for serial in SERIAL_NUMBERS:
                     body = re.search(r'with body part < (.*) > <', msg).group(1)
                 except AttributeError:
                     pass
-            return body_part_to_group.get(str(body).strip().upper())
+            return body_part_to_group.get(_normalize_body_label(body))
         except AttributeError:
             return None
     df_merged['_bg_msg'] = None
@@ -660,7 +707,7 @@ for serial in SERIAL_NUMBERS:
             bp_str = str(row.get('BodyPart',  '') or '').strip().upper()
             bg_str = str(row.get('BodyGroup', '') or '').strip().upper()
             if not bg_str or bg_str in ('NAN', 'FALSE', 'UNKNOWN', ''):
-                bg_str = body_part_to_group.get(bp_str, 'UNKNOWN')
+                bg_str = body_part_to_group.get(_normalize_body_label(bp_str), 'UNKNOWN')
             bg_id  = _BODY_REGION_TO_ID.get(bg_str, 10)
 
             direction_raw = str(row.get('Direction', '') or '').strip()
@@ -682,6 +729,15 @@ for serial in SERIAL_NUMBERS:
 
         if patients:
             customer_schedules[cid][date_str] = patients
+
+    _unknown_customer_bodies = [
+        p.get('body_region', 'UNKNOWN')
+        for day in customer_schedules.get(cid, {}).values()
+        for p in day
+        if str(p.get('body_region_id', 10)) == '10' or p.get('body_region', 'UNKNOWN') == 'UNKNOWN'
+    ]
+    if _unknown_customer_bodies:
+        _write_unknown_body_audit(_unknown_customer_bodies, f'customer_{cid}')
 
     n_days = len(customer_schedules[cid])
     n_pats = sum(len(p) for p in customer_schedules[cid].values())
