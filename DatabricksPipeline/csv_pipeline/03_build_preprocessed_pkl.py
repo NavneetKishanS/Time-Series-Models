@@ -46,9 +46,7 @@ from datetime import datetime
 from pyspark.sql import functions as F
 
 PKL_OUTPUT = "/dbfs/FileStore/csv_pipeline/preprocessed_data.pkl"
-UNKNOWN_BODY_AUDIT_DIR = "/dbfs/FileStore/csv_pipeline/body_mapping_audit"
 os.makedirs("/dbfs/FileStore/csv_pipeline", exist_ok=True)
-os.makedirs(UNKNOWN_BODY_AUDIT_DIR, exist_ok=True)
 
 # ---- Lightweight section timing -------------------------------------------
 # Turns "preprocessing took 19h" into a per-section breakdown so a future
@@ -113,34 +111,52 @@ def _normalize_body_label(val):
     return text
 
 
-def _write_unknown_body_audit(values, label, output_dir=UNKNOWN_BODY_AUDIT_DIR):
+_UNKNOWN_BODY_AUDIT_ROWS = []
+
+
+def _record_unknown_body_audit(values, label):
     """
-    Write a CSV audit of unresolved body labels so they can be added to the
-    mapping Excel file.
+    Store unresolved body labels in memory so we can print a single summary
+    at the end of the cell.
     """
     if not values:
         return
 
-    counts = (
-        pd.Series(values, dtype="string")
-        .dropna()
-        .map(_normalize_body_label)
-    )
-    counts = counts[counts != '']
-    if counts.empty:
+    for raw in values:
+        raw_text = str(raw).strip()
+        norm_text = _normalize_body_label(raw_text)
+        if not norm_text:
+            continue
+        _UNKNOWN_BODY_AUDIT_ROWS.append({
+            'source': label,
+            'raw_body_label': raw_text,
+            'normalized_body_label': norm_text,
+        })
+
+
+def _print_unknown_body_audit():
+    """Print the accumulated unknown-body audit grouped by source and label."""
+    if not _UNKNOWN_BODY_AUDIT_ROWS:
+        print("\nNo UNKNOWN body labels recorded.")
         return
 
-    counts = counts.value_counts().reset_index()
-    counts.columns = ['body_label', 'row_count']
-    counts['source'] = label
+    audit_df = pd.DataFrame(_UNKNOWN_BODY_AUDIT_ROWS)
+    counts = (
+        audit_df
+        .groupby(['source', 'raw_body_label', 'normalized_body_label'], dropna=False)
+        .size()
+        .reset_index(name='row_count')
+        .sort_values(['source', 'row_count', 'raw_body_label'], ascending=[True, False, True])
+    )
 
-    stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    path = os.path.join(output_dir, f'unknown_body_labels_{label}_{stamp}.csv')
-    counts.to_csv(path, index=False)
-    print(f"  Wrote UNKNOWN body audit: {path}")
-    for _, row in counts.head(25).iterrows():
-        print(f"      {row['body_label']:<40} {int(row['row_count']):>6,}")
-    return path
+    print("\n" + "=" * 60)
+    print("UNKNOWN BODY LABEL AUDIT")
+    print("=" * 60)
+
+    for source, group in counts.groupby('source', sort=False):
+        print(f"\n[{source}]")
+        for _, row in group.iterrows():
+            print(f"  {row['raw_body_label']:<40} {int(row['row_count']):>6,}  ->  {row['normalized_body_label']}")
 
 
 def _conditioning(row, dt=None):
@@ -409,7 +425,7 @@ if len(_unmapped):
           f"({int(_unmapped.sum()):,} rows). Add these to bodyupdated.xlsx:")
     for _bp, _cnt in _unmapped.head(25).items():
         print(f"      {_bp:<32} {_cnt:>6,}")
-    _write_unknown_body_audit(
+    _record_unknown_body_audit(
         df_exams_pd.loc[df_exams_pd['BodyGroup'] == 'UNKNOWN', 'BodyPartExamined'].tolist(),
         'exam_workflow',
     )
@@ -737,7 +753,7 @@ for serial in SERIAL_NUMBERS:
         if str(p.get('body_region_id', 10)) == '10' or p.get('body_region', 'UNKNOWN') == 'UNKNOWN'
     ]
     if _unknown_customer_bodies:
-        _write_unknown_body_audit(_unknown_customer_bodies, f'customer_{cid}')
+        _record_unknown_body_audit(_unknown_customer_bodies, f'customer_{cid}')
 
     n_days = len(customer_schedules[cid])
     n_pats = sum(len(p) for p in customer_schedules[cid].values())
@@ -745,6 +761,8 @@ for serial in SERIAL_NUMBERS:
 
 print(f"\nCustomer schedules: {len(customer_schedules)} scanners")
 _t = _timeit('customer_schedules', _t)
+
+_print_unknown_body_audit()
 
 # COMMAND ----------
 
