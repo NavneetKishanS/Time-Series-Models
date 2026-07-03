@@ -111,6 +111,49 @@ def _normalize_body_label(val):
     return text
 
 
+def _canonical_body_label(val):
+    """
+    Collapse common raw label variants to a single canonical lookup key.
+
+    The mapping Excel already groups many variants into one BodyGroup, but
+    some source labels arrive in alternate forms (for example, spacing or
+    synonyms). This step keeps the lookup tolerant without changing the
+    spreadsheet structure.
+    """
+    label = _normalize_body_label(val)
+    if not label:
+        return ''
+
+    alias_map = {
+        'BREAST': 'BREAST',
+        'BREASTS': 'BREAST',
+        'KNEE': 'KNEE',
+        'KNEES': 'KNEE',
+        'SHOULDER': 'SHOULDER',
+        'SHOULDERS': 'SHOULDER',
+        'HIP': 'HIP',
+        'HIPS': 'HIP',
+        'HEART': 'HEART',
+        'WHOLEBODY': 'WHOLEBODY',
+        'WHOLE BODY': 'WHOLEBODY',
+        'TOTAL BODY': 'WHOLEBODY',
+        'WHOLE-BODY': 'WHOLEBODY',
+        'WHOLE_BODY': 'WHOLEBODY',
+    }
+
+    return alias_map.get(label, label)
+
+
+def _display_body_label(val):
+    """Format labels for audit output without changing lookup behavior."""
+    if pd.isna(val):
+        return ''
+    text = str(val).strip()
+    if not text:
+        return ''
+    return text[:1].upper() + text[1:].lower()
+
+
 _UNKNOWN_BODY_AUDIT_ROWS = []
 
 
@@ -124,13 +167,14 @@ def _record_unknown_body_audit(values, label):
 
     for raw in values:
         raw_text = str(raw).strip()
-        norm_text = _normalize_body_label(raw_text)
+        norm_text = _canonical_body_label(raw_text)
         if not norm_text:
             continue
         _UNKNOWN_BODY_AUDIT_ROWS.append({
             'source': label,
             'raw_body_label': raw_text,
             'normalized_body_label': norm_text,
+            'display_body_label': _display_body_label(raw_text),
         })
 
 
@@ -143,7 +187,7 @@ def _print_unknown_body_audit():
     audit_df = pd.DataFrame(_UNKNOWN_BODY_AUDIT_ROWS)
     counts = (
         audit_df
-        .groupby(['source', 'raw_body_label', 'normalized_body_label'], dropna=False)
+        .groupby(['source', 'raw_body_label', 'normalized_body_label', 'display_body_label'], dropna=False)
         .size()
         .reset_index(name='row_count')
         .sort_values(['source', 'row_count', 'raw_body_label'], ascending=[True, False, True])
@@ -156,7 +200,7 @@ def _print_unknown_body_audit():
     for source, group in counts.groupby('source', sort=False):
         print(f"\n[{source}]")
         for _, row in group.iterrows():
-            print(f"  {row['raw_body_label']:<40} {int(row['row_count']):>6,}  ->  {row['normalized_body_label']}")
+            print(f"  {row['display_body_label']:<40} {int(row['row_count']):>6,}  ->  {row['normalized_body_label']}")
 
 
 def _conditioning(row, dt=None):
@@ -339,7 +383,7 @@ else:
     _cp, _cg = df_body_excel.columns[0], df_body_excel.columns[1]
 
 body_part_to_group = {
-    _normalize_body_label(k): str(v).strip().upper()
+    _canonical_body_label(k): str(v).strip().upper()
     for k, v in zip(df_body_excel[_cp], df_body_excel[_cg])
     if pd.notna(k) and pd.notna(v)
 }
@@ -406,7 +450,7 @@ df_exams_pd['Direction_encoded'] = df_exams_pd['Direction'].apply(
               else (1 if str(x).strip().lower() == 'feet first' else -1)
 )
 df_exams_pd['BodyGroup'] = df_exams_pd['BodyPartExamined'].apply(
-    lambda x: body_part_to_group.get(_normalize_body_label(x), 'UNKNOWN')
+    lambda x: body_part_to_group.get(_canonical_body_label(x), 'UNKNOWN')
               if pd.notna(x) else 'UNKNOWN'
 )
 print(f"Examination rows: {len(df_exams_pd):,}")
@@ -544,7 +588,7 @@ for serial in SERIAL_NUMBERS:
                     body = re.search(r'with body part < (.*) > <', msg).group(1)
                 except AttributeError:
                     pass
-            return body_part_to_group.get(_normalize_body_label(body))
+            return body_part_to_group.get(_canonical_body_label(body))
         except AttributeError:
             return None
     df_merged['_bg_msg'] = None
@@ -723,7 +767,7 @@ for serial in SERIAL_NUMBERS:
             bp_str = str(row.get('BodyPart',  '') or '').strip().upper()
             bg_str = str(row.get('BodyGroup', '') or '').strip().upper()
             if not bg_str or bg_str in ('NAN', 'FALSE', 'UNKNOWN', ''):
-                bg_str = body_part_to_group.get(_normalize_body_label(bp_str), 'UNKNOWN')
+                bg_str = body_part_to_group.get(_canonical_body_label(bp_str), 'UNKNOWN')
             bg_id  = _BODY_REGION_TO_ID.get(bg_str, 10)
 
             direction_raw = str(row.get('Direction', '') or '').strip()
