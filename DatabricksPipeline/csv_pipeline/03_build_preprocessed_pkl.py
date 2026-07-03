@@ -155,6 +155,7 @@ def _display_body_label(val):
 
 
 _UNKNOWN_BODY_AUDIT_ROWS = []
+_BODY_GROUP_SANITY = {}
 
 
 def _record_unknown_body_audit(values, label):
@@ -201,6 +202,47 @@ def _print_unknown_body_audit():
         print(f"\n[{source}]")
         for _, row in group.iterrows():
             print(f"  {row['display_body_label']:<40} {int(row['row_count']):>6,}  ->  {row['normalized_body_label']}")
+
+
+def _record_body_group_sanity(serial, raw_label, mapped_group, source):
+    """Store per-serial mapping results for a final sanity summary."""
+    serial_key = str(serial)
+    raw_text = str(raw_label).strip()
+    group_text = str(mapped_group).strip().upper() if mapped_group is not None else 'UNKNOWN'
+    if not raw_text:
+        return
+
+    serial_bucket = _BODY_GROUP_SANITY.setdefault(serial_key, {
+        'known': {},
+        'unknown': {},
+    })
+    target_bucket = serial_bucket['unknown'] if group_text == 'UNKNOWN' else serial_bucket['known']
+    entry = target_bucket.setdefault(raw_text, {'group': group_text, 'count': 0, 'sources': set()})
+    entry['count'] += 1
+    entry['sources'].add(source)
+
+
+def _print_body_group_sanity():
+    """Print a per-serial summary of raw labels and their mapped groups."""
+    if not _BODY_GROUP_SANITY:
+        print("\nNo body-group sanity data recorded.")
+        return
+
+    print("\n" + "=" * 60)
+    print("BODY GROUP SANITY SUMMARY")
+    print("=" * 60)
+
+    for serial in sorted(_BODY_GROUP_SANITY.keys()):
+        print(f"\n[serial {serial}]")
+        bucket = _BODY_GROUP_SANITY[serial]
+        for status in ('known', 'unknown'):
+            entries = bucket[status]
+            if not entries:
+                continue
+            print(f"  {status.upper()}:")
+            for raw_label, info in sorted(entries.items(), key=lambda kv: (-kv[1]['count'], kv[0])):
+                sources = ",".join(sorted(info['sources']))
+                print(f"    {raw_label:<35} {info['count']:>6,}  ->  {info['group']}  ({sources})")
 
 
 def _conditioning(row, dt=None):
@@ -453,6 +495,13 @@ df_exams_pd['BodyGroup'] = df_exams_pd['BodyPartExamined'].apply(
     lambda x: body_part_to_group.get(_canonical_body_label(x), 'UNKNOWN')
               if pd.notna(x) else 'UNKNOWN'
 )
+for _, row in df_exams_pd.iterrows():
+    _record_body_group_sanity(
+        row.get('SerialNumber', 'UNKNOWN'),
+        row.get('BodyPartExamined', ''),
+        row.get('BodyGroup', 'UNKNOWN'),
+        'exam_workflow',
+    )
 print(f"Examination rows: {len(df_exams_pd):,}")
 
 # Report BodyPart values that fell through to UNKNOWN — these are gaps in
@@ -790,6 +839,14 @@ for serial in SERIAL_NUMBERS:
         if patients:
             customer_schedules[cid][date_str] = patients
 
+        for patient in patients:
+            _record_body_group_sanity(
+                cid,
+                patient.get('body_region', ''),
+                patient.get('body_region', 'UNKNOWN'),
+                'customer_schedule',
+            )
+
     _unknown_customer_bodies = [
         p.get('body_region', 'UNKNOWN')
         for day in customer_schedules.get(cid, {}).values()
@@ -806,6 +863,7 @@ for serial in SERIAL_NUMBERS:
 print(f"\nCustomer schedules: {len(customer_schedules)} scanners")
 _t = _timeit('customer_schedules', _t)
 
+_print_body_group_sanity()
 _print_unknown_body_audit()
 
 # COMMAND ----------
