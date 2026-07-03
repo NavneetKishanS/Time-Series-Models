@@ -407,6 +407,7 @@ _t = _timeit('section1 exchange', _t)
 
 # COMMAND ----------
 
+# DBTITLE 1,Cell 7
 # =============================================================================
 # SECTION 2 — Examination sequences re-queried from Spark
 #
@@ -419,6 +420,10 @@ _t = _timeit('section1 exchange', _t)
 print("\n" + "="*60)
 print("SECTION 2: Examination sequences from Spark")
 print("="*60)
+
+# Reset per-run state so re-executions don't accumulate stale records
+_BODY_GROUP_SANITY.clear()
+_UNKNOWN_BODY_AUDIT_ROWS.clear()
 
 # ---- 2a. Load body group mapping ----
 df_body_excel = pd.read_excel(BODY_GROUP_MAPPING_PATH)
@@ -483,6 +488,7 @@ df_exams_spark = (
             F.col("WorkflowValues")["BodyPart"],
             F.col("WorkflowValues")["RequestedBodyPart"],
         )).alias("BodyPartExamined"),
+        F.first(F.col("WorkflowValues")["ProtocolName"]).alias("ProtocolName"),
     )
     .orderBy("SerialNumber", "WorkflowStartRefDateTime")
 )
@@ -500,13 +506,29 @@ df_exams_pd['BodyGroup'] = df_exams_pd['BodyPartExamined'].apply(
     lambda x: body_part_to_group.get(_canonical_body_label(x), 'UNKNOWN')
               if pd.notna(x) else 'UNKNOWN'
 )
-for _, row in df_exams_pd.iterrows():
-    _record_body_group_sanity(
-        row.get('SerialNumber', 'UNKNOWN'),
-        row.get('BodyPartExamined', ''),
-        row.get('BodyGroup', 'UNKNOWN'),
-        'exam_workflow',
+# Fix 1 — ProtocolName fallback: these scanners don't write a body-part key
+# into WorkflowValues, so parse each token of ProtocolName instead.
+# e.g. "KNEE_TSE_3D" → tok "KNEE" → _canonical_body_label → body_part_to_group hit.
+def _body_group_from_protocol(protocol_name):
+    if pd.isna(protocol_name) or not str(protocol_name).strip():
+        return None
+    for tok in re.split(r'[_\-\s]+', str(protocol_name).strip().upper()):
+        label = _canonical_body_label(tok)
+        if label and body_part_to_group.get(label, 'UNKNOWN') != 'UNKNOWN':
+            return body_part_to_group[label]
+    return None
+
+_mask_unknown = df_exams_pd['BodyGroup'] == 'UNKNOWN'
+if _mask_unknown.any():
+    df_exams_pd.loc[_mask_unknown, 'BodyGroup'] = (
+        df_exams_pd.loc[_mask_unknown, 'ProtocolName']
+        .apply(lambda p: _body_group_from_protocol(p) or 'UNKNOWN')
     )
+    _n_proto = int(_mask_unknown.sum() - (df_exams_pd['BodyGroup'] == 'UNKNOWN').sum())
+    if _n_proto > 0:
+        print(f"  ProtocolName fallback resolved {_n_proto:,} exam body groups")
+# Fix 2 — sanity recording deferred to per-serial loop (post EXU-95 fallback)
+# so the report reflects final assigned groups, not the pre-fallback state.
 print(f"Examination rows: {len(df_exams_pd):,}")
 
 # Report BodyPart values that fell through to UNKNOWN — these are gaps in
@@ -655,6 +677,20 @@ for serial in SERIAL_NUMBERS:
     if _n_bg_resolved > 0:
         print(f"    body groups: {_n_bg_resolved:,} rows resolved from EXU-95 message fallback")
 
+    # Fix 2 — record final per-exam body groups after all fallbacks are applied
+    _exam_final = pd.merge(
+        df_merged.dropna(subset=['WorkflowStartRefDateTime'])
+                 .drop_duplicates(subset=['WorkflowStartRefDateTime'])
+                 [['WorkflowStartRefDateTime', 'BodyGroup_to']],
+        df_ex[['WorkflowStartRefDateTime', 'BodyPartExamined']],
+        on='WorkflowStartRefDateTime', how='left',
+    )
+    for _, _r in _exam_final.iterrows():
+        _record_body_group_sanity(
+            serial, _r.get('BodyPartExamined'),
+            str(_r.get('BodyGroup_to', 'UNKNOWN')).upper(), 'exam_workflow',
+        )
+
     df_merged['Age']               = df_merged['Age'].fillna(0.0)
     df_merged['Weight']            = df_merged['Weight'].fillna(0.0)
     df_merged['Height']            = df_merged['Height'].fillna(0.0)
@@ -777,6 +813,10 @@ for serial in SERIAL_NUMBERS:
 
 print(f"\nTotal examination sequences: {len(examination_sequences)}")
 _t = _timeit('exam extraction', _t)
+
+# COMMAND ----------
+
+
 
 # COMMAND ----------
 
@@ -1008,6 +1048,31 @@ if exchange_sequences:
 
 # Download link
 displayHTML('<a href="/files/csv_pipeline/preprocessed_data.pkl">Download preprocessed_data.pkl</a>')
+
+# COMMAND ----------
+
+# DBTITLE 1,Audit file download links
+# =============================================================================
+# Audit file download links
+# =============================================================================
+audit_files = sorted(glob.glob(os.path.join(UNKNOWN_BODY_AUDIT_DIR, '*.csv')))
+
+if not audit_files:
+    print(f'No audit CSVs found in {UNKNOWN_BODY_AUDIT_DIR}')
+else:
+    rows = []
+    for path in audit_files:
+        # /dbfs/FileStore/... → /files/...
+        url   = path.replace('/dbfs/FileStore/', '/files/')
+        fname = os.path.basename(path)
+        rows.append(f'<li><a href="{url}">{fname}</a></li>')
+    displayHTML(
+        '<b>Body mapping audit CSVs</b> '
+        f'({len(audit_files)} file{"s" if len(audit_files) != 1 else ""}):<br>'
+        '<ul style="font-family:monospace;line-height:1.8">'
+        + '\n'.join(rows)
+        + '</ul>'
+    )
 
 # COMMAND ----------
 
