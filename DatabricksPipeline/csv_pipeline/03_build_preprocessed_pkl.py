@@ -235,6 +235,11 @@ def _print_body_group_sanity():
     for serial in sorted(_BODY_GROUP_SANITY.keys()):
         print(f"\n[serial {serial}]")
         bucket = _BODY_GROUP_SANITY[serial]
+        known_total = sum(item['count'] for item in bucket['known'].values())
+        unknown_total = sum(item['count'] for item in bucket['unknown'].values())
+        total = known_total + unknown_total
+        unknown_pct = (unknown_total / total * 100.0) if total else 0.0
+        print(f"  total_labels={total:,}  known={known_total:,}  unknown={unknown_total:,}  unknown_pct={unknown_pct:.1f}%")
         for status in ('known', 'unknown'):
             entries = bucket[status]
             if not entries:
@@ -838,14 +843,6 @@ for serial in SERIAL_NUMBERS:
 
         if patients:
             customer_schedules[cid][date_str] = patients
-
-        for patient in patients:
-            _record_body_group_sanity(
-                cid,
-                patient.get('body_region', ''),
-                patient.get('body_region', 'UNKNOWN'),
-                'customer_schedule',
-            )
 
     _unknown_customer_bodies = [
         p.get('body_region', 'UNKNOWN')
