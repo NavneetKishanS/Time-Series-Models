@@ -14,6 +14,7 @@ from AlternatingPipeline.config import (
 )
 from AlternatingPipeline.generation.output_integrity import (
     GenerationIntegrityError,
+    repair_examination_sequence,
     validate_examination_sequence,
     validate_orchestration_sequence,
     validate_rendered_output,
@@ -188,6 +189,50 @@ class OrchestrationConstraintTests(unittest.TestCase):
 
 
 class IntegrityValidatorTests(unittest.TestCase):
+    def test_repeated_exam_starts_fall_back_to_latest_complete_span(self):
+        measurement_start = SOURCEID_VOCAB['MRI_MSR_100']
+        finish = SOURCEID_VOCAB['MRI_MSR_104']
+        event = SOURCEID_VOCAB['MRI_MSR_21']
+        repaired, duration_source_idx = repair_examination_sequence(
+            [
+                START_TOKEN_ID,
+                measurement_start,
+                SOURCEID_VOCAB['MRI_EXU_95'],
+                measurement_start,
+                event,
+                finish,
+                END_TOKEN_ID,
+            ],
+            START_TOKEN_ID,
+            END_TOKEN_ID,
+            PAD_TOKEN_ID,
+            measurement_start,
+            [finish, SOURCEID_VOCAB['MRI_MSR_34']],
+            SOURCEID_VOCAB['UNK'],
+        )
+
+        self.assertEqual(repaired, [
+            START_TOKEN_ID,
+            measurement_start,
+            event,
+            finish,
+            END_TOKEN_ID,
+        ])
+        # The finish was at generated index 5; duration supervision is shifted.
+        self.assertEqual(duration_source_idx, 4)
+        self.assertEqual(
+            validate_examination_sequence(
+                repaired,
+                START_TOKEN_ID,
+                END_TOKEN_ID,
+                PAD_TOKEN_ID,
+                measurement_start,
+                [finish, SOURCEID_VOCAB['MRI_MSR_34']],
+                SOURCEID_VOCAB['UNK'],
+            ),
+            finish,
+        )
+
     def test_malformed_examination_is_rejected(self):
         with self.assertRaises(GenerationIntegrityError):
             validate_examination_sequence(

@@ -84,16 +84,16 @@ from datetime import datetime, timedelta
 # folder onto sys.path, so we have to actively defend against both.
 #
 # Order of preference for the import root:
-#   1. /Workspace/Repos/<user>/Time-Series-Models  (proper Databricks Repos clone)
-#   2. /tmp/tsm                                    (fresh shallow clone of main)
+#   1. /tmp/tsm                                    (refreshed from main above)
+#   2. /Workspace/Repos/<user>/Time-Series-Models  (local fallback)
 # Anything containing "Patient Exchange and Examination" is scrubbed from
 # sys.path because that path lives on the broken Workspace Files mount.
 # ─────────────────────────────────────────────────────────────────────────────
 _REPO_URL = "https://github.com/luke-schumacher/Time-Series-Models.git"
 _FALLBACK = "/tmp/tsm"
 _REPO_CANDIDATES = [
-    "/Workspace/Repos/luke-schumacher/Time-Series-Models",
     _FALLBACK,
+    "/Workspace/Repos/luke-schumacher/Time-Series-Models",
 ]
 
 def _is_healthy_repo(path):
@@ -297,6 +297,7 @@ from AlternatingPipeline.data.orchestration_preprocessing import (
 )
 from AlternatingPipeline.generation.output_integrity import (
     GenerationIntegrityError,
+    repair_examination_sequence,
     validate_examination_sequence,
     validate_exchange_sequence,
     validate_orchestration_sequence,
@@ -383,8 +384,25 @@ print(f"Per-scanner orchestration conditioning ready for {len(scanner_stats)} sc
 from collections import defaultdict as _defaultdict
 
 _region_seqtypes = _defaultdict(list)
+_fallback_exam_duration_pools = _defaultdict(list)
 for _s in data.get('examination', []):
-    _region_seqtypes[int(_s.get('body_region', 10))].append(int(_s.get('sequence_type', 0)))
+    _region_id = int(_s.get('body_region', 10))
+    _seq_type_id = int(_s.get('sequence_type', 0))
+    _serial_id = int(_s.get('serial_idx', 0))
+    _region_seqtypes[_region_id].append(_seq_type_id)
+
+    try:
+        _duration_sec = float(_s.get('total_duration', 0.0))
+    except (TypeError, ValueError):
+        continue
+    if math.isfinite(_duration_sec) and 1 <= _duration_sec <= MAX_RENDERED_EXAM_DURATION_SEC:
+        for _duration_key in (
+            ('exact', _serial_id, _region_id, _seq_type_id),
+            ('region_type', _region_id, _seq_type_id),
+            ('region', _region_id),
+            ('global',),
+        ):
+            _fallback_exam_duration_pools[_duration_key].append(_duration_sec)
 _all_seqtypes = [st for sts in _region_seqtypes.values() for st in sts] or [0]
 print(f"Sequence-type pool: {len(_all_seqtypes):,} scans across "
       f"{len(_region_seqtypes)} body regions")
@@ -394,6 +412,23 @@ def _sample_sequence_type(region_id):
     """Draw a sequence-type id from the real distribution for this region."""
     pool = _region_seqtypes.get(int(region_id)) or _all_seqtypes
     return int(np.random.choice(pool))
+
+
+def _sample_fallback_exam_duration(region_id, sequence_type, serial_idx):
+    """Sample a real training duration, preferring the exact scan context."""
+    keys = (
+        ('exact', int(serial_idx), int(region_id), int(sequence_type)),
+        ('region_type', int(region_id), int(sequence_type)),
+        ('region', int(region_id)),
+        ('global',),
+    )
+    for key in keys:
+        pool = _fallback_exam_duration_pools.get(key, [])
+        if len(pool) >= 5 or (key == ('global',) and pool):
+            return float(np.random.choice(pool)) / EXAMINATION_DURATION_SCALE
+    # The pkl should always provide a global pool; retain a bounded last resort
+    # so one corrupt/legacy pkl cannot terminate a multi-serial generation run.
+    return min(105.0, MAX_RENDERED_EXAM_DURATION_SEC) / EXAMINATION_DURATION_SCALE
 
 # COMMAND ----------
 
@@ -701,8 +736,8 @@ def _generate_exam_rows(tokens, durations, mu, sigma, day_start, t_offset,
 def _generate_valid_exam_rows(cond, region_id, seq_type, serial_idx,
                               day_start, current_t, patient_id, patient_info,
                               serial, step_counter, customer_idx, sample_idx):
-    """Generate one scan, retrying stochastic duration failures without data loss."""
-    failures = []
+    """Generate one scan, then safely repair the last malformed sample if needed."""
+    candidates = []
     for attempt in range(1, MAX_GENERATION_ATTEMPTS + 1):
         with torch.no_grad():
             tokens, durations, mu, sigma = examination_model.generate(
@@ -718,6 +753,7 @@ def _generate_valid_exam_rows(cond, region_id, seq_type, serial_idx,
                 top_p=gen_config['top_p'],
                 return_stats=True,
             )
+        candidates.append((tokens[0], durations[0], mu[0], sigma[0]))
 
         try:
             rows, next_t = _generate_exam_rows(
@@ -727,15 +763,85 @@ def _generate_valid_exam_rows(cond, region_id, seq_type, serial_idx,
                 serial, step_counter, customer_idx, sample_idx,
                 sequence_type_name=ID_TO_SEQUENCE_TYPE.get(seq_type, 'other'),
             )
-            return rows, next_t, attempt - 1
-        except GenerationIntegrityError as exc:
-            failures.append(str(exc))
+            return rows, next_t, attempt - 1, False
+        except GenerationIntegrityError:
+            pass
 
-    detail = '; '.join(failures[-3:])
-    raise GenerationIntegrityError(
-        f"could not generate a valid examination for patient {patient_id} "
-        f"after {MAX_GENERATION_ATTEMPTS} attempts: {detail}"
+    # Compatibility fallback for checkpoints/kernels that still emit malformed
+    # control structure. Keep the latest valid-looking sampled span and its
+    # shifted finish duration; if that duration is unusable, draw from the real
+    # pkl distribution for the same scanner/region/sequence context.
+    finish_ids = (
+        SOURCEID_VOCAB['MRI_MSR_104'],
+        SOURCEID_VOCAB['MRI_MSR_34'],
     )
+    selected = None
+    for candidate in reversed(candidates):
+        tokens, durations, mu, sigma = candidate
+        repaired_list, duration_source_idx = repair_examination_sequence(
+            tokens,
+            START_TOKEN_ID,
+            END_TOKEN_ID,
+            PAD_TOKEN_ID,
+            SOURCEID_VOCAB['MRI_MSR_100'],
+            finish_ids,
+            SOURCEID_VOCAB.get('UNK'),
+        )
+        selected = (
+            tokens, durations, mu, sigma, repaired_list, duration_source_idx
+        )
+        if duration_source_idx is None or duration_source_idx >= len(durations):
+            continue
+        duration_sec = (
+            float(durations[duration_source_idx].item()) *
+            EXAMINATION_DURATION_SCALE
+        )
+        if math.isfinite(duration_sec) and 1 <= duration_sec <= MAX_RENDERED_EXAM_DURATION_SEC:
+            break
+
+    tokens, durations, mu, sigma, repaired_list, duration_source_idx = selected
+    repaired_tokens = torch.tensor(
+        repaired_list, dtype=tokens.dtype, device=tokens.device
+    )
+
+    finish_idx = len(repaired_list) - 2
+    target_idx = finish_idx - 1
+
+    def _align_finish_value(values, default=0.0):
+        aligned = torch.full(
+            (len(repaired_list),),
+            float(default),
+            dtype=values.dtype,
+            device=values.device,
+        )
+        if duration_source_idx is not None and duration_source_idx < len(values):
+            aligned[target_idx] = values[duration_source_idx]
+        return aligned
+
+    repaired_durations = _align_finish_value(durations)
+    repaired_mu = _align_finish_value(mu)
+    repaired_sigma = _align_finish_value(sigma)
+
+    raw_duration = float(repaired_durations[target_idx].item())
+    duration_sec = raw_duration * EXAMINATION_DURATION_SCALE
+    if not math.isfinite(duration_sec) or not 1 <= duration_sec <= MAX_RENDERED_EXAM_DURATION_SEC:
+        raw_duration = _sample_fallback_exam_duration(
+            region_id, seq_type, serial_idx
+        )
+        repaired_durations[target_idx] = raw_duration
+        if not math.isfinite(float(repaired_mu[target_idx].item())):
+            repaired_mu[target_idx] = raw_duration
+        if not math.isfinite(float(repaired_sigma[target_idx].item())):
+            repaired_sigma[target_idx] = 0.0
+
+    rows, next_t = _generate_exam_rows(
+        repaired_tokens, repaired_durations, repaired_mu, repaired_sigma,
+        day_start, current_t,
+        patient_id, region_id, patient_info,
+        serial, step_counter, customer_idx, sample_idx,
+        sequence_type_name=ID_TO_SEQUENCE_TYPE.get(seq_type, 'other'),
+    )
+    return rows, next_t, MAX_GENERATION_ATTEMPTS, True
 
 
 def _fill_pause_times(rows):
@@ -865,6 +971,7 @@ for customer_idx, (serial_str, daily_schedules) in enumerate(customer_schedules.
     expected_exam_counts = {}
     expected_exchange_blocks = 0
     regeneration_count = 0
+    fallback_exam_count = 0
 
     # Generate dates from the synthetic range (outside training window — no leakage)
     _start = datetime.strptime(SYNTH_DATE_START, '%Y-%m-%d')
@@ -964,12 +1071,13 @@ for customer_idx, (serial_str, daily_schedules) in enumerate(customer_schedules.
                 # (short scouts vs long TSE/SPACE) instead of a flat mean.
                 seq_type = _sample_sequence_type(region_id)
                 cond = _build_cond_tensor(patient, current_t, day_start)
-                exam_rows, current_t, retries = _generate_valid_exam_rows(
+                exam_rows, current_t, retries, used_fallback = _generate_valid_exam_rows(
                     cond, region_id, seq_type, serial_idx,
                     day_start, current_t, pat_id, patient,
                     serial_str, step_counter, customer_idx, exam_sample_idx,
                 )
                 regeneration_count += retries
+                fallback_exam_count += int(used_fallback)
                 all_exam_rows.extend(exam_rows)
             exam_sample_idx += 1   # one sample_idx per patient (matches step 02)
 
@@ -1028,7 +1136,8 @@ for customer_idx, (serial_str, daily_schedules) in enumerate(customer_schedules.
             f"patients={integrity_report['patients']}  "
             f"scans={integrity_report['exam_rows']}  "
             f"exchange_blocks={integrity_report['exchange_blocks']}  "
-            f"regenerated_scans={regeneration_count}"
+            f"regenerated_scans={regeneration_count}  "
+            f"fallback_scans={fallback_exam_count}"
         )
 
     # ── Duration diagnostic: surface model-vs-real calibration up front ──

@@ -57,6 +57,75 @@ def validate_examination_sequence(tokens, start_token_id, end_token_id,
     return content[-1]
 
 
+def repair_examination_sequence(tokens, start_token_id, end_token_id,
+                                pad_token_id, measurement_start_id,
+                                finish_token_ids, unknown_token_id=None):
+    """Normalize a malformed sample to one renderable measurement span.
+
+    The latest measurement start preceding a sampled finish wins, matching the
+    recovery behavior of the original renderer without silently dropping a
+    scan. The returned duration index points into the original shifted duration
+    arrays and is ``None`` when the model did not sample a finish token.
+    """
+    sequence = _token_list(tokens)
+    finish_token_ids = tuple(int(token) for token in finish_token_ids)
+    if not finish_token_ids:
+        raise ValueError("finish_token_ids must contain at least one token")
+
+    finish_idx = next(
+        (idx for idx, token in enumerate(sequence) if token in finish_token_ids),
+        None,
+    )
+    finish_token = (
+        sequence[finish_idx] if finish_idx is not None else finish_token_ids[0]
+    )
+
+    if finish_idx is None:
+        payload_end = sequence.index(end_token_id) if end_token_id in sequence else len(sequence)
+    else:
+        payload_end = finish_idx
+
+    preceding_starts = [
+        idx for idx, token in enumerate(sequence[:payload_end])
+        if token == measurement_start_id
+    ]
+    payload_start = preceding_starts[-1] + 1 if preceding_starts else 0
+
+    blocked = {
+        start_token_id,
+        end_token_id,
+        pad_token_id,
+        measurement_start_id,
+        *finish_token_ids,
+    }
+    if unknown_token_id is not None:
+        blocked.add(int(unknown_token_id))
+    events = [
+        token for token in sequence[payload_start:payload_end]
+        if token not in blocked
+    ]
+
+    repaired = [
+        int(start_token_id),
+        int(measurement_start_id),
+        *events,
+        int(finish_token),
+        int(end_token_id),
+    ]
+    duration_source_idx = finish_idx - 1 if finish_idx is not None and finish_idx > 0 else None
+
+    validate_examination_sequence(
+        repaired,
+        start_token_id,
+        end_token_id,
+        pad_token_id,
+        measurement_start_id,
+        finish_token_ids,
+        unknown_token_id,
+    )
+    return repaired, duration_source_idx
+
+
 def validate_exchange_sequence(tokens, start_token_id, end_token_id,
                                pad_token_id, unknown_token_id=None):
     """Validate that an exchange is closed and contains renderable events."""
