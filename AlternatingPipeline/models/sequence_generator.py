@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import (
     EXCHANGE_MODEL_CONFIG, EXAMINATION_MODEL_CONFIG,
     START_TOKEN_ID, END_TOKEN_ID, PAD_TOKEN_ID,
-    GENERATION_CONFIG
+    SOURCEID_VOCAB, GENERATION_CONFIG
 )
 from models.layers import (
     PositionalEncoding, SinglePassDurationHead,
@@ -190,6 +190,92 @@ class SequenceGeneratorModel(nn.Module):
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
 
+    @staticmethod
+    def _force_token_subset(logits, row_idx, token_ids):
+        """Restrict one batch row to a non-empty set of token IDs."""
+        token_ids = list(token_ids)
+        if not token_ids:
+            raise ValueError("token_ids must contain at least one token")
+
+        keep = logits[row_idx, token_ids].clone()
+        logits[row_idx].fill_(-float('Inf'))
+        # Model logits should already be finite. Falling back to zero keeps the
+        # constraint deterministic even if an upstream numerical issue occurs.
+        logits[row_idx, token_ids] = torch.where(
+            torch.isfinite(keep), keep, torch.zeros_like(keep)
+        )
+
+    def _apply_generation_constraints(self, logits, generated, remaining_steps):
+        """Apply model-specific grammar before top-k/top-p sampling."""
+        logits = logits.clone()
+
+        # Control/placeholder tokens are training scaffolding, never real events.
+        blocked = {PAD_TOKEN_ID, START_TOKEN_ID}
+        unk_token_id = SOURCEID_VOCAB.get('UNK')
+        if unk_token_id is not None:
+            blocked.add(unk_token_id)
+        logits[:, list(blocked)] = -float('Inf')
+
+        exam_start_id = SOURCEID_VOCAB.get('MRI_MSR_100')
+        exam_finish_ids = tuple(
+            token_id for token_id in (
+                SOURCEID_VOCAB.get('MRI_MSR_104'),
+                SOURCEID_VOCAB.get('MRI_MSR_34'),
+            )
+            if token_id is not None
+        )
+
+        for row_idx in range(generated.shape[0]):
+            row = generated[row_idx]
+
+            # Batched callers can finish at different steps. Keep completed
+            # rows terminal while unfinished rows continue decoding.
+            if (row == END_TOKEN_ID).any():
+                self._force_token_subset(logits, row_idx, [END_TOKEN_ID])
+                continue
+
+            content = row[1:]  # remove the initial START marker
+
+            if self.model_type == 'examination':
+                if exam_start_id is None or not exam_finish_ids:
+                    raise RuntimeError(
+                        "Examination grammar tokens are missing from SOURCEID_VOCAB"
+                    )
+
+                if content.numel() == 0:
+                    # Every rendered measurement must open with MRI_MSR_100.
+                    self._force_token_subset(logits, row_idx, [exam_start_id])
+                    continue
+
+                last_token = int(content[-1].item())
+                if last_token in exam_finish_ids:
+                    # A successful/aborted finish is immediately followed by END.
+                    self._force_token_subset(logits, row_idx, [END_TOKEN_ID])
+                    continue
+
+                # A measurement cannot restart or terminate before a finish event.
+                logits[row_idx, exam_start_id] = -float('Inf')
+                logits[row_idx, END_TOKEN_ID] = -float('Inf')
+
+                # Reserve the final slot for END. If the model has not closed the
+                # measurement in time, select its preferred valid finish token.
+                if remaining_steps <= 2:
+                    self._force_token_subset(logits, row_idx, exam_finish_ids)
+            else:
+                # Exchange blocks must contain at least one real event.
+                if content.numel() == 0:
+                    logits[row_idx, END_TOKEN_ID] = -float('Inf')
+
+                # Always return a closed sequence when max_length is reached.
+                if remaining_steps == 1:
+                    self._force_token_subset(logits, row_idx, [END_TOKEN_ID])
+
+        if not torch.isfinite(logits).any(dim=-1).all():
+            raise RuntimeError(
+                "Generation constraints removed every candidate token for at least one sample"
+            )
+        return logits
+
     def _encode_conditioning(self, conditioning, body_region_info, phase_type=None):
         """
         Encode conditioning features into memory for the decoder.
@@ -351,7 +437,7 @@ class SequenceGeneratorModel(nn.Module):
     @torch.no_grad()
     def generate(self, conditioning, body_region_info, phase_type=None,
                  max_length=None, temperature=1.0, top_k=0, top_p=0.9,
-                 return_stats=False):
+                 return_stats=False, enforce_constraints=True):
         """
         Two-phase generation:
         1. Autoregressive token generation
@@ -366,6 +452,8 @@ class SequenceGeneratorModel(nn.Module):
             top_k: top-k filtering (0 = disabled)
             top_p: nucleus sampling threshold
             return_stats: if True, also return (duration_mu, duration_sigma)
+            enforce_constraints: enforce valid control-token and examination
+                state transitions. Disable only for decoder diagnostics.
 
         Returns:
             generated_tokens: [batch, seq_len]
@@ -377,6 +465,18 @@ class SequenceGeneratorModel(nn.Module):
 
         if max_length is None:
             max_length = self.max_seq_len
+        if temperature <= 0:
+            raise ValueError("temperature must be greater than zero")
+        if not 0 < top_p <= 1:
+            raise ValueError("top_p must be in the interval (0, 1]")
+        if top_k < 0:
+            raise ValueError("top_k must be non-negative")
+        min_length = 4 if self.model_type == 'examination' else 3
+        if enforce_constraints and max_length < min_length:
+            raise ValueError(
+                f"max_length must be at least {min_length} for constrained "
+                f"{self.model_type} generation"
+            )
 
         # Handle single-sample input
         if conditioning.dim() == 1:
@@ -400,7 +500,7 @@ class SequenceGeneratorModel(nn.Module):
         # Phase 1: Autoregressive token generation
         generated = torch.full((batch_size, 1), START_TOKEN_ID, dtype=torch.long, device=device)
 
-        for _ in range(max_length - 1):
+        for step_idx in range(max_length - 1):
             tgt_emb = self.token_embedding(generated)
             tgt_emb = tgt_emb * (self.d_model ** 0.5)
             tgt_emb = self.pos_decoder(tgt_emb)
@@ -411,6 +511,12 @@ class SequenceGeneratorModel(nn.Module):
             decoder_output = self.token_decoder(tgt_emb, memory, tgt_mask=tgt_mask)
 
             next_token_logits = self.output_projection(decoder_output[:, -1, :]) / temperature
+
+            if enforce_constraints:
+                remaining_steps = (max_length - 1) - step_idx
+                next_token_logits = self._apply_generation_constraints(
+                    next_token_logits, generated, remaining_steps
+                )
 
             # Top-k filtering
             if top_k > 0:
@@ -431,6 +537,8 @@ class SequenceGeneratorModel(nn.Module):
                 next_token_logits[indices_to_remove] = -float('Inf')
 
             probs = torch.softmax(next_token_logits, dim=-1)
+            if not torch.isfinite(probs).all() or (probs.sum(dim=-1) <= 0).any():
+                raise RuntimeError("Invalid sampling probabilities after token filtering")
             next_token = torch.multinomial(probs, num_samples=1)
             generated = torch.cat([generated, next_token], dim=1)
 

@@ -21,14 +21,27 @@ import sys, os, shutil, subprocess, importlib
 # 1. Scrub broken Shared paths                                                                         
 sys.path[:] = [p for p in sys.path if 'Shared/Patient Exchange and Examination' not in p]              
                                                                                                         
-# 2. Evict everything AlternatingPipeline-related                                                      
-for mod in list(sys.modules):                                                                          
-    if mod.startswith('AlternatingPipeline') or mod == 'config':                                       
-        del sys.modules[mod]                                                                           
+# 2. Evict every package-qualified and legacy top-level module loaded
+#    from AlternatingPipeline. The model files support both import styles.
+for mod, module_obj in list(sys.modules.items()):
+    module_file = (getattr(module_obj, '__file__', None) or '').replace('\\', '/')
+    if (mod.startswith('AlternatingPipeline') or mod == 'config' or
+            '/AlternatingPipeline/' in module_file):
+        del sys.modules[mod]
 
 # 3. Ensure /tmp/tsm exists
 TSM = '/tmp/tsm'
-if not os.path.isdir(f'{TSM}/AlternatingPipeline'):
+if (os.path.isdir(f'{TSM}/.git') and
+        os.path.isdir(f'{TSM}/AlternatingPipeline')):
+    # /tmp persists for the life of the cluster. Refresh it so a post-push run
+    # cannot silently import an older commit.
+    subprocess.check_call([
+        'git', '-C', TSM, 'fetch', '--depth=1', 'origin', 'main',
+    ])
+    subprocess.check_call([
+        'git', '-C', TSM, 'checkout', '--detach', 'FETCH_HEAD',
+    ])
+else:
     shutil.rmtree(TSM, ignore_errors=True)
     subprocess.check_call(['git', 'clone', '--depth=1',
                             'https://github.com/luke-schumacher/Time-Series-Models.git', TSM])
@@ -58,7 +71,7 @@ print('\nALL MODULES LOADED FROM /tmp/tsm')
 
 # COMMAND ----------
 
-import sys, os, re, json, pickle, shutil, subprocess
+import sys, os, re, json, pickle, shutil, subprocess, math
 import numpy as np
 import pandas as pd
 import torch
@@ -110,8 +123,11 @@ if REPO_ROOT in sys.path:
     sys.path.remove(REPO_ROOT)
 sys.path.insert(0, REPO_ROOT)
 
-for _name in [n for n in list(sys.modules) if n == "AlternatingPipeline" or n.startswith("AlternatingPipeline.")]:
-    del sys.modules[_name]
+for _name, _module in list(sys.modules.items()):
+    _module_file = (getattr(_module, "__file__", None) or "").replace("\\", "/")
+    if (_name.startswith("AlternatingPipeline") or _name == "config" or
+            "/AlternatingPipeline/" in _module_file):
+        del sys.modules[_name]
 
 import AlternatingPipeline as _ap
 _bad = [p for p in list(_ap.__path__) if "Patient Exchange and Examination" in p]
@@ -278,6 +294,30 @@ from AlternatingPipeline.models.orchestration_model import create_orchestration_
 from AlternatingPipeline.data.orchestration_preprocessing import (
     extract_orchestration_samples, build_demographic_distributions,
     _compute_scanner_stats,
+)
+from AlternatingPipeline.generation.output_integrity import (
+    GenerationIntegrityError,
+    validate_examination_sequence,
+    validate_exchange_sequence,
+    validate_orchestration_sequence,
+    validate_rendered_output,
+)
+
+MAX_GENERATION_ATTEMPTS = max(
+    1,
+    int(os.environ.get(
+        'MAX_GENERATION_ATTEMPTS',
+        GENERATION_CONFIG.get('max_regeneration_attempts', 5),
+    )),
+)
+MAX_RENDERED_EXAM_DURATION_SEC = float(
+    GENERATION_CONFIG.get('max_rendered_exam_duration_sec', 4000)
+)
+STRICT_OUTPUT_VALIDATION = (
+    os.environ.get(
+        'STRICT_OUTPUT_VALIDATION',
+        '1' if GENERATION_CONFIG.get('strict_output_validation', True) else '0',
+    ) != '0'
 )
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -446,6 +486,14 @@ def _generate_exchange_rows(tokens, durations, mu, sigma, day_start, t_offset,
       predicted_mu, predicted_sigma, sampled_duration, total_time,
       timediff, datetime
     """
+    validate_exchange_sequence(
+        tokens,
+        START_TOKEN_ID,
+        END_TOKEN_ID,
+        PAD_TOKEN_ID,
+        unknown_token_id=SOURCEID_VOCAB.get('UNK'),
+    )
+
     tokens_list    = tokens.cpu().tolist()
     durations_list = durations.cpu().tolist()
     mu_list        = mu.cpu().tolist()
@@ -468,6 +516,10 @@ def _generate_exchange_rows(tokens, durations, mu, sigma, day_start, t_offset,
         # sits at generated index j+1.
         j = i - 1
         raw_dur = durations_list[j] if 0 <= j < len(durations_list) else 0.0
+        if not math.isfinite(float(raw_dur)):
+            raise GenerationIntegrityError(
+                f"exchange token {tok} has a non-finite sampled duration"
+            )
         dur_sec = max(0.0, raw_dur) * EXCHANGE_DURATION_SCALE
         token_data.append({
             'tok':      tok,
@@ -552,6 +604,16 @@ def _generate_exam_rows(tokens, durations, mu, sigma, day_start, t_offset,
     }
     MSR_100 = SOURCEID_VOCAB.get('MRI_MSR_100', 10)
 
+    validate_examination_sequence(
+        tokens,
+        START_TOKEN_ID,
+        END_TOKEN_ID,
+        PAD_TOKEN_ID,
+        MSR_100,
+        FINISH_MAP,
+        unknown_token_id=SOURCEID_VOCAB.get('UNK'),
+    )
+
     t           = t_offset
     msr_start   = None
     msr_start_t = None
@@ -573,11 +635,17 @@ def _generate_exam_rows(tokens, durations, mu, sigma, day_start, t_offset,
             # read from this single index, never summed across the span.
             j = i - 1
             raw_span = durations_list[j] if 0 <= j < len(durations_list) else 0.0
+            if not math.isfinite(float(raw_span)):
+                raise GenerationIntegrityError(
+                    f"examination finish token has non-finite duration for {patient_id}"
+                )
             duration_sec = max(0.0, raw_span) * EXAMINATION_DURATION_SCALE
 
-            if duration_sec <= 0 or duration_sec > 4000:
-                msr_start = None
-                continue
+            if duration_sec < 1 or duration_sec > MAX_RENDERED_EXAM_DURATION_SEC:
+                raise GenerationIntegrityError(
+                    f"examination duration {duration_sec:.2f}s is outside the "
+                    f"renderable range [1, {MAX_RENDERED_EXAM_DURATION_SEC:.0f}]"
+                )
 
             msr_end = msr_start + timedelta(seconds=duration_sec)
             t       = msr_start_t + duration_sec
@@ -623,7 +691,51 @@ def _generate_exam_rows(tokens, durations, mu, sigma, day_start, t_offset,
             rows.append(row)
             msr_start = None
 
+    if len(rows) != 1:
+        raise GenerationIntegrityError(
+            f"expected one rendered examination row, received {len(rows)}"
+        )
     return rows, t
+
+
+def _generate_valid_exam_rows(cond, region_id, seq_type, serial_idx,
+                              day_start, current_t, patient_id, patient_info,
+                              serial, step_counter, customer_idx, sample_idx):
+    """Generate one scan, retrying stochastic duration failures without data loss."""
+    failures = []
+    for attempt in range(1, MAX_GENERATION_ATTEMPTS + 1):
+        with torch.no_grad():
+            tokens, durations, mu, sigma = examination_model.generate(
+                cond,
+                {
+                    'body_region': region_id,
+                    'sequence_type': seq_type,
+                    'serial_idx': serial_idx,
+                },
+                max_length=gen_config['max_length'],
+                temperature=gen_config['temperature'],
+                top_k=gen_config['top_k'],
+                top_p=gen_config['top_p'],
+                return_stats=True,
+            )
+
+        try:
+            rows, next_t = _generate_exam_rows(
+                tokens[0], durations[0], mu[0], sigma[0],
+                day_start, current_t,
+                patient_id, region_id, patient_info,
+                serial, step_counter, customer_idx, sample_idx,
+                sequence_type_name=ID_TO_SEQUENCE_TYPE.get(seq_type, 'other'),
+            )
+            return rows, next_t, attempt - 1
+        except GenerationIntegrityError as exc:
+            failures.append(str(exc))
+
+    detail = '; '.join(failures[-3:])
+    raise GenerationIntegrityError(
+        f"could not generate a valid examination for patient {patient_id} "
+        f"after {MAX_GENERATION_ATTEMPTS} attempts: {detail}"
+    )
 
 
 def _fill_pause_times(rows):
@@ -670,8 +782,6 @@ def _generate_orch_tokens(scanner_idx, date, demographic_distributions, serial_s
     body-region collapse the model exhibits under out-of-distribution input.
     """
     from AlternatingPipeline.data.orchestration_preprocessing import _build_orchestration_conditioning
-    import math
-
     dt = datetime.strptime(str(date), '%Y-%m-%d')
     dow = dt.weekday()
     stats = scanner_stats.get(serial_str) if serial_str is not None else None
@@ -692,48 +802,44 @@ def _generate_orch_tokens(scanner_idx, date, demographic_distributions, serial_s
     # residually-biased checkpoint cannot emit NECK/FOOT on a scanner whose
     # real mix has zero share there.
     region_dist = np.asarray(stats['region_distribution'], dtype=float)
-    allowed = [i for i in range(NUM_BODY_REGIONS) if region_dist[i] > 0.0]
-    allowed += [END_REGION_ID, BREAK_TOKEN_ID]
+    allowed_regions = {
+        i for i in range(NUM_BODY_REGIONS) if region_dist[i] > 0.0
+    }
+    if not allowed_regions:
+        raise GenerationIntegrityError(
+            f"scanner {serial_str} has no supported body regions in scanner_stats"
+        )
+    allowed_tokens = allowed_regions | {END_REGION_ID, BREAK_TOKEN_ID}
 
-    # `allowed_tokens` only exists on OrchestrationModel.generate() since
-    # d354402. In a long-lived Databricks kernel the loaded module can lag the
-    # repo (the step-04/05 purges cover the usual cases, but not every
-    # execution order), and passing the kwarg to a stale module raises
-    # TypeError on the very first day generated. Detect support up front and
-    # fall back to post-filtering the emitted tokens — same support guarantee,
-    # just without in-loop renormalised sampling.
-    import inspect as _inspect
-    _supports_mask = 'allowed_tokens' in _inspect.signature(
-        orchestration_model.generate).parameters
-    gen_kwargs = dict(
-        max_length=ORCHESTRATION_MODEL_CONFIG['max_seq_len'],
-        temperature=GENERATION_CONFIG['temperature'],
-        top_k=GENERATION_CONFIG['top_k'],
+    # Invalid-region fallback is intentionally forbidden: sampling without the
+    # scanner mask and deleting tokens afterwards changes patient counts and
+    # hides model failures. A stale Databricks module now fails with a clear
+    # restart instruction instead of emitting a lossy day.
+    try:
+        with torch.no_grad():
+            tokens = orchestration_model.generate(
+                cond_t,
+                scanner_t,
+                max_length=ORCHESTRATION_MODEL_CONFIG['max_seq_len'],
+                temperature=GENERATION_CONFIG['temperature'],
+                top_k=GENERATION_CONFIG['top_k'],
+                top_p=GENERATION_CONFIG['top_p'],
+                allowed_tokens=allowed_tokens,
+            )
+    except TypeError as exc:
+        raise RuntimeError(
+            "Loaded OrchestrationModel does not support constrained decoding. "
+            "Restart Python and rerun step 05 from the top."
+        ) from exc
+
+    return validate_orchestration_sequence(
+        tokens[0],
+        START_REGION_ID,
+        END_REGION_ID,
+        ORCH_PAD_TOKEN_ID,
+        BREAK_TOKEN_ID,
+        allowed_regions,
     )
-    if _supports_mask:
-        gen_kwargs['allowed_tokens'] = allowed
-    else:
-        print("    !! orchestration_model.generate() has no allowed_tokens "
-              "(stale module in kernel — restartPython() or rerun 05 from the "
-              "top to get masked sampling); post-filtering tokens instead.")
-
-    with torch.no_grad():
-        try:
-            tokens = orchestration_model.generate(cond_t, scanner_t, **gen_kwargs)
-        except Exception:
-            # Surface the real error, then retry unmasked so a generation run
-            # is never lost to the mask path alone. If this retry also fails,
-            # the problem is not the mask — let it raise.
-            import traceback
-            print("    !! masked orchestration generate failed — traceback:")
-            traceback.print_exc()
-            gen_kwargs.pop('allowed_tokens', None)
-            tokens = orchestration_model.generate(cond_t, scanner_t, **gen_kwargs)
-
-    token_list = tokens[0].cpu().tolist()
-    # Keep only allowed body region IDs (no-op when masked sampling was used)
-    allowed_regions = {t for t in allowed if 0 <= t < NUM_BODY_REGIONS}
-    return [t for t in token_list if t in allowed_regions]
 
 # COMMAND ----------
 
@@ -756,6 +862,9 @@ for customer_idx, (serial_str, daily_schedules) in enumerate(customer_schedules.
     all_exam_rows      = []
     exchange_sample_idx = 0   # increments per exchange block (startup/between/shutdown)
     exam_sample_idx     = 0   # increments per patient examined
+    expected_exam_counts = {}
+    expected_exchange_blocks = 0
+    regeneration_count = 0
 
     # Generate dates from the synthetic range (outside training window — no leakage)
     _start = datetime.strptime(SYNTH_DATE_START, '%Y-%m-%d')
@@ -837,6 +946,7 @@ for customer_idx, (serial_str, daily_schedules) in enumerate(customer_schedules.
             )
             all_exchange_rows.extend(ex_rows)
             exchange_sample_idx += 1
+            expected_exchange_blocks += 1
 
             # ── EXAMINATION ──
             # Training samples are per-measurement (one MSR_100 → MSR_104 span),
@@ -847,31 +957,19 @@ for customer_idx, (serial_str, daily_schedules) in enumerate(customer_schedules.
             # synthetic output degenerates to exactly 1 scan per patient.
             num_scans = max(1, int(np.random.poisson(8)))
             num_scans = min(num_scans, 20)          # clamp the tail
+            expected_exam_counts[pat_id] = num_scans
             for _scan in range(num_scans):
                 # Draw a scan type from this region's real mix and condition
                 # the model on it — this is what gives duration variability
                 # (short scouts vs long TSE/SPACE) instead of a flat mean.
                 seq_type = _sample_sequence_type(region_id)
                 cond = _build_cond_tensor(patient, current_t, day_start)
-                with torch.no_grad():
-                    exam_tokens, exam_durations, exam_mu, exam_sigma = examination_model.generate(
-                        cond,
-                        {'body_region': region_id,
-                         'sequence_type': seq_type, 'serial_idx': serial_idx},
-                        max_length=gen_config['max_length'],
-                        temperature=gen_config['temperature'],
-                        top_k=gen_config['top_k'],
-                        top_p=gen_config['top_p'],
-                        return_stats=True,
-                    )
-
-                exam_rows, current_t = _generate_exam_rows(
-                    exam_tokens[0], exam_durations[0], exam_mu[0], exam_sigma[0],
-                    day_start, current_t,
-                    pat_id, region_id, patient,
+                exam_rows, current_t, retries = _generate_valid_exam_rows(
+                    cond, region_id, seq_type, serial_idx,
+                    day_start, current_t, pat_id, patient,
                     serial_str, step_counter, customer_idx, exam_sample_idx,
-                    sequence_type_name=ID_TO_SEQUENCE_TYPE.get(seq_type, 'other'),
                 )
+                regeneration_count += retries
                 all_exam_rows.extend(exam_rows)
             exam_sample_idx += 1   # one sample_idx per patient (matches step 02)
 
@@ -903,10 +1001,35 @@ for customer_idx, (serial_str, daily_schedules) in enumerate(customer_schedules.
             )
             all_exchange_rows.extend(sd_rows)
             exchange_sample_idx += 1
+            expected_exchange_blocks += 1
 
     # ── Fill pause times for exam rows ──
     all_exam_rows = _fill_pause_times(all_exam_rows)
     all_exam_rows = _fill_exam_timediff(all_exam_rows)
+
+    # Fail before writing CSVs if any planned scan/block disappeared or a row
+    # violates the render contract. Warn-only mode is available for diagnosis,
+    # but strict validation is the default for production-quality output.
+    try:
+        integrity_report = validate_rendered_output(
+            all_exchange_rows,
+            all_exam_rows,
+            expected_exam_counts,
+            expected_exchange_blocks,
+            BODY_REGIONS,
+        )
+    except GenerationIntegrityError as exc:
+        if STRICT_OUTPUT_VALIDATION:
+            raise
+        print(f"  !! OUTPUT INTEGRITY WARNING (warn-only mode): {exc}")
+    else:
+        print(
+            "  Output integrity: PASS  "
+            f"patients={integrity_report['patients']}  "
+            f"scans={integrity_report['exam_rows']}  "
+            f"exchange_blocks={integrity_report['exchange_blocks']}  "
+            f"regenerated_scans={regeneration_count}"
+        )
 
     # ── Duration diagnostic: surface model-vs-real calibration up front ──
     # Real exam_duration mean ≈ 105 s on serials 176148/183242. If synthetic
