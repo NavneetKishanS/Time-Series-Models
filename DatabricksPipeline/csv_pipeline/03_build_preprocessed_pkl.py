@@ -152,6 +152,156 @@ def _safe_float(val, default=0.0):
         return default
 
 
+def _normalize_body_label(val):
+    """Normalise raw body-part text before mapping lookup."""
+    if pd.isna(val):
+        return ''
+    text = str(val).strip().upper()
+    text = re.sub(r'\s+', ' ', text)
+    text = text.replace('BODY PART ', '')
+    text = text.replace('BODYPART ', '')
+    return text
+
+
+def _canonical_body_label(val):
+    """
+    Collapse common raw label variants to a single canonical lookup key.
+
+    The mapping Excel already groups many variants into one BodyGroup, but
+    some source labels arrive in alternate forms (for example, spacing or
+    synonyms). This step keeps the lookup tolerant without changing the
+    spreadsheet structure.
+    """
+    label = _normalize_body_label(val)
+    if not label:
+        return ''
+
+    alias_map = {
+        'BREAST': 'BREAST',
+        'BREASTS': 'BREAST',
+        'KNEE': 'KNEE',
+        'KNEES': 'KNEE',
+        'SHOULDER': 'SHOULDER',
+        'SHOULDERS': 'SHOULDER',
+        'HIP': 'HIP',
+        'HIPS': 'HIP',
+        'HEART': 'HEART',
+        'WHOLEBODY': 'WHOLEBODY',
+        'WHOLE BODY': 'WHOLEBODY',
+        'TOTAL BODY': 'WHOLEBODY',
+        'WHOLE-BODY': 'WHOLEBODY',
+        'WHOLE_BODY': 'WHOLEBODY',
+    }
+
+    return alias_map.get(label, label)
+
+
+def _display_body_label(val):
+    """Format labels for audit output without changing lookup behavior."""
+    if pd.isna(val):
+        return ''
+    text = str(val).strip()
+    if not text:
+        return ''
+    return text[:1].upper() + text[1:].lower()
+
+
+_UNKNOWN_BODY_AUDIT_ROWS = []
+_BODY_GROUP_SANITY = {}
+
+
+def _record_unknown_body_audit(values, label):
+    """
+    Store unresolved body labels in memory so we can print a single summary
+    at the end of the cell.
+    """
+    if not values:
+        return
+
+    for raw in values:
+        raw_text = str(raw).strip()
+        norm_text = _canonical_body_label(raw_text)
+        if not norm_text:
+            continue
+        _UNKNOWN_BODY_AUDIT_ROWS.append({
+            'source': label,
+            'raw_body_label': raw_text,
+            'normalized_body_label': norm_text,
+            'display_body_label': _display_body_label(raw_text),
+        })
+
+
+def _print_unknown_body_audit():
+    """Print the accumulated unknown-body audit grouped by source and label."""
+    if not _UNKNOWN_BODY_AUDIT_ROWS:
+        print("\nNo UNKNOWN body labels recorded.")
+        return
+
+    audit_df = pd.DataFrame(_UNKNOWN_BODY_AUDIT_ROWS)
+    counts = (
+        audit_df
+        .groupby(['source', 'raw_body_label', 'normalized_body_label', 'display_body_label'], dropna=False)
+        .size()
+        .reset_index(name='row_count')
+        .sort_values(['source', 'row_count', 'raw_body_label'], ascending=[True, False, True])
+    )
+
+    print("\n" + "=" * 60)
+    print("UNKNOWN BODY LABEL AUDIT")
+    print("=" * 60)
+
+    for source, group in counts.groupby('source', sort=False):
+        print(f"\n[{source}]")
+        for _, row in group.iterrows():
+            print(f"  {row['display_body_label']:<40} {int(row['row_count']):>6,}  ->  {row['normalized_body_label']}")
+
+
+def _record_body_group_sanity(serial, raw_label, mapped_group, source):
+    """Store per-serial mapping results for a final sanity summary."""
+    serial_key = str(serial)
+    raw_text = str(raw_label).strip()
+    group_text = str(mapped_group).strip().upper() if mapped_group is not None else 'UNKNOWN'
+    if not raw_text:
+        return
+
+    serial_bucket = _BODY_GROUP_SANITY.setdefault(serial_key, {
+        'known': {},
+        'unknown': {},
+    })
+    target_bucket = serial_bucket['unknown'] if group_text == 'UNKNOWN' else serial_bucket['known']
+    entry = target_bucket.setdefault(raw_text, {'group': group_text, 'count': 0, 'sources': set()})
+    entry['count'] += 1
+    entry['sources'].add(source)
+
+
+def _print_body_group_sanity():
+    """Print a per-serial summary of raw labels and their mapped groups."""
+    if not _BODY_GROUP_SANITY:
+        print("\nNo body-group sanity data recorded.")
+        return
+
+    print("\n" + "=" * 60)
+    print("BODY GROUP SANITY SUMMARY")
+    print("=" * 60)
+
+    for serial in sorted(_BODY_GROUP_SANITY.keys()):
+        print(f"\n[serial {serial}]")
+        bucket = _BODY_GROUP_SANITY[serial]
+        known_total = sum(item['count'] for item in bucket['known'].values())
+        unknown_total = sum(item['count'] for item in bucket['unknown'].values())
+        total = known_total + unknown_total
+        unknown_pct = (unknown_total / total * 100.0) if total else 0.0
+        print(f"  total_labels={total:,}  known={known_total:,}  unknown={unknown_total:,}  unknown_pct={unknown_pct:.1f}%")
+        for status in ('known', 'unknown'):
+            entries = bucket[status]
+            if not entries:
+                continue
+            print(f"  {status.upper()}:")
+            for raw_label, info in sorted(entries.items(), key=lambda kv: (-kv[1]['count'], kv[0])):
+                sources = ",".join(sorted(info['sources']))
+                print(f"    {raw_label:<35} {info['count']:>6,}  ->  {info['group']}  ({sources})")
+
+
 def _conditioning(row, dt=None):
     """Build 12-key conditioning dict from a pandas Series."""
     if dt is None:
@@ -312,6 +462,7 @@ _t = _timeit('section1 exchange', _t)
 
 # COMMAND ----------
 
+# DBTITLE 1,Cell 7
 # =============================================================================
 # SECTION 2 — Examination sequences re-queried from Spark
 #
@@ -325,6 +476,10 @@ print("\n" + "="*60)
 print("SECTION 2: Examination sequences from Spark")
 print("="*60)
 
+# Reset per-run state so re-executions don't accumulate stale records
+_BODY_GROUP_SANITY.clear()
+_UNKNOWN_BODY_AUDIT_ROWS.clear()
+
 # ---- 2a. Load body group mapping ----
 df_body_excel = pd.read_excel(BODY_GROUP_MAPPING_PATH)
 if 'BodyPart' in df_body_excel.columns and 'BodyGroup' in df_body_excel.columns:
@@ -335,7 +490,7 @@ else:
     _cp, _cg = df_body_excel.columns[0], df_body_excel.columns[1]
 
 body_part_to_group = {
-    str(k).strip().upper(): str(v).strip().upper()
+    _canonical_body_label(k): str(v).strip().upper()
     for k, v in zip(df_body_excel[_cp], df_body_excel[_cg])
     if pd.notna(k) and pd.notna(v)
 }
@@ -388,6 +543,7 @@ df_exams_spark = (
             F.col("WorkflowValues")["BodyPart"],
             F.col("WorkflowValues")["RequestedBodyPart"],
         )).alias("BodyPartExamined"),
+        F.first(F.col("WorkflowValues")["ProtocolName"]).alias("ProtocolName"),
     )
     .orderBy("SerialNumber", "WorkflowStartRefDateTime")
 )
@@ -402,11 +558,35 @@ df_exams_pd['Direction_encoded'] = df_exams_pd['Direction'].apply(
               else (1 if str(x).strip().lower() == 'feet first' else -1)
 )
 df_exams_pd['BodyGroup'] = df_exams_pd['BodyPartExamined'].apply(
-    lambda x: body_part_to_group.get(str(x).strip().upper(), 'UNKNOWN')
+    lambda x: body_part_to_group.get(_canonical_body_label(x), 'UNKNOWN')
               if pd.notna(x) else 'UNKNOWN'
 )
-# Apply secondary normalization: Excel BodyGroup names that aren't in the
-# 11-region vocab (e.g. "BRAIN", "KNEE", "LIVER") → canonical region names.
+# Fix 1 — ProtocolName fallback: these scanners don't write a body-part key
+# into WorkflowValues, so parse each token of ProtocolName instead.
+# e.g. "KNEE_TSE_3D" → tok "KNEE" → _canonical_body_label → body_part_to_group hit.
+def _body_group_from_protocol(protocol_name):
+    if pd.isna(protocol_name) or not str(protocol_name).strip():
+        return None
+    for tok in re.split(r'[_\-\s]+', str(protocol_name).strip().upper()):
+        label = _canonical_body_label(tok)
+        if label and body_part_to_group.get(label, 'UNKNOWN') != 'UNKNOWN':
+            return body_part_to_group[label]
+    return None
+
+_mask_unknown = df_exams_pd['BodyGroup'] == 'UNKNOWN'
+if _mask_unknown.any():
+    df_exams_pd.loc[_mask_unknown, 'BodyGroup'] = (
+        df_exams_pd.loc[_mask_unknown, 'ProtocolName']
+        .apply(lambda p: _body_group_from_protocol(p) or 'UNKNOWN')
+    )
+    _n_proto = int(_mask_unknown.sum() - (df_exams_pd['BodyGroup'] == 'UNKNOWN').sum())
+    if _n_proto > 0:
+        print(f"  ProtocolName fallback resolved {_n_proto:,} exam body groups")
+# Fix 2 — sanity recording deferred to per-serial loop (post EXU-95 fallback)
+# so the report reflects final assigned groups, not the pre-fallback state.
+
+# Apply secondary normalization: Excel/protocol BodyGroup names that aren't in
+# the 11-region vocab (e.g. "BRAIN", "KNEE", "LIVER") → canonical region names.
 df_exams_pd['BodyGroup'] = df_exams_pd['BodyGroup'].apply(_normalize_bodygroup)
 print(f"Examination rows: {len(df_exams_pd):,}")
 
@@ -424,6 +604,10 @@ if len(_unmapped):
           f"({int(_unmapped.sum()):,} rows). Add these to bodyupdated.xlsx:")
     for _bp, _cnt in _unmapped.head(25).items():
         print(f"      {_bp:<32} {_cnt:>6,}")
+    _record_unknown_body_audit(
+        df_exams_pd.loc[df_exams_pd['BodyGroup'] == 'UNKNOWN', 'BodyPartExamined'].tolist(),
+        'exam_workflow',
+    )
 
 # Report any BodyGroup values that are STILL not in the canonical 11 regions
 # after normalization — these are Excel BodyGroup names missing from _BODYGROUP_NORMALIZE.
@@ -551,7 +735,7 @@ for serial in SERIAL_NUMBERS:
                     body = re.search(r'with body part < (.*) > <', msg).group(1)
                 except AttributeError:
                     pass
-            return body_part_to_group.get(str(body).strip().upper())
+            return body_part_to_group.get(_canonical_body_label(body))
         except AttributeError:
             return None
     df_merged['_bg_msg'] = None
@@ -569,6 +753,20 @@ for serial in SERIAL_NUMBERS:
     _n_bg_resolved = int(_needs_bg.sum() - (df_merged['BodyGroup_to'] == 'UNKNOWN').sum())
     if _n_bg_resolved > 0:
         print(f"    body groups: {_n_bg_resolved:,} rows resolved from EXU-95 message fallback")
+
+    # Fix 2 — record final per-exam body groups after all fallbacks are applied
+    _exam_final = pd.merge(
+        df_merged.dropna(subset=['WorkflowStartRefDateTime'])
+                 .drop_duplicates(subset=['WorkflowStartRefDateTime'])
+                 [['WorkflowStartRefDateTime', 'BodyGroup_to']],
+        df_ex[['WorkflowStartRefDateTime', 'BodyPartExamined']],
+        on='WorkflowStartRefDateTime', how='left',
+    )
+    for _, _r in _exam_final.iterrows():
+        _record_body_group_sanity(
+            serial, _r.get('BodyPartExamined'),
+            str(_r.get('BodyGroup_to', 'UNKNOWN')).upper(), 'exam_workflow',
+        )
 
     df_merged['Age']               = df_merged['Age'].fillna(0.0)
     df_merged['Weight']            = df_merged['Weight'].fillna(0.0)
@@ -695,6 +893,10 @@ _t = _timeit('exam extraction', _t)
 
 # COMMAND ----------
 
+
+
+# COMMAND ----------
+
 # =============================================================================
 # SECTION 3 — customer_schedules from exam CSVs
 # =============================================================================
@@ -736,7 +938,7 @@ for serial in SERIAL_NUMBERS:
             bp_str = str(row.get('BodyPart',  '') or '').strip().upper()
             bg_str = str(row.get('BodyGroup', '') or '').strip().upper()
             if not bg_str or bg_str in ('NAN', 'FALSE', 'UNKNOWN', ''):
-                bg_str = body_part_to_group.get(bp_str, 'UNKNOWN')
+                bg_str = body_part_to_group.get(_canonical_body_label(bp_str), 'UNKNOWN')
             bg_str = _normalize_bodygroup(bg_str)
             bg_id  = _BODY_REGION_TO_ID.get(bg_str, 10)
 
@@ -760,12 +962,24 @@ for serial in SERIAL_NUMBERS:
         if patients:
             customer_schedules[cid][date_str] = patients
 
+    _unknown_customer_bodies = [
+        p.get('body_region', 'UNKNOWN')
+        for day in customer_schedules.get(cid, {}).values()
+        for p in day
+        if str(p.get('body_region_id', 10)) == '10' or p.get('body_region', 'UNKNOWN') == 'UNKNOWN'
+    ]
+    if _unknown_customer_bodies:
+        _record_unknown_body_audit(_unknown_customer_bodies, f'customer_{cid}')
+
     n_days = len(customer_schedules[cid])
     n_pats = sum(len(p) for p in customer_schedules[cid].values())
     print(f"  {cid}: {n_days} days, {n_pats} patients")
 
 print(f"\nCustomer schedules: {len(customer_schedules)} scanners")
 _t = _timeit('customer_schedules', _t)
+
+_print_body_group_sanity()
+_print_unknown_body_audit()
 
 # COMMAND ----------
 

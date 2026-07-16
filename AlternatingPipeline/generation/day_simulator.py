@@ -153,7 +153,7 @@ class DaySimulator:
             )
             schedule.extend(exchange_events)
             event_id += len(exchange_events)
-            current_time += exchange_durations[0].sum().item()
+            current_time += self._phase_duration_seconds(exchange_tokens[0], exchange_durations[0])
 
             # === EXAMINATION PHASE ===
             cond = build_conditioning_tensor(patient, current_time, start_time).to(self.device)
@@ -175,7 +175,7 @@ class DaySimulator:
             )
             schedule.extend(exam_events)
             event_id += len(exam_events)
-            current_time += exam_durations[0].sum().item()
+            current_time += self._phase_duration_seconds(exam_tokens[0], exam_durations[0])
 
             previous_body_region = body_region_id
 
@@ -283,7 +283,7 @@ class DaySimulator:
                 )
                 schedule.extend(break_events)
                 event_id += len(break_events)
-                current_time += break_durations[0].sum().item()
+                current_time += self._phase_duration_seconds(break_tokens[0], break_durations[0])
 
             elif 0 <= token < NUM_BODY_REGIONS:
                 # === PATIENT: exchange + examination ===
@@ -323,7 +323,7 @@ class DaySimulator:
                 )
                 schedule.extend(exchange_events)
                 event_id += len(exchange_events)
-                current_time += exchange_durations[0].sum().item()
+                current_time += self._phase_duration_seconds(exchange_tokens[0], exchange_durations[0])
 
                 # Examination phase
                 cond = build_conditioning_tensor(
@@ -347,7 +347,7 @@ class DaySimulator:
                 )
                 schedule.extend(exam_events)
                 event_id += len(exam_events)
-                current_time += exam_durations[0].sum().item()
+                current_time += self._phase_duration_seconds(exam_tokens[0], exam_durations[0])
 
                 previous_body_region = body_region_id
                 patient_idx += 1
@@ -381,6 +381,38 @@ class DaySimulator:
             schedule.extend(shutdown_events)
 
         return schedule
+
+    def _phase_duration_seconds(self, tokens, durations):
+        """
+        Convert a generated duration vector into one wall-clock phase duration.
+
+        The examination model is trained so the full span lives on the last
+        meaningful token, not as a sum across every token. Using the raw sum
+        can therefore inflate elapsed time when intermediate tokens get small
+        positive durations. We prefer the last non-special token duration and
+        fall back to the positive sum only if needed.
+        """
+        if isinstance(tokens, torch.Tensor):
+            tokens = tokens.cpu().tolist()
+        if isinstance(durations, torch.Tensor):
+            durations = durations.cpu().tolist()
+
+        valid = []
+        for tok, dur in zip(tokens, durations):
+            if tok in (START_TOKEN_ID, END_TOKEN_ID, PAD_TOKEN_ID):
+                continue
+            if dur is None:
+                continue
+            valid.append(max(0.0, float(dur)))
+
+        if not valid:
+            return 0.0
+
+        last_valid = valid[-1]
+        positive_sum = sum(valid)
+        if last_valid > 0.0:
+            return last_valid
+        return positive_sum
 
     def _sample_patient_demographics(self, body_region_id, demographic_distributions):
         """

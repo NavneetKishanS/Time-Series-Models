@@ -120,6 +120,62 @@ class OrchestrationModel(nn.Module):
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
 
+    @staticmethod
+    def _force_token_subset(logits, row_idx, token_ids):
+        """Restrict one batch row to a non-empty set of token IDs."""
+        token_ids = list(token_ids)
+        if not token_ids:
+            raise ValueError("token_ids must contain at least one token")
+        keep = logits[row_idx, token_ids].clone()
+        logits[row_idx].fill_(-float('Inf'))
+        logits[row_idx, token_ids] = torch.where(
+            torch.isfinite(keep), keep, torch.zeros_like(keep)
+        )
+
+    def _apply_generation_constraints(self, logits, generated, remaining_steps,
+                                      allowed_mask=None):
+        """Enforce the day-plan grammar before stochastic sampling."""
+        logits = logits.clone()
+        logits[:, self.pad_token_id] = -float('Inf')
+        logits[:, self.start_token_id] = -float('Inf')
+
+        if allowed_mask is not None:
+            logits[:, ~allowed_mask] = -float('Inf')
+
+        for row_idx in range(generated.shape[0]):
+            row = generated[row_idx]
+            if (row == self.end_token_id).any():
+                self._force_token_subset(logits, row_idx, [self.end_token_id])
+                continue
+
+            content = row[1:]
+            body_count = int(
+                ((content >= 0) & (content < self.start_token_id)).sum().item()
+            )
+            last_token = int(content[-1].item()) if content.numel() else None
+
+            # A day cannot be empty, start with a break, contain consecutive
+            # breaks, or terminate immediately after a break.
+            if body_count == 0:
+                logits[row_idx, self.end_token_id] = -float('Inf')
+                logits[row_idx, self.break_token_id] = -float('Inf')
+            if last_token == self.break_token_id:
+                logits[row_idx, self.break_token_id] = -float('Inf')
+                logits[row_idx, self.end_token_id] = -float('Inf')
+
+            # Do not open a break when there is only enough room to close the
+            # sequence. The preceding rule then guarantees END is legal here.
+            if remaining_steps <= 2:
+                logits[row_idx, self.break_token_id] = -float('Inf')
+            if remaining_steps == 1:
+                self._force_token_subset(logits, row_idx, [self.end_token_id])
+
+        if not torch.isfinite(logits).any(dim=-1).all():
+            raise RuntimeError(
+                "Orchestration constraints removed every candidate token for at least one sample"
+            )
+        return logits
+
     def _encode_conditioning(self, conditioning, scanner_ids):
         """
         Encode day-level conditioning into memory for the decoder.
@@ -202,6 +258,14 @@ class OrchestrationModel(nn.Module):
 
         if max_length is None:
             max_length = self.max_seq_len
+        if max_length < 3:
+            raise ValueError("max_length must be at least 3 for a non-empty day plan")
+        if temperature <= 0:
+            raise ValueError("temperature must be greater than zero")
+        if not 0 < top_p <= 1:
+            raise ValueError("top_p must be in the interval (0, 1]")
+        if top_k < 0:
+            raise ValueError("top_k must be non-negative")
 
         # Handle single-sample input
         if conditioning.dim() == 1:
@@ -219,6 +283,15 @@ class OrchestrationModel(nn.Module):
 
         allowed_mask = None
         if allowed_tokens is not None:
+            allowed_tokens = {int(token_id) for token_id in allowed_tokens}
+            invalid = sorted(
+                token_id for token_id in allowed_tokens
+                if token_id < 0 or token_id >= self.vocab_size
+            )
+            if invalid:
+                raise ValueError(f"allowed_tokens contains out-of-range IDs: {invalid}")
+            if not any(0 <= token_id < self.start_token_id for token_id in allowed_tokens):
+                raise ValueError("allowed_tokens must include at least one body-region token")
             allowed_mask = torch.zeros(self.vocab_size, dtype=torch.bool, device=device)
             allowed_mask[list(allowed_tokens)] = True
             allowed_mask[self.end_token_id] = True  # must always be able to stop
@@ -231,7 +304,7 @@ class OrchestrationModel(nn.Module):
             (batch_size, 1), self.start_token_id, dtype=torch.long, device=device
         )
 
-        for _ in range(max_length - 1):
+        for step_idx in range(max_length - 1):
             tgt_emb = self.token_embedding(generated)
             tgt_emb = tgt_emb * (self.d_model ** 0.5)
             tgt_emb = self.pos_decoder(tgt_emb)
@@ -242,13 +315,10 @@ class OrchestrationModel(nn.Module):
             decoder_output = self.token_decoder(tgt_emb, memory, tgt_mask=tgt_mask)
 
             next_token_logits = self.output_projection(decoder_output[:, -1, :]) / temperature
-
-            # Mask out PAD token - should never be generated
-            next_token_logits[:, self.pad_token_id] = -float('Inf')
-
-            # Restrict to the caller's allowed token set (scanner region support)
-            if allowed_mask is not None:
-                next_token_logits[:, ~allowed_mask] = -float('Inf')
+            remaining_steps = (max_length - 1) - step_idx
+            next_token_logits = self._apply_generation_constraints(
+                next_token_logits, generated, remaining_steps, allowed_mask
+            )
 
             # Top-k filtering
             if top_k > 0:
@@ -275,6 +345,8 @@ class OrchestrationModel(nn.Module):
                 next_token_logits[indices_to_remove] = -float('Inf')
 
             probs = torch.softmax(next_token_logits, dim=-1)
+            if not torch.isfinite(probs).all() or (probs.sum(dim=-1) <= 0).any():
+                raise RuntimeError("Invalid orchestration probabilities after token filtering")
             next_token = torch.multinomial(probs, num_samples=1)
             generated = torch.cat([generated, next_token], dim=1)
 

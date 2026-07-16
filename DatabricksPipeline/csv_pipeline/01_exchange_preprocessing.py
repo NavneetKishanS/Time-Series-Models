@@ -293,10 +293,10 @@ print(f"Sample:\n{df_body.head(3)}")
 
 # COMMAND ----------
 # =============================================================================
-# CELL: Query eventlog from Spark (all 10 serials, 1-month window)
+# CELL: Prepare Spark sources
 # =============================================================================
 
-eventlog_spark = (
+_eventlog_base = (
     spark.read.table(EVENTLOG_TABLE)
     .select(
         F.date_format(F.col("EventDateTime"), "yyyy-MM-dd HH:mm:ss").alias("EventDateTime"),
@@ -323,14 +323,13 @@ eventlog_spark = (
         "Line",
         F.col("SerialNumber").cast("long").alias("SerialNumber"),
     )
-    .orderBy(F.col("datetime").asc())
 )
 
+_exam_base = spark.read.table(EXAMINATION_TABLE)
+
 _t = time.perf_counter()
-print(f"Eventlog row count: {eventlog_spark.count():,}")
-eventlog_pd = eventlog_spark.toPandas()
-print("Converted to pandas.")
-_t = _timeit('eventlog.toPandas', _t)
+print("Spark sources prepared.")
+_t = _timeit('spark.prepare', _t)
 
 # COMMAND ----------
 # =============================================================================
@@ -342,10 +341,14 @@ for serial_number in SERIAL_NUMBERS:
     print(f"Processing serial: {serial_number}")
     print(f"{'='*60}")
 
-    # Filter to this serial (SerialNumber may be stored as int or string)
-    df_sc = eventlog_pd[
-        eventlog_pd['SerialNumber'].astype(str) == str(serial_number)
-    ].copy()
+    # Query just this serial from Spark to avoid collecting the full month of
+    # exchange rows to the driver up front.
+    df_sc = (
+        _eventlog_base
+        .filter(F.col("SerialNumber") == int(serial_number))
+        .orderBy(F.col("datetime").asc(), F.col("Line").asc())
+        .toPandas()
+    )
 
     if df_sc.empty:
         print(f"  No events found — skipping.")
@@ -356,11 +359,7 @@ for serial_number in SERIAL_NUMBERS:
     # Sort by datetime then Line (secondary sort to preserve event order within
     # the same timestamp)
     df_sc['datetime'] = pd.to_datetime(df_sc['datetime'])
-    df_sorted = (
-        df_sc.groupby('datetime', group_keys=False)
-             .apply(lambda g: g.sort_values('Line'))
-             .reset_index(drop=True)
-    )
+    df_sorted = df_sc.sort_values(['datetime', 'Line'], kind='mergesort').reset_index(drop=True)
 
     # -------------------------------------------------------------------------
     # Step 1: Extract inter-patient exchange blocks
@@ -443,9 +442,8 @@ for serial_number in SERIAL_NUMBERS:
     end_int   = int(DATE_END.replace('-', ''))
 
     try:
-        examination_df = spark.read.table(EXAMINATION_TABLE)
         exam_filtered = (
-            examination_df
+            _exam_base
             .filter(F.col("SerialNumber").cast("long") == int(serial_number))
             .filter(
                 (F.col("Year").cast("int") * 10000 +

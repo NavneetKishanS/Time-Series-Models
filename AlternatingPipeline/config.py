@@ -407,7 +407,12 @@ GENERATION_CONFIG = {
     'temperature': 1.0,      # Sampling temperature
     'top_k': 10,             # Top-k sampling
     'top_p': 0.9,            # Nucleus sampling
-    'max_length': MAX_SEQ_LEN
+    'max_length': MAX_SEQ_LEN,
+    # Invalid stochastic samples are regenerated instead of silently dropped
+    # from the rendered CSV. This is inference-only; checkpoints stay valid.
+    'max_regeneration_attempts': 5,
+    'max_rendered_exam_duration_sec': 4000,
+    'strict_output_validation': True,
 }
 
 # ============================================================================
