@@ -299,6 +299,17 @@ EXAMINATION_MODEL_CONFIG = {
     # into the 10-min range), so the head models log1p(total/60) where a
     # Gaussian on the raw scale would be dominated by the tail.
     'duration_mode': 'log',
+    # A single log-Gaussian smooths short, typical, and long protocols into one
+    # average-shaped curve. Three mixture components let the same conditioned
+    # scan type retain multiple realistic duration modes.
+    'duration_distribution': 'mixture',
+    'duration_num_components': 3,
+    'duration_min_sigma': 0.05,
+    'duration_max_log_sample': 8.0,
+    # Initial centres are in log1p(seconds / duration_scale) space. Separating
+    # them at initialisation avoids all mixture components starting identically.
+    'duration_component_init_means': [0.25, 1.00, 1.80],
+    'duration_component_init_sigmas': [0.20, 0.35, 0.55],
     # Scan-type + per-scanner conditioning. When enabled the examination
     # model embeds the MRI sequence type (scout/tse/...) and the scanner
     # serial alongside body_region, so it can produce duration variability

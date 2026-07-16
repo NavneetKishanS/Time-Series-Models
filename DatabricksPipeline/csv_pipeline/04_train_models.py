@@ -244,6 +244,7 @@ print(f"Daily summaries:       {len(data['daily_summaries']):,}")
 # =============================================================================
 import os, time, json, hashlib
 from collections import Counter
+from AlternatingPipeline.config import EXAMINATION_MODEL_CONFIG as _EXAM_MODEL_CONFIG
 
 # Source files whose content actually determines model behaviour. We fingerprint
 # the *loaded* copies (under TMP_ROOT) so the printout reflects the code this run
@@ -253,6 +254,7 @@ PROVENANCE_SRC = [
     "AlternatingPipeline/training/train_exchange.py",
     "AlternatingPipeline/training/train_orchestration.py",
     "AlternatingPipeline/data/examination_duration_calibration.py",
+    "AlternatingPipeline/models/layers.py",
     "AlternatingPipeline/models/sequence_generator.py",
     "AlternatingPipeline/config.py",
 ]
@@ -290,6 +292,11 @@ def _pkl_fingerprint(d):
 print("=" * 64)
 print(" STEP 04 PRE-FLIGHT — TRAINING INPUTS")
 print("=" * 64)
+print(
+    "Examination duration model: "
+    f"{_EXAM_MODEL_CONFIG.get('duration_distribution', 'single')}  "
+    f"components={_EXAM_MODEL_CONFIG.get('duration_num_components', 1)}"
+)
 
 # 1) the pkl that will train the models
 _pkl_meta = _file_meta(PKL_PATH)
@@ -445,6 +452,12 @@ _manifest = {
         "examination":   float(min(examination_history["val_loss"])),
         "orchestration": float(min(orch_history["val_loss"])),
     },
+    "model_config": {
+        "examination_duration_distribution":
+            examination_model.duration_distribution,
+        "examination_duration_components":
+            examination_model.duration_num_components,
+    },
 }
 _manifest_path = f"{MODELS_DIR}/MODEL_MANIFEST.json"
 with open(_manifest_path, "w") as _f:
@@ -483,9 +496,29 @@ if os.path.exists(_PROBE_PATH):
     with open(_PROBE_PATH) as _pf:
         _probe = json.load(_pf)
     print("\n=== DURATION PROBE (the go/no-go gate) ===")
+    print(
+        f"  distribution={_probe.get('duration_distribution', 'single')}  "
+        f"components={_probe.get('num_components', 1)}"
+    )
     for _r in _probe.get("rows", []):
-        print(f"  {_r['sequence_type']:<8} n={_r['n']:>3}  "
-              f"predicted={_r['predicted_s']:>7.1f}s  target={_r['target_s']:>7.1f}s")
+        _weights = _r.get("component_weights")
+        _weight_text = (
+            "  weights=[" + ", ".join(f"{v:.0%}" for v in _weights) + "]"
+            if _weights else ""
+        )
+        print(
+            f"  {_r['sequence_type']:<8} n={_r['n']:>3}  "
+            f"predicted={_r['predicted_s']:>7.1f}s"
+            f" +/-{_r.get('predicted_conditional_std_s', 0):>6.1f}s  "
+            f"target={_r['target_s']:>7.1f}s{_weight_text}"
+        )
+    if _probe.get("component_usage"):
+        print(
+            "  overall component usage=["
+            + ", ".join(f"{v:.1%}" for v in _probe["component_usage"])
+            + "]  "
+            f"collapse_warning={_probe.get('mixture_collapse_warning')}"
+        )
     if "spread_x" in _probe:
         print(f"  spread {_probe['spread_x']}x  "
               f"[{_probe['predicted_lo_s']:.0f}s .. {_probe['predicted_hi_s']:.0f}s]  "
@@ -494,24 +527,25 @@ if os.path.exists(_PROBE_PATH):
 
 # COMMAND ----------
 
-  import os, time
-                                                                                                                                                                           
-  ckpt_dir = "/dbfs/FileStore/csv_pipeline/models/exchange"                                                                                                                
-  print("exists:", os.path.isdir(ckpt_dir))                                                                                                                                
-  for f in sorted(os.listdir(ckpt_dir)):                                                                                                                                   
-      p = os.path.join(ckpt_dir, f)                                                                                                                                        
-      sz = os.path.getsize(p) / 1e6                                                                                                                                        
-      mt = time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(p)))
-      print(f"  {mt}  {sz:8.1f} MB  {f}") 
+import os, time
+
+ckpt_dir = "/dbfs/FileStore/csv_pipeline/models/exchange"
+print("exists:", os.path.isdir(ckpt_dir))
+for f in sorted(os.listdir(ckpt_dir)):
+    p = os.path.join(ckpt_dir, f)
+    sz = os.path.getsize(p) / 1e6
+    mt = time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(p)))
+    print(f"  {mt}  {sz:8.1f} MB  {f}")
 
 # COMMAND ----------
 
-  import os, time                                                                                                                                                          
-  d = "/dbfs/FileStore/csv_pipeline/models/examination"
-  print("exists:", os.path.isdir(d))                                                                                                                                       
-  if os.path.isdir(d):
-      for f in sorted(os.listdir(d)):                                                                                                                                      
-          p = os.path.join(d, f)
-          sz = os.path.getsize(p) / 1e6                                                                                                                                    
-          mt = time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(p)))
-          print(f"  {mt}  {sz:8.1f} MB  {f}")  
+import os, time
+
+d = "/dbfs/FileStore/csv_pipeline/models/examination"
+print("exists:", os.path.isdir(d))
+if os.path.isdir(d):
+    for f in sorted(os.listdir(d)):
+        p = os.path.join(d, f)
+        sz = os.path.getsize(p) / 1e6
+        mt = time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(p)))
+        print(f"  {mt}  {sz:8.1f} MB  {f}")

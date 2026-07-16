@@ -8,7 +8,7 @@ The examination model uses a single body_region conditioning.
 Architecture:
     Conditioning Encoder -> memory
     Token Decoder (autoregressive) -> logits
-    Duration Encoder (bidirectional, single-pass) -> (mu, sigma) per token
+    Duration Encoder (bidirectional, single-pass) -> duration distribution
 """
 import torch
 import torch.nn as nn
@@ -24,7 +24,7 @@ from config import (
     SOURCEID_VOCAB, GENERATION_CONFIG
 )
 from models.layers import (
-    PositionalEncoding, SinglePassDurationHead,
+    MixtureDurationHead, PositionalEncoding, SinglePassDurationHead,
     create_attention_mask, create_key_padding_mask
 )
 
@@ -48,6 +48,28 @@ class SequenceGeneratorModel(nn.Module):
         self.body_region_mode = config.get('body_region_mode', 'single')
         # 'gaussian' (default) or 'log' — see compute_duration_loss / generate.
         self.duration_mode = config.get('duration_mode', 'gaussian')
+        self.duration_distribution = config.get(
+            'duration_distribution', 'single'
+        )
+        if self.duration_distribution not in ('single', 'mixture'):
+            raise ValueError(
+                "duration_distribution must be either 'single' or 'mixture'"
+            )
+        if (
+            self.duration_distribution == 'mixture' and
+            self.model_type != 'examination'
+        ):
+            raise ValueError(
+                "mixture duration distributions are currently examination-only"
+            )
+        self.duration_num_components = (
+            int(config.get('duration_num_components', 3))
+            if self.duration_distribution == 'mixture'
+            else 1
+        )
+        self.duration_max_log_sample = float(
+            config.get('duration_max_log_sample', 20.0)
+        )
 
         nhead = config['nhead']
         num_encoder_layers = config['num_encoder_layers']
@@ -181,7 +203,23 @@ class SequenceGeneratorModel(nn.Module):
             enable_nested_tensor=False,  # nested tensor path is 5-10x slower on CPU
         )
 
-        self.duration_head = SinglePassDurationHead(self.d_model, hidden_dim=128, dropout=dropout)
+        if self.duration_distribution == 'mixture':
+            self.duration_head = MixtureDurationHead(
+                self.d_model,
+                num_components=self.duration_num_components,
+                hidden_dim=128,
+                dropout=dropout,
+                min_sigma=config.get('duration_min_sigma', 0.05),
+                initial_means=config.get('duration_component_init_means'),
+                initial_sigmas=config.get('duration_component_init_sigmas'),
+            )
+        else:
+            self.duration_head = SinglePassDurationHead(
+                self.d_model,
+                hidden_dim=128,
+                dropout=dropout,
+                min_sigma=config.get('duration_min_sigma', 0.1),
+            )
 
         self._init_weights()
 
@@ -334,9 +372,10 @@ class SequenceGeneratorModel(nn.Module):
         """
         return self._encode_conditioning(conditioning, body_region_info, phase_type)
 
-    def estimate_durations(self, token_ids, conditioning, body_region_info, phase_type=None):
+    def estimate_duration_distribution(self, token_ids, conditioning,
+                                       body_region_info, phase_type=None):
         """
-        Estimate durations for a complete token sequence (single-pass, bidirectional).
+        Estimate duration-distribution parameters for a complete sequence.
 
         Args:
             token_ids: [batch, seq_len] - token IDs (the complete generated/target sequence)
@@ -345,8 +384,11 @@ class SequenceGeneratorModel(nn.Module):
             phase_type: [batch] or None
 
         Returns:
-            mu: [batch, seq_len]
-            sigma: [batch, seq_len]
+            component_mu: [batch, seq_len] for a single distribution, otherwise
+                [batch, seq_len, num_components]
+            component_sigma: same shape as component_mu
+            mixture_logits: None for a single distribution, otherwise
+                [batch, seq_len, num_components]
         """
         batch_size, seq_len = token_ids.shape
 
@@ -388,10 +430,98 @@ class SequenceGeneratorModel(nn.Module):
         # Extract token positions (skip conditioning token at position 0)
         token_hidden = encoded[:, 1:, :]  # [batch, seq_len, d_model]
 
-        mu, sigma = self.duration_head(token_hidden)
-        return mu, sigma
+        if self.duration_distribution == 'mixture':
+            mixture_logits, component_mu, component_sigma = self.duration_head(
+                token_hidden
+            )
+            return component_mu, component_sigma, mixture_logits
 
-    def forward(self, conditioning, body_region_info, target_tokens, phase_type=None):
+        duration_mu, duration_sigma = self.duration_head(token_hidden)
+        return duration_mu, duration_sigma, None
+
+    @staticmethod
+    def _aggregate_mixture_latent(component_mu, component_sigma,
+                                  mixture_logits):
+        """Moment-match mixture parameters for backward-compatible diagnostics."""
+        weights = torch.softmax(mixture_logits, dim=-1)
+        mean = (weights * component_mu).sum(dim=-1)
+        second_moment = (
+            weights * (component_sigma.square() + component_mu.square())
+        ).sum(dim=-1)
+        variance = (second_moment - mean.square()).clamp_min(1e-8)
+        return mean, torch.sqrt(variance)
+
+    def estimate_durations(self, token_ids, conditioning, body_region_info,
+                           phase_type=None):
+        """Return aggregate ``mu``/``sigma`` using the legacy two-tensor API."""
+        component_mu, component_sigma, mixture_logits = (
+            self.estimate_duration_distribution(
+                token_ids, conditioning, body_region_info, phase_type
+            )
+        )
+        if mixture_logits is None:
+            return component_mu, component_sigma
+        return self._aggregate_mixture_latent(
+            component_mu, component_sigma, mixture_logits
+        )
+
+    def duration_moments(self, component_mu, component_sigma,
+                         mixture_logits=None):
+        """Return mean and std in normalized duration space."""
+        variance = component_sigma.square()
+        if self.duration_mode == 'log':
+            first_exponent = (component_mu + 0.5 * variance).clamp(max=20.0)
+            second_exponent = (
+                2.0 * component_mu + 2.0 * variance
+            ).clamp(max=40.0)
+            exp_first = torch.exp(first_exponent)
+            component_mean = exp_first - 1.0
+            component_second = (
+                torch.exp(second_exponent)
+                - 2.0 * exp_first
+                + 1.0
+            )
+        else:
+            component_mean = component_mu
+            component_second = variance + component_mu.square()
+
+        if mixture_logits is None:
+            mean = component_mean
+            second = component_second
+        else:
+            weights = torch.softmax(mixture_logits, dim=-1)
+            mean = (weights * component_mean).sum(dim=-1)
+            second = (weights * component_second).sum(dim=-1)
+
+        std = torch.sqrt((second - mean.square()).clamp_min(1e-8))
+        return mean, std
+
+    def _sample_duration_distribution(self, component_mu, component_sigma,
+                                      mixture_logits=None):
+        if mixture_logits is None:
+            selected_mu = component_mu
+            selected_sigma = component_sigma
+        else:
+            probabilities = torch.softmax(mixture_logits, dim=-1)
+            flat_probabilities = probabilities.reshape(
+                -1, self.duration_num_components
+            )
+            component_ids = torch.multinomial(
+                flat_probabilities, num_samples=1
+            ).reshape(*probabilities.shape[:-1], 1)
+            selected_mu = component_mu.gather(-1, component_ids).squeeze(-1)
+            selected_sigma = component_sigma.gather(
+                -1, component_ids
+            ).squeeze(-1)
+
+        samples = torch.normal(selected_mu, selected_sigma)
+        if self.duration_mode == 'log':
+            samples = samples.clamp(max=self.duration_max_log_sample)
+            return torch.expm1(samples).clamp(min=0.0)
+        return samples.clamp(min=0.0)
+
+    def forward(self, conditioning, body_region_info, target_tokens,
+                phase_type=None, return_duration_distribution=False):
         """
         Training forward pass with teacher forcing.
 
@@ -427,10 +557,21 @@ class SequenceGeneratorModel(nn.Module):
 
         logits = self.output_projection(decoder_output)
 
-        # Duration estimation via bidirectional encoder on target tokens
-        duration_mu, duration_sigma = self.estimate_durations(
-            target_tokens, conditioning, body_region_info, phase_type
+        # Duration estimation via bidirectional encoder on target tokens.
+        component_mu, component_sigma, mixture_logits = (
+            self.estimate_duration_distribution(
+                target_tokens, conditioning, body_region_info, phase_type
+            )
         )
+        if return_duration_distribution:
+            return logits, component_mu, component_sigma, mixture_logits
+
+        if mixture_logits is None:
+            duration_mu, duration_sigma = component_mu, component_sigma
+        else:
+            duration_mu, duration_sigma = self._aggregate_mixture_latent(
+                component_mu, component_sigma, mixture_logits
+            )
 
         return logits, duration_mu, duration_sigma
 
@@ -545,20 +686,21 @@ class SequenceGeneratorModel(nn.Module):
             if (next_token == END_TOKEN_ID).all():
                 break
 
-        # Phase 2: Single-pass duration estimation
-        duration_mu, duration_sigma = self.estimate_durations(
-            generated, conditioning, body_region_info, phase_type
+        # Phase 2: single-pass duration-distribution estimation.
+        component_mu, component_sigma, mixture_logits = (
+            self.estimate_duration_distribution(
+                generated, conditioning, body_region_info, phase_type
+            )
         )
-
-        # Sample durations. In 'log' mode the head models log1p(duration),
-        # so sample in log space and invert with expm1; otherwise sample the
-        # Normal directly. Both clamp to non-negative.
-        if self.duration_mode == 'log':
-            durations = torch.expm1(
-                torch.normal(duration_mu, duration_sigma)
-            ).clamp(min=0.0)
+        durations = self._sample_duration_distribution(
+            component_mu, component_sigma, mixture_logits
+        )
+        if mixture_logits is None:
+            duration_mu, duration_sigma = component_mu, component_sigma
         else:
-            durations = torch.normal(duration_mu, duration_sigma).clamp(min=0.0)
+            duration_mu, duration_sigma = self._aggregate_mixture_latent(
+                component_mu, component_sigma, mixture_logits
+            )
 
         if return_stats:
             return generated, durations, duration_mu, duration_sigma
@@ -602,8 +744,9 @@ class SequenceGeneratorModel(nn.Module):
             weight=weight,
         )
 
-    def compute_duration_loss(self, mu, sigma, target_durations, ignore_mask=None):
-        """Compute Gaussian NLL loss for duration prediction.
+    def compute_duration_loss(self, mu, sigma, target_durations,
+                              ignore_mask=None, mixture_logits=None):
+        """Compute single- or mixture-Gaussian NLL for duration prediction.
 
         In 'log' mode the target is transformed with log1p, so the head
         models log-durations. This fits the central tendency of the heavily
@@ -612,8 +755,36 @@ class SequenceGeneratorModel(nn.Module):
         """
         if self.duration_mode == 'log':
             target_durations = torch.log1p(target_durations.clamp(min=0.0))
-        variance = sigma ** 2 + 1e-8
-        nll = 0.5 * (torch.log(variance) + (target_durations - mu) ** 2 / variance)
+
+        if self.duration_distribution == 'mixture':
+            if mixture_logits is None:
+                raise ValueError(
+                    "mixture_logits are required for mixture duration loss"
+                )
+            if mu.shape != sigma.shape or mu.shape != mixture_logits.shape:
+                raise ValueError(
+                    "mixture mu, sigma, and logits must have identical shapes"
+                )
+            if mu.shape[:-1] != target_durations.shape:
+                raise ValueError(
+                    "mixture parameters must add one component dimension to "
+                    "target_durations"
+                )
+            target = target_durations.unsqueeze(-1)
+            component_log_prob = (
+                -torch.log(sigma.clamp_min(1e-8))
+                - 0.5 * ((target - mu) / sigma.clamp_min(1e-8)).square()
+            )
+            log_weights = torch.log_softmax(mixture_logits, dim=-1)
+            nll = -torch.logsumexp(
+                log_weights + component_log_prob, dim=-1
+            )
+        else:
+            variance = sigma ** 2 + 1e-8
+            nll = 0.5 * (
+                torch.log(variance)
+                + (target_durations - mu) ** 2 / variance
+            )
 
         if ignore_mask is not None:
             nll = nll.masked_fill(ignore_mask, 0.0)

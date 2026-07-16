@@ -49,13 +49,18 @@ if __name__ == "__main__":
     body_region = torch.randint(0, NUM_BODY_REGIONS, (batch_size,))
     input_seq = torch.randint(1, 17, (batch_size, seq_len))
 
-    logits, dur_mu, dur_sigma = model(
-        conditioning, {'body_region': body_region}, input_seq
+    logits, dur_mu, dur_sigma, mixture_logits = model(
+        conditioning,
+        {'body_region': body_region},
+        input_seq,
+        return_duration_distribution=True,
     )
     print(f"\nForward pass:")
     print(f"  Logits: {logits.shape}")
     print(f"  Duration mu: {dur_mu.shape}")
     print(f"  Duration sigma: {dur_sigma.shape}")
+    if mixture_logits is not None:
+        print(f"  Mixture logits: {mixture_logits.shape}")
 
     # Test loss
     target_seq = torch.randint(1, 17, (batch_size, seq_len))
@@ -63,7 +68,12 @@ if __name__ == "__main__":
     print(f"\nToken loss: {loss.item():.4f}")
 
     dummy_durations = torch.rand(batch_size, seq_len) * 300
-    dur_loss = model.compute_duration_loss(dur_mu, dur_sigma, dummy_durations)
+    dur_loss = model.compute_duration_loss(
+        dur_mu,
+        dur_sigma,
+        dummy_durations,
+        mixture_logits=mixture_logits,
+    )
     print(f"Duration loss: {dur_loss.item():.4f}")
 
     # Test generation

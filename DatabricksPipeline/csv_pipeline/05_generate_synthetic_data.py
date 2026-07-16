@@ -240,6 +240,17 @@ if os.path.exists(_man_path):
     if _man.get("pkl", {}).get("sha256") != _pkl_meta.get("sha256"):
         _warnings.append("Live pkl sha != manifest pkl sha — step 03 re-ran after training. "
                          "Re-run step 04 before generating, or the models don't match this pkl.")
+    for _rel, _expected_sha in _man.get("code", {}).items():
+        _live = _file_meta(os.path.join(REPO_ROOT, _rel))
+        if not _live["exists"]:
+            _warnings.append(
+                f"Training source missing from live repo: {_rel}"
+            )
+        elif _expected_sha and _live["sha256"] != _expected_sha:
+            _warnings.append(
+                f"Live source {_rel} sha {_live['sha256']} != training manifest "
+                f"{_expected_sha} — step 05 code does not match the checkpoint."
+            )
     for _k, _m in _ckpt_meta.items():
         _man_sha = _man.get("checkpoints", {}).get(_k, {}).get("sha256")
         if _m["exists"] and _man_sha and _man_sha != _m["sha256"]:
@@ -282,6 +293,7 @@ from AlternatingPipeline.config import (
     START_TOKEN_ID, END_TOKEN_ID, PAD_TOKEN_ID, BREAK_TOKEN_ID,
     NUM_BODY_REGIONS, ORCH_PAD_TOKEN_ID,
     SEQUENCE_TYPE_VOCAB, ID_TO_SEQUENCE_TYPE, NUM_SEQUENCE_TYPES, NUM_SERIALS,
+    RANDOM_SEED,
 )
 
 # Duration unscaling — models were trained on (raw_seconds / duration_scale),
@@ -320,6 +332,7 @@ STRICT_OUTPUT_VALIDATION = (
         '1' if GENERATION_CONFIG.get('strict_output_validation', True) else '0',
     ) != '0'
 )
+GENERATION_SEED = int(os.environ.get('GENERATION_SEED', RANDOM_SEED))
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Device: {device}")
@@ -341,12 +354,26 @@ print("Exchange model loaded.")
 
 # --- load examination model ---
 examination_model = create_examination_model(EXAMINATION_MODEL_CONFIG).to(device)
-examination_model.load_state_dict(
-    torch.load(f"{MODELS_DIR}/examination/examination_model_best.pt", map_location=device),
-    strict=False
-)
+try:
+    examination_model.load_state_dict(
+        torch.load(
+            f"{MODELS_DIR}/examination/examination_model_best.pt",
+            map_location=device,
+        ),
+        strict=True,
+    )
+except RuntimeError as exc:
+    raise RuntimeError(
+        "The examination checkpoint does not match the configured duration "
+        "architecture. Re-run CSV step 04 with the current repo after step 03, "
+        "then restart Python and rerun step 05."
+    ) from exc
 examination_model.eval()
-print("Examination model loaded.")
+print(
+    "Examination model loaded: "
+    f"duration_distribution={examination_model.duration_distribution}  "
+    f"components={examination_model.duration_num_components}"
+)
 
 # --- load orchestration model ---
 with open(f"{MODELS_DIR}/orchestration/scanner_to_idx.json") as f:
@@ -359,6 +386,14 @@ orchestration_model = create_orchestration_model(orch_config).to(device)
 orchestration_model.load_state_dict(orch_ckpt)
 orchestration_model.eval()
 print("Orchestration model loaded.")
+
+# Reset after model construction so architecture-dependent parameter
+# initialisation cannot shift the stochastic generation stream.
+np.random.seed(GENERATION_SEED)
+torch.manual_seed(GENERATION_SEED)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(GENERATION_SEED)
+print(f"Generation seed: {GENERATION_SEED}")
 
 # --- demographic distributions per body region (sampled from real data) ---
 orch_samples, _ = extract_orchestration_samples(data)
@@ -1342,6 +1377,9 @@ lines += [
     f'  Scanners generated : {n_scanners}',
     f'  Exchange rows      : {n_ex_rows:,}',
     f'  Exam rows          : {n_exam_rows:,}',
+    f'  Duration model     : {examination_model.duration_distribution} '
+    f'({examination_model.duration_num_components} component(s))',
+    f'  Generation seed    : {GENERATION_SEED}',
     f'  Avg exchange/scanner: {n_ex_rows/n_scanners:,.0f}' if n_scanners else '',
     f'  Avg exam/scanner   : {n_exam_rows/n_scanners:,.0f}' if n_scanners else '',
 ]
@@ -1433,7 +1471,10 @@ if not df_exam_all.empty and 'duration' in df_exam_all.columns:
 # is still not responding to the scan-type conditioning.
 lines += ['', _HR, ' 4b. EXAMINATION DURATION BY SEQUENCE TYPE (minutes)', _HR]
 if not df_exam_all.empty and {'duration', 'Sequence'}.issubset(df_exam_all.columns):
-    lines.append(f'  {"Sequence":<14} {"N":>6} {"Mean":>6} {"Std":>6} {"p50":>6}')
+    lines.append(
+        f'  {"Sequence":<14} {"N":>6} {"Mean":>6} {"Std":>6} '
+        f'{"p10":>6} {"p50":>6} {"p90":>6}'
+    )
     _st_means = []
     for stype, grp in df_exam_all.groupby('Sequence'):
         d = grp['duration'].dropna().values / 60.0
@@ -1443,7 +1484,8 @@ if not df_exam_all.empty and {'duration', 'Sequence'}.issubset(df_exam_all.colum
         _st_means.append(d.mean())
         lines.append(
             f'  {str(stype):<14} {len(d):>6} {d.mean():>6.1f} {d.std():>6.1f} '
-            f'{np.percentile(d, 50):>6.1f}'
+            f'{np.percentile(d, 10):>6.1f} {np.percentile(d, 50):>6.1f} '
+            f'{np.percentile(d, 90):>6.1f}'
         )
     if len(_st_means) > 1:
         _spread = max(_st_means) - min(_st_means)
@@ -1453,6 +1495,93 @@ if not df_exam_all.empty and {'duration', 'Sequence'}.issubset(df_exam_all.colum
                if _spread > 1.0 else
                '<< flat — examination model not responding to scan-type conditioning')
         )
+
+# ── 4c. REAL-vs-SYNTHETIC DURATION DISTRIBUTION ──────────────────────────────
+# This is the decisive mixture-head check. Means alone can look correct while
+# p10/p90 and the tails remain too smooth, so report KS and Wasserstein distance
+# against the real examination spans preserved in the step-03 pkl.
+lines += ['', _HR, ' 4c. REAL vs SYNTHETIC DURATION FIDELITY', _HR]
+if not df_exam_all.empty and {'duration', 'Sequence'}.issubset(df_exam_all.columns):
+    _real_by_type = _defaultdict(list)
+    for _sample in data.get('examination', []):
+        try:
+            _real_duration = float(_sample.get('total_duration', 0.0))
+        except (TypeError, ValueError):
+            _real_duration = 0.0
+        if _real_duration <= 0:
+            _real_duration = sum(
+                max(0.0, float(value))
+                for value in (_sample.get('durations', []) or [])
+            )
+        if 1 <= _real_duration <= MAX_RENDERED_EXAM_DURATION_SEC:
+            _type_name = str(ID_TO_SEQUENCE_TYPE.get(
+                int(_sample.get('sequence_type', 0)), 'other'
+            )).lower()
+            _real_by_type[_type_name].append(_real_duration)
+
+    _synth_by_type = {
+        str(name).lower(): pd.to_numeric(group['duration'], errors='coerce')
+            .dropna().to_numpy(dtype=float)
+        for name, group in df_exam_all.groupby('Sequence')
+    }
+    _synth_by_type = {
+        name: values[
+            (values >= 1) & (values <= MAX_RENDERED_EXAM_DURATION_SEC)
+        ]
+        for name, values in _synth_by_type.items()
+    }
+
+    def _duration_comparison_row(label, real_values, synth_values):
+        real_values = np.asarray(real_values, dtype=float)
+        synth_values = np.asarray(synth_values, dtype=float)
+        if len(real_values) < 2 or len(synth_values) < 2:
+            return None
+        real_p50, synth_p50 = np.median(real_values), np.median(synth_values)
+        real_p90 = np.percentile(real_values, 90)
+        synth_p90 = np.percentile(synth_values, 90)
+        ks_stat = _scipy_stats.ks_2samp(real_values, synth_values).statistic
+        wasserstein = _scipy_stats.wasserstein_distance(
+            real_values, synth_values
+        )
+        return (
+            f'  {label:<12} {len(real_values):>7}/{len(synth_values):<7} '
+            f'{real_values.mean():>6.0f}->{synth_values.mean():<6.0f} '
+            f'{real_p50:>6.0f}->{synth_p50:<6.0f} '
+            f'{real_p90:>6.0f}->{synth_p90:<6.0f} '
+            f'{ks_stat:>5.3f} {wasserstein:>7.1f}'
+        )
+
+    _real_all = [
+        value for values in _real_by_type.values() for value in values
+    ]
+    _synth_all = [
+        value for values in _synth_by_type.values() for value in values
+    ]
+    lines += [
+        '  Durations are seconds; arrows show real -> synthetic.',
+        f'  {"Sequence":<12} {"N real/synth":<15} {"Mean":<13} '
+        f'{"p50":<13} {"p90":<13} {"KS":>5} {"W1(s)":>7}',
+    ]
+    _overall_row = _duration_comparison_row(
+        'OVERALL', _real_all, _synth_all
+    )
+    if _overall_row:
+        lines.append(_overall_row)
+    for _type_name in sorted(set(_real_by_type) & set(_synth_by_type)):
+        _row = _duration_comparison_row(
+            _type_name,
+            _real_by_type[_type_name],
+            _synth_by_type[_type_name],
+        )
+        if _row:
+            lines.append(_row)
+    lines += [
+        '',
+        '  Lower is better: KS=0 and Wasserstein=0 mean identical duration '
+        'distributions.',
+    ]
+else:
+    lines.append('  Duration fidelity comparison unavailable.')
 
 # ── 5. FINISH EVENT DISTRIBUTION ─────────────────────────────────────────────
 lines += ['', _HR, ' 5. EXAM FINISH EVENT DISTRIBUTION', _HR]

@@ -33,13 +33,17 @@ class ExaminationDataset(Dataset):
     """Dataset for examination (scan sequence) training."""
 
     def __init__(self, examination_sequences, max_seq_len=None, augment=False,
-                 oversample=1, duration_scale=1.0, abort_oversample=1):
+                 oversample=1, duration_scale=1.0, abort_oversample=1,
+                 duration_jitter_pct=0.10):
         if max_seq_len is None:
             max_seq_len = MAX_SEQ_LEN
 
         self.max_seq_len = max_seq_len
         self.augment = augment
         self.duration_scale = duration_scale
+        self.duration_jitter_pct = float(duration_jitter_pct)
+        if self.duration_jitter_pct < 0:
+            raise ValueError("duration_jitter_pct must be non-negative")
         self.data = []
 
         abort_id = SOURCEID_VOCAB['MRI_MSR_34']  # "Stopped by User"
@@ -117,9 +121,11 @@ class ExaminationDataset(Dataset):
         item = self.data[idx]
         durations = list(item['target_durations'])
         if self.augment:
-            noise = np.random.normal(0, 0.10, len(durations))
+            noise = np.random.normal(
+                0, self.duration_jitter_pct, len(durations)
+            )
             durations = [max(0.0, d * (1 + n)) for d, n in zip(durations, noise)]
-        # Normalise raw seconds so Gaussian NLL stays in a reasonable range
+        # Normalise raw seconds so duration NLL stays in a reasonable range.
         if self.duration_scale != 1.0:
             durations = [d / self.duration_scale for d in durations]
         return (
@@ -265,7 +271,15 @@ def train_examination_model(data_path=None, config=None, training_config=None,
                   f"[{_lo:.0f}s .. {_hi:.0f}s]")
             for st in sorted(_means, key=_means.get):
                 _name = ID_TO_SEQUENCE_TYPE.get(st, str(st))
-                print(f"    {_name:<8} n={len(_by_type[st]):>6}  mean={_means[st]:>7.1f}s")
+                _values = np.asarray(_by_type[st], dtype=float)
+                print(
+                    f"    {_name:<8} n={len(_values):>6}  "
+                    f"mean={_values.mean():>7.1f}s  "
+                    f"p10/p50/p90="
+                    f"{np.percentile(_values, 10):.0f}/"
+                    f"{np.percentile(_values, 50):.0f}/"
+                    f"{np.percentile(_values, 90):.0f}s"
+                )
             if _spread < 5.0:
                 print("  !! WARNING: per-scan-type duration spread has COLLAPSED "
                       "(<5x). The duration head will learn flat per-type durations.\n"
@@ -282,13 +296,16 @@ def train_examination_model(data_path=None, config=None, training_config=None,
     oversample = training_config.get('oversample_factor', 1)
     duration_scale = training_config.get('duration_scale', 1.0)
     abort_oversample = training_config.get('abort_oversample_factor', 1)
+    duration_jitter_pct = training_config.get('duration_jitter_pct', 0.10)
     train_dataset = ExaminationDataset(
         train_sequences, augment=augment, oversample=oversample,
         duration_scale=duration_scale, abort_oversample=abort_oversample,
+        duration_jitter_pct=duration_jitter_pct,
     )
     val_dataset = ExaminationDataset(
         val_sequences, augment=False, oversample=1,
         duration_scale=duration_scale, abort_oversample=1,
+        duration_jitter_pct=0.0,
     )
 
     if verbose:
@@ -325,6 +342,14 @@ def train_examination_model(data_path=None, config=None, training_config=None,
 
     if verbose:
         print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
+        print(
+            f"Duration distribution: {model.duration_distribution}"
+            + (
+                f" ({model.duration_num_components} components)"
+                if model.duration_distribution == 'mixture'
+                else ""
+            )
+        )
 
     # NOTE: inverse-frequency token class weighting was REMOVED here — it
     # collapsed the token decoder (see compute_token_class_weights docstring).
@@ -350,7 +375,16 @@ def train_examination_model(data_path=None, config=None, training_config=None,
     scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
     # Training loop
-    history = {'train_loss': [], 'val_loss': [], 'val_perplexity': [], 'train_duration_loss': []}
+    history = {
+        'train_loss': [],
+        'train_token_loss': [],
+        'train_duration_loss': [],
+        'val_loss': [],
+        'val_token_loss': [],
+        'val_duration_loss': [],
+        'val_perplexity': [],
+        'val_duration_component_usage': [],
+    }
     best_val_loss = float('inf')
     patience_counter = 0
     global_step = 0
@@ -358,6 +392,7 @@ def train_examination_model(data_path=None, config=None, training_config=None,
     for epoch in range(training_config['epochs']):
         model.train()
         train_loss = 0.0
+        train_tok_loss = 0.0
         train_dur_loss = 0.0
 
         for conditioning, body_region, sequence_type, serial_idx, input_seq, target_seq, target_durations in tqdm(
@@ -373,11 +408,12 @@ def train_examination_model(data_path=None, config=None, training_config=None,
 
             optimizer.zero_grad()
 
-            logits, duration_mu, duration_sigma = model(
+            logits, duration_mu, duration_sigma, mixture_logits = model(
                 conditioning,
                 {'body_region': body_region,
                  'sequence_type': sequence_type, 'serial_idx': serial_idx},
                 input_seq,
+                return_duration_distribution=True,
             )
 
             token_loss = model.compute_loss(
@@ -395,7 +431,11 @@ def train_examination_model(data_path=None, config=None, training_config=None,
             pad_mask = (target_seq == PAD_TOKEN_ID)
             dur_mask = pad_mask | (target_durations <= 0)
             duration_loss = model.compute_duration_loss(
-                duration_mu, duration_sigma, target_durations, ignore_mask=dur_mask
+                duration_mu,
+                duration_sigma,
+                target_durations,
+                ignore_mask=dur_mask,
+                mixture_logits=mixture_logits,
             )
 
             duration_weight = training_config.get('duration_loss_weight', 0.3)
@@ -408,14 +448,20 @@ def train_examination_model(data_path=None, config=None, training_config=None,
             global_step += 1
 
             train_loss += loss.item()
+            train_tok_loss += token_loss.item()
             train_dur_loss += duration_loss.item()
 
         train_loss /= len(train_loader)
+        train_tok_loss /= len(train_loader)
         train_dur_loss /= len(train_loader)
 
         # Validation
         model.eval()
         val_loss = 0.0
+        val_tok_loss = 0.0
+        val_dur_loss = 0.0
+        component_usage_sum = None
+        component_usage_count = 0
 
         with torch.no_grad():
             for conditioning, body_region, sequence_type, serial_idx, input_seq, target_seq, target_durations in val_loader:
@@ -427,34 +473,84 @@ def train_examination_model(data_path=None, config=None, training_config=None,
                 target_seq = target_seq.to(device)
                 target_durations = target_durations.to(device)
 
-                logits, duration_mu, duration_sigma = model(
+                logits, duration_mu, duration_sigma, mixture_logits = model(
                     conditioning,
                     {'body_region': body_region,
                      'sequence_type': sequence_type, 'serial_idx': serial_idx},
                     input_seq,
+                    return_duration_distribution=True,
                 )
                 token_loss = model.compute_loss(logits, target_seq)
                 pad_mask = (target_seq == PAD_TOKEN_ID)
                 dur_mask = pad_mask | (target_durations <= 0)
                 dur_loss = model.compute_duration_loss(
-                    duration_mu, duration_sigma, target_durations, ignore_mask=dur_mask
+                    duration_mu,
+                    duration_sigma,
+                    target_durations,
+                    ignore_mask=dur_mask,
+                    mixture_logits=mixture_logits,
                 )
                 duration_weight = training_config.get('duration_loss_weight', 0.3)
                 loss = token_loss + duration_weight * dur_loss
                 val_loss += loss.item()
+                val_tok_loss += token_loss.item()
+                val_dur_loss += dur_loss.item()
+
+                if mixture_logits is not None:
+                    valid_probabilities = torch.softmax(
+                        mixture_logits, dim=-1
+                    )[~dur_mask]
+                    if valid_probabilities.numel():
+                        usage = valid_probabilities.sum(dim=0)
+                        component_usage_sum = (
+                            usage if component_usage_sum is None
+                            else component_usage_sum + usage
+                        )
+                        component_usage_count += valid_probabilities.shape[0]
 
         val_loss /= len(val_loader)
-        val_perplexity = np.exp(val_loss)
+        val_tok_loss /= len(val_loader)
+        val_dur_loss /= len(val_loader)
+        # Perplexity is defined from token cross-entropy only. Including the
+        # duration NLL made the previous value incomparable across duration
+        # heads and could even report a perplexity below one.
+        val_perplexity = np.exp(min(val_tok_loss, 50.0))
+
+        component_usage = []
+        if component_usage_sum is not None and component_usage_count:
+            component_usage = (
+                component_usage_sum / component_usage_count
+            ).cpu().tolist()
 
         history['train_loss'].append(train_loss)
+        history['train_token_loss'].append(train_tok_loss)
         history['val_loss'].append(val_loss)
+        history['val_token_loss'].append(val_tok_loss)
+        history['val_duration_loss'].append(val_dur_loss)
         history['val_perplexity'].append(val_perplexity)
         history['train_duration_loss'].append(train_dur_loss)
+        history['val_duration_component_usage'].append(component_usage)
 
         if verbose:
-            print(f"Epoch {epoch+1}: train_loss={train_loss:.4f}, "
-                  f"val_loss={val_loss:.4f}, perplexity={val_perplexity:.2f}, "
-                  f"dur_loss={train_dur_loss:.4f}")
+            usage_text = (
+                "  mixture_usage=["
+                + ", ".join(f"{value:.1%}" for value in component_usage)
+                + "]"
+                if component_usage else ""
+            )
+            print(
+                f"Epoch {epoch+1}: train_loss={train_loss:.4f}, "
+                f"val_loss={val_loss:.4f}, token_ppl={val_perplexity:.2f}, "
+                f"train_dur={train_dur_loss:.4f}, "
+                f"val_dur={val_dur_loss:.4f}{usage_text}"
+            )
+            if component_usage and (
+                max(component_usage) > 0.95 or min(component_usage) < 0.01
+            ):
+                print(
+                    "  !! WARNING: duration mixture is collapsing to too few "
+                    "components; review the final duration probe before step 05."
+                )
 
         # Early stopping
         if val_loss < best_val_loss:
@@ -476,13 +572,10 @@ def train_examination_model(data_path=None, config=None, training_config=None,
         pickle.dump(history, f)
 
     # ---- Post-train UNPADDED duration probe (go/no-go canary) ----------------
-    # Step 05 queries estimate_durations with short unpadded sequences and
-    # reads the span total at index len(tokens)-1; every duration collapse so
-    # far was invisible at train time because the losses only ever see padded
-    # batches. This probe asks the BEST checkpoint (the one step 05 loads)
-    # the exact same question on real val sequences and prints predicted vs
-    # target seconds per scan type. If the spread line below is flat, do NOT
-    # spend a generate+eval cycle on this checkpoint.
+    # Step 05 queries the duration distribution with short unpadded sequences
+    # and reads the span total at index len(tokens)-1. This probe asks the BEST
+    # checkpoint the same question, including mixture usage and conditional
+    # spread, before a full generation run is attempted.
     best_path = os.path.join(save_dir, 'examination_model_best.pt')
     if os.path.exists(best_path):
         model.load_state_dict(torch.load(best_path, map_location=device))
@@ -493,6 +586,7 @@ def train_examination_model(data_path=None, config=None, training_config=None,
     # duration_probe.json survives exactly like MODEL_MANIFEST.json and is the
     # decisive go/no-go a human (or the next session) can read after the fact.
     probe_rows = []
+    all_component_weights = []
     if val_sequences:
         from collections import defaultdict
         from config import ID_TO_SEQUENCE_TYPE
@@ -503,7 +597,8 @@ def train_examination_model(data_path=None, config=None, training_config=None,
             print("\nPost-train duration probe (unpadded input, best checkpoint):")
         with torch.no_grad():
             for _st, _seqs in sorted(_probe_by_type.items()):
-                _p, _t = [], []
+                _p, _p_std, _t = [], [], []
+                _weights, _component_means = [], []
                 for _s in _seqs[:25]:
                     _tokens = _s['sequence'][:model.max_seq_len - 1]
                     if not _tokens:
@@ -514,25 +609,100 @@ def train_examination_model(data_path=None, config=None, training_config=None,
                     _info = {'body_region': torch.tensor([_s['body_region']], device=device),
                              'sequence_type': torch.tensor([_st], device=device),
                              'serial_idx': torch.tensor([int(_s.get('serial_idx', 0))], device=device)}
-                    _mu, _ = model.estimate_durations(_inp, _cond, _info)
-                    _m = _mu[0, len(_tokens) - 1].item()
-                    _pred_sec = (math.expm1(_m) if model.duration_mode == 'log' else _m) * duration_scale
-                    _p.append(_pred_sec)
+                    _mu, _sigma, _mix_logits = (
+                        model.estimate_duration_distribution(
+                            _inp, _cond, _info
+                        )
+                    )
+                    _idx = len(_tokens) - 1
+                    _mean, _std = model.duration_moments(
+                        _mu, _sigma, _mix_logits
+                    )
+                    _p.append(_mean[0, _idx].item() * duration_scale)
+                    _p_std.append(_std[0, _idx].item() * duration_scale)
                     _t.append(sum(max(0.0, d) for d in _s.get('durations', [])))
+
+                    if _mix_logits is not None:
+                        _sample_weights = torch.softmax(
+                            _mix_logits[0, _idx], dim=-1
+                        )
+                        _component_mean, _ = model.duration_moments(
+                            _mu[0, _idx], _sigma[0, _idx]
+                        )
+                        _weights.append(_sample_weights.cpu().numpy())
+                        all_component_weights.append(
+                            _sample_weights.cpu().numpy()
+                        )
+                        _component_means.append(
+                            (_component_mean * duration_scale).cpu().numpy()
+                        )
                 if _p:
                     _name = ID_TO_SEQUENCE_TYPE.get(_st, str(_st))
-                    probe_rows.append({
+                    _row = {
                         'sequence_type': _name,
                         'n': len(_p),
                         'predicted_s': round(sum(_p) / len(_p), 2),
+                        'predicted_conditional_std_s': round(
+                            sum(_p_std) / len(_p_std), 2
+                        ),
                         'target_s': round(sum(_t) / len(_t), 2),
-                    })
+                    }
+                    if _weights:
+                        _row['component_weights'] = [
+                            round(float(value), 4)
+                            for value in np.mean(_weights, axis=0)
+                        ]
+                        _row['component_means_s'] = [
+                            round(float(value), 2)
+                            for value in np.mean(_component_means, axis=0)
+                        ]
+                    probe_rows.append(_row)
                     if verbose:
-                        print(f"    {_name:<8} n={len(_p):>3}  "
-                              f"predicted={probe_rows[-1]['predicted_s']:>7.1f}s"
-                              f"  target={probe_rows[-1]['target_s']:>7.1f}s")
+                        component_text = ""
+                        if _weights:
+                            component_text = (
+                                "  weights=["
+                                + ", ".join(
+                                    f"{value:.0%}"
+                                    for value in np.mean(_weights, axis=0)
+                                )
+                                + "]"
+                            )
+                        print(
+                            f"    {_name:<8} n={len(_p):>3}  "
+                            f"predicted={_row['predicted_s']:>7.1f}s"
+                            f" +/-{_row['predicted_conditional_std_s']:>6.1f}s"
+                            f"  target={_row['target_s']:>7.1f}s"
+                            f"{component_text}"
+                        )
 
-    probe = {'rows': probe_rows}
+    probe = {
+        'duration_distribution': model.duration_distribution,
+        'num_components': model.duration_num_components,
+        'rows': probe_rows,
+    }
+    if all_component_weights:
+        component_usage = np.mean(all_component_weights, axis=0)
+        mixture_collapse = bool(
+            component_usage.max() > 0.95 or component_usage.min() < 0.01
+        )
+        probe.update({
+            'component_usage': [
+                round(float(value), 4) for value in component_usage
+            ],
+            'mixture_collapse_warning': mixture_collapse,
+        })
+        if verbose:
+            print(
+                "  Overall mixture usage: ["
+                + ", ".join(f"{value:.1%}" for value in component_usage)
+                + "]"
+            )
+            if mixture_collapse:
+                print(
+                    "  !! WARNING: one or more duration components are unused "
+                    "or one component dominates >95% of validation scans."
+                )
     if len(probe_rows) >= 2:
         _vals = [r['predicted_s'] for r in probe_rows]
         _lo, _hi = min(_vals), max(_vals)
