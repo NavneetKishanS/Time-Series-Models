@@ -48,7 +48,30 @@ from glob import glob
 import pandas as pd
 
 
-HERE         = os.path.dirname(os.path.abspath(__file__))
+def _is_databricks_interactive():
+    """Detect if running inside Databricks interactive kernel (not CLI)."""
+    return any('ipykernel' in arg or 'db_ipykernel' in arg for arg in sys.argv)
+
+
+def _resolve_here():
+    """Resolve the directory containing this script, regardless of execution mode."""
+    try:
+        return os.path.dirname(os.path.abspath(__file__))
+    except NameError:
+        pass
+    # Databricks interactive mode: __file__ is undefined. Walk known workspace
+    # paths until we find the one containing our data/ subdirectory.
+    _candidates = [
+        '/Workspace/Shared/Patient Exchange and Examination NK/Time-Series-Models/DatabricksPipeline/csv_pipeline/qlik',
+        os.getcwd(),
+    ]
+    for c in _candidates:
+        if os.path.isdir(os.path.join(c, 'data')):
+            return c
+    return _candidates[0]
+
+
+HERE         = _resolve_here()
 DATA_DIR     = os.path.join(HERE, 'data')
 COMBINED_DIR = os.path.join(DATA_DIR, 'combined')
 
@@ -311,4 +334,6 @@ def main() -> int:
 
 
 if __name__ == '__main__':
-    sys.exit(main())
+    rc = main()
+    if not _is_databricks_interactive():
+        sys.exit(rc)

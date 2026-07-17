@@ -277,13 +277,27 @@ print("=" * 64)
 
 # COMMAND ----------
 
+# DBTITLE 1,Cell 5
 # =============================================================================
 # Load data and models
 # =============================================================================
-import sys
-sys.path[:] = [p for p in sys.path if 'Patient Exchange and Examination' not in p]
-import AlternatingPipeline as _ap                                                                      
-_ap.__path__[:] = [p for p in _ap.__path__ if 'Patient Exchange and Examination' not in p]
+import sys, importlib, shutil
+
+# Sync output_integrity.py into the stable clone (REPO_ROOT set by the
+# bootstrap cell above).  No-op once the file is pushed to GitHub.
+# Does NOT touch sys.path or sys.modules — all imports continue to resolve
+# from REPO_ROOT (/tmp/tsm) which cells 2-3 already set up reliably.
+_WS_INTEGRITY = (
+    '/Workspace/Shared/Patient Exchange and Examination NK/'
+    'Time-Series-Models/AlternatingPipeline/generation/output_integrity.py'
+)
+_CLONE_INTEGRITY = os.path.join(
+    REPO_ROOT, 'AlternatingPipeline', 'generation', 'output_integrity.py'
+)
+if os.path.exists(_WS_INTEGRITY) and not os.path.exists(_CLONE_INTEGRITY):
+    shutil.copy2(_WS_INTEGRITY, _CLONE_INTEGRITY)
+    importlib.invalidate_caches()
+    print(f'[setup] Synced output_integrity.py → {_CLONE_INTEGRITY}')
 
 from AlternatingPipeline.config import (
     EXCHANGE_MODEL_CONFIG, EXAMINATION_MODEL_CONFIG, ORCHESTRATION_MODEL_CONFIG,
@@ -353,15 +367,32 @@ exchange_model.eval()
 print("Exchange model loaded.")
 
 # --- load examination model ---
-examination_model = create_examination_model(EXAMINATION_MODEL_CONFIG).to(device)
+# Build the model with the duration architecture the checkpoint was actually
+# trained with (recorded in MODEL_MANIFEST.json by step 04). This tolerates
+# a repo refresh between training and generation changing EXAMINATION_MODEL_CONFIG.
+_exam_config = dict(EXAMINATION_MODEL_CONFIG)
+_manifest = globals().get('_man', {})
+if isinstance(_manifest, dict):
+    _mc = _manifest.get('model_config', {})
+    if 'examination_duration_distribution' in _mc:
+        _exam_config['duration_distribution'] = _mc['examination_duration_distribution']
+    if 'examination_duration_components' in _mc:
+        _exam_config['duration_num_components'] = _mc['examination_duration_components']
+examination_model = create_examination_model(_exam_config).to(device)
 try:
-    examination_model.load_state_dict(
-        torch.load(
-            f"{MODELS_DIR}/examination/examination_model_best.pt",
-            map_location=device,
-        ),
-        strict=True,
+    _exam_ckpt = torch.load(
+        f"{MODELS_DIR}/examination/examination_model_best.pt",
+        map_location=device,
     )
+    # strict=False: allows extra keys in the checkpoint whose layers were
+    # subsequently removed from the model code (e.g. duration_seq_type_bias).
+    # The guard below ensures no weight the model actually needs is absent.
+    _incompatible = examination_model.load_state_dict(_exam_ckpt, strict=False)
+    if _incompatible.missing_keys:
+        raise RuntimeError(
+            f"Examination checkpoint is missing weights required by the model: "
+            f"{_incompatible.missing_keys}. Re-run step 04 to retrain."
+        )
 except RuntimeError as exc:
     raise RuntimeError(
         "The examination checkpoint does not match the configured duration "

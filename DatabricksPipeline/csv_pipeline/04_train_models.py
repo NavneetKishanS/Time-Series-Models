@@ -431,6 +431,7 @@ displayHTML(f'''
 
 # COMMAND ----------
 
+# DBTITLE 1,Cell 12
 # =============================================================================
 # WRITE MODEL MANIFEST  (run AFTER training)
 # -----------------------------------------------------------------------------
@@ -454,9 +455,9 @@ _manifest = {
     },
     "model_config": {
         "examination_duration_distribution":
-            examination_model.duration_distribution,
+            _EXAM_MODEL_CONFIG.get('duration_distribution', 'single'),
         "examination_duration_components":
-            examination_model.duration_num_components,
+            _EXAM_MODEL_CONFIG.get('duration_num_components', 1),
     },
 }
 _manifest_path = f"{MODELS_DIR}/MODEL_MANIFEST.json"

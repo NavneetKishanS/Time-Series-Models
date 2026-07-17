@@ -1052,27 +1052,27 @@ displayHTML('<a href="/files/csv_pipeline/preprocessed_data.pkl">Download prepro
 # COMMAND ----------
 
 # DBTITLE 1,Audit file download links
-# =============================================================================
-# Audit file download links
-# =============================================================================
-audit_files = sorted(glob.glob(os.path.join(UNKNOWN_BODY_AUDIT_DIR, '*.csv')))
+# # =============================================================================
+# # Audit file download links
+# # =============================================================================
+# audit_files = sorted(glob(os.path.join(UNKNOWN_BODY_AUDIT_DIR, '*.csv')))
 
-if not audit_files:
-    print(f'No audit CSVs found in {UNKNOWN_BODY_AUDIT_DIR}')
-else:
-    rows = []
-    for path in audit_files:
-        # /dbfs/FileStore/... → /files/...
-        url   = path.replace('/dbfs/FileStore/', '/files/')
-        fname = os.path.basename(path)
-        rows.append(f'<li><a href="{url}">{fname}</a></li>')
-    displayHTML(
-        '<b>Body mapping audit CSVs</b> '
-        f'({len(audit_files)} file{"s" if len(audit_files) != 1 else ""}):<br>'
-        '<ul style="font-family:monospace;line-height:1.8">'
-        + '\n'.join(rows)
-        + '</ul>'
-    )
+# if not audit_files:
+#     print(f'No audit CSVs found in {UNKNOWN_BODY_AUDIT_DIR}')
+# else:
+#     rows = []
+#     for path in audit_files:
+#         # /dbfs/FileStore/... → /files/...
+#         url   = path.replace('/dbfs/FileStore/', '/files/')
+#         fname = os.path.basename(path)
+#         rows.append(f'<li><a href="{url}">{fname}</a></li>')
+#     displayHTML(
+#         '<b>Body mapping audit CSVs</b> '
+#         f'({len(audit_files)} file{"s" if len(audit_files) != 1 else ""}):<br>'
+#         '<ul style="font-family:monospace;line-height:1.8">'
+#         + '\n'.join(rows)
+#         + '</ul>'
+#     )
 
 # COMMAND ----------
 

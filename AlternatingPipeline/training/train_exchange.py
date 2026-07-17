@@ -14,7 +14,9 @@ import numpy as np
 from tqdm import tqdm
 import pickle
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_this_file = __file__ if '__file__' in globals() else \
+    '/Workspace/Shared/Patient Exchange and Examination NK/Time-Series-Models/AlternatingPipeline/training/train_exchange.py'
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(_this_file))))
 
 from config import (
     EXCHANGE_MODEL_CONFIG, EXCHANGE_TRAINING_CONFIG,
