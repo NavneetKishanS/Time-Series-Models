@@ -20,12 +20,14 @@
 
 # COMMAND ----------
 
-import sys, os, pickle, base64, requests
+import sys, os, pickle, base64, requests, shutil, subprocess
 
 sys.dont_write_bytecode = True  # suppress __pycache__ writes
 
-# ── CONFIGURE THIS PATH to your Databricks Repos clone ─────────────────────
-REPO_ROOT = "/Workspace/Shared/Patient Exchange and Examination/Time-Series-Models"
+# ── CONFIGURE THIS PATH to your Databricks workspace checkout ──────────────
+WORKSPACE_REPO_ROOT = "/Workspace/Shared/Patient Exchange and Examination NK/Time-Series-Models"
+REPO_ROOT = WORKSPACE_REPO_ROOT  # retained in the manifest for compatibility
+REPO_URL = "https://github.com/NavneetKishanS/Time-Series-Models.git"
 # ───────────────────────────────────────────────────────────────────────────
 
 # Copy .py files via the Databricks Workspace REST API — bypasses FUSE EIO on /Workspace/Shared/
@@ -60,21 +62,65 @@ def _api_copy_py(workspace_dir, local_dir):
             with open(dst, "wb") as f:
                 f.write(base64.b64decode(r.json()["content"]))
 
-_api_copy_py(f"{REPO_ROOT}/AlternatingPipeline", f"{TMP_ROOT}/AlternatingPipeline")
-print(f"Copied AlternatingPipeline to {TMP_ROOT}")
+
+def _prepare_training_source():
+    """Load a clean committed source tree, with the ADB REST copy as fallback."""
+    try:
+        if os.path.isdir(os.path.join(TMP_ROOT, ".git")):
+            subprocess.check_call([
+                "git", "-C", TMP_ROOT, "fetch", "--depth=1", "origin", "main",
+            ])
+            subprocess.check_call([
+                "git", "-C", TMP_ROOT, "checkout", "--detach", "FETCH_HEAD",
+            ])
+        else:
+            shutil.rmtree(TMP_ROOT, ignore_errors=True)
+            subprocess.check_call([
+                "git", "clone", "--depth=1", "--branch", "main",
+                REPO_URL, TMP_ROOT,
+            ])
+
+        commit = subprocess.check_output(
+            ["git", "-C", TMP_ROOT, "rev-parse", "HEAD"], text=True,
+        ).strip()
+        mode = "git"
+    except Exception as exc:
+        # Workspace REST export avoids the Shared mount EIO issue and keeps the
+        # existing ADB recovery path available when GitHub is unavailable.
+        print(f"[source] Git refresh failed ({exc}); using Workspace REST copy.")
+        shutil.rmtree(TMP_ROOT, ignore_errors=True)
+        _api_copy_py(
+            f"{WORKSPACE_REPO_ROOT}/AlternatingPipeline",
+            f"{TMP_ROOT}/AlternatingPipeline",
+        )
+        commit = None
+        mode = "workspace_api"
+
+    config_path = os.path.join(TMP_ROOT, "AlternatingPipeline", "config.py")
+    if not os.path.isfile(config_path):
+        raise FileNotFoundError(
+            f"Training source is incomplete; missing {config_path}"
+        )
+    return mode, commit
+
+
+SOURCE_MODE, SOURCE_COMMIT = _prepare_training_source()
+print(
+    f"Loaded AlternatingPipeline from {TMP_ROOT} "
+    f"(mode={SOURCE_MODE}, commit={SOURCE_COMMIT or 'workspace-uncommitted'})"
+)
+if TMP_ROOT in sys.path:
+    sys.path.remove(TMP_ROOT)
 sys.path.insert(0, TMP_ROOT)
 
-# Purge any previously-imported copies so a RE-RUN in a long-lived Databricks
-# kernel actually picks up the freshly copied source. Databricks kernels persist
-# across runs: `import` returns the module cached in sys.modules and ignores the
-# file edits _api_copy_py just made — so without this, every re-run silently
-# re-executes whatever code the kernel first imported (stale guard/calibration),
-# even though the pre-flight (which reads files directly) reports the NEW shas.
-# Match by __file__ under TMP_ROOT to catch every loaded copy regardless of the
-# import name (AlternatingPipeline.*, but also top-level config/data/models).
+# Purge every previously imported package-qualified or legacy top-level copy.
+# A long-lived ADB kernel may retain modules from this temp tree, /tmp/tsm, or
+# the Workspace mount; checking only TMP_ROOT would leave cross-step imports
+# alive and make the checkpoint differ from the source recorded below.
 for _name, _mod in list(sys.modules.items()):
-    _f = getattr(_mod, "__file__", None) or ""
-    if _f.startswith(TMP_ROOT):
+    _f = (getattr(_mod, "__file__", None) or "").replace("\\", "/")
+    if (_name.startswith("AlternatingPipeline") or _name == "config" or
+            "/AlternatingPipeline/" in _f):
         del sys.modules[_name]
 
 PKL_PATH   = "/dbfs/FileStore/csv_pipeline/preprocessed_data.pkl"
@@ -85,6 +131,7 @@ os.makedirs(f"{MODELS_DIR}/examination",  exist_ok=True)
 os.makedirs(f"{MODELS_DIR}/orchestration", exist_ok=True)
 
 print(f"Repo root:  {REPO_ROOT}")
+print(f"Source:     {TMP_ROOT} ({SOURCE_MODE}, {SOURCE_COMMIT or 'no git commit'})")
 print(f"PKL path:   {PKL_PATH}")
 print(f"Models dir: {MODELS_DIR}")
 
@@ -256,6 +303,7 @@ PROVENANCE_SRC = [
     "AlternatingPipeline/data/examination_duration_calibration.py",
     "AlternatingPipeline/models/layers.py",
     "AlternatingPipeline/models/sequence_generator.py",
+    "AlternatingPipeline/generation/output_integrity.py",
     "AlternatingPipeline/config.py",
 ]
 CHECKPOINTS = {
@@ -297,6 +345,10 @@ print(
     f"{_EXAM_MODEL_CONFIG.get('duration_distribution', 'single')}  "
     f"components={_EXAM_MODEL_CONFIG.get('duration_num_components', 1)}"
 )
+print(
+    f"Training source: mode={SOURCE_MODE}  "
+    f"commit={SOURCE_COMMIT or 'workspace-uncommitted'}"
+)
 
 # 1) the pkl that will train the models
 _pkl_meta = _file_meta(PKL_PATH)
@@ -313,9 +365,16 @@ if _fp["distinct_sequence_types"] < 2:
 
 # 2) the code actually loaded into this run
 print("\nCODE (loaded source under TMP_ROOT):")
+_missing_source = []
 for _rel in PROVENANCE_SRC:
     _m = _file_meta(os.path.join(TMP_ROOT, _rel))
     print(f"   {_rel:<58} " + (f"sha {_m['sha256']}  {_m['mtime']}" if _m["exists"] else "!! MISSING"))
+    if not _m["exists"]:
+        _missing_source.append(_rel)
+if _missing_source:
+    raise FileNotFoundError(
+        "Training source is incomplete: " + ", ".join(_missing_source)
+    )
 
 # 3) existing checkpoints this run will OVERWRITE
 print("\nEXISTING checkpoints (this run OVERWRITES them):")
@@ -439,10 +498,31 @@ displayHTML(f'''
 # Step 05 reads this manifest before generating and refuses to silently use a
 # model that no longer matches the pkl/code it was trained from.
 # =============================================================================
+def _jsonable(value):
+    """Convert model configuration values to manifest-safe primitives."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(k): _jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(v) for v in value]
+    if hasattr(value, "item"):
+        return value.item()
+    return str(value)
+
+
+_exam_config_used = _jsonable(
+    dict(getattr(examination_model, "config", _EXAM_MODEL_CONFIG))
+)
 _manifest = {
     "trained_at":        time.strftime("%Y-%m-%d %H:%M:%S"),
     "trained_at_epoch":  time.time(),
     "repo_root":         REPO_ROOT,
+    "source": {
+        "mode":          SOURCE_MODE,
+        "commit":        SOURCE_COMMIT,
+        "runtime_root":  TMP_ROOT,
+    },
     "pkl":               _file_meta(PKL_PATH),
     "pkl_fingerprint":   _pkl_fingerprint(data),
     "code":              {rel: _file_meta(os.path.join(TMP_ROOT, rel)).get("sha256")
@@ -455,9 +535,13 @@ _manifest = {
     },
     "model_config": {
         "examination_duration_distribution":
-            _EXAM_MODEL_CONFIG.get('duration_distribution', 'single'),
+            _exam_config_used.get('duration_distribution', 'single'),
         "examination_duration_components":
-            _EXAM_MODEL_CONFIG.get('duration_num_components', 1),
+            _exam_config_used.get('duration_num_components', 1),
+        "examination": _exam_config_used,
+    },
+    "model_state_schema": {
+        "examination": sorted(examination_model.state_dict().keys()),
     },
 }
 _manifest_path = f"{MODELS_DIR}/MODEL_MANIFEST.json"

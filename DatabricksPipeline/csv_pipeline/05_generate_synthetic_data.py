@@ -15,7 +15,7 @@
 
 # COMMAND ----------
 
-import sys, os, shutil, subprocess, importlib                                                          
+import sys, os, json, shutil, subprocess, importlib
                                                                                                         
                                                                                                         
 # 1. Scrub broken Shared paths                                                                         
@@ -29,26 +29,57 @@ for mod, module_obj in list(sys.modules.items()):
             '/AlternatingPipeline/' in module_file):
         del sys.modules[mod]
 
-# 3. Ensure /tmp/tsm exists
+# 3. Load the source commit stamped by step 04 before importing model code.
+_BOOTSTRAP_MANIFEST_PATH = "/dbfs/FileStore/csv_pipeline/models/MODEL_MANIFEST.json"
+_bootstrap_manifest = {}
+if os.path.exists(_BOOTSTRAP_MANIFEST_PATH):
+    with open(_BOOTSTRAP_MANIFEST_PATH) as _f:
+        _bootstrap_manifest = json.load(_f)
+_TRAINING_SOURCE_COMMIT = (
+    _bootstrap_manifest.get("source", {}).get("commit")
+    if isinstance(_bootstrap_manifest, dict) else None
+)
+
+# 4. Ensure /tmp/tsm contains the exact commit that produced the checkpoint.
 TSM = '/tmp/tsm'
-if (os.path.isdir(f'{TSM}/.git') and
+_REPO_URL = 'https://github.com/NavneetKishanS/Time-Series-Models.git'
+if not (os.path.isdir(f'{TSM}/.git') and
         os.path.isdir(f'{TSM}/AlternatingPipeline')):
-    # /tmp persists for the life of the cluster. Refresh it so a post-push run
-    # cannot silently import an older commit.
-    subprocess.check_call([
-        'git', '-C', TSM, 'fetch', '--depth=1', 'origin', 'main',
-    ])
-    subprocess.check_call([
-        'git', '-C', TSM, 'checkout', '--detach', 'FETCH_HEAD',
-    ])
-else:
     shutil.rmtree(TSM, ignore_errors=True)
-    subprocess.check_call(['git', 'clone', '--depth=1',
-                            'https://github.com/luke-schumacher/Time-Series-Models.git', TSM])
+    subprocess.check_call([
+        'git', 'clone', '--depth=100', '--no-checkout', _REPO_URL, TSM,
+    ])
+
+# Fetch main first so the common case is one operation. If the training commit
+# has since fallen outside the shallow history, fetch that exact SHA directly.
+subprocess.check_call([
+    'git', '-C', TSM, 'fetch', '--depth=100', 'origin', 'main',
+])
+_target = _TRAINING_SOURCE_COMMIT or 'FETCH_HEAD'
+try:
+    subprocess.check_call(['git', '-C', TSM, 'checkout', '--detach', _target])
+except subprocess.CalledProcessError:
+    if not _TRAINING_SOURCE_COMMIT:
+        raise
+    subprocess.check_call([
+        'git', '-C', TSM, 'fetch', '--depth=1', 'origin',
+        _TRAINING_SOURCE_COMMIT,
+    ])
+    subprocess.check_call(['git', '-C', TSM, 'checkout', '--detach', 'FETCH_HEAD'])
+
+BOOTSTRAP_SOURCE_COMMIT = subprocess.check_output(
+    ['git', '-C', TSM, 'rev-parse', 'HEAD'], text=True,
+).strip()
+if (_TRAINING_SOURCE_COMMIT and
+        BOOTSTRAP_SOURCE_COMMIT != _TRAINING_SOURCE_COMMIT):
+    raise RuntimeError(
+        f'Step 05 loaded source commit {BOOTSTRAP_SOURCE_COMMIT}, but step 04 '
+        f'trained with {_TRAINING_SOURCE_COMMIT}.'
+    )
 if TSM not in sys.path:
     sys.path.insert(0, TSM)
 
-# 4. Pre-import every submodule load_models touches, so each one lands in
+# 5. Pre-import every submodule load_models touches, so each one lands in
 #    sys.modules pointing at /tmp/tsm before Databricks's Workspace finder
 #    can intercept it.
 for name in [
@@ -66,7 +97,7 @@ for name in [
     m = importlib.import_module(name)
     print(f'  {name:60s} -> {getattr(m, "__file__", "<pkg>")}')
 
-print('\nALL MODULES LOADED FROM /tmp/tsm')
+print(f'\nALL MODULES LOADED FROM /tmp/tsm @ {BOOTSTRAP_SOURCE_COMMIT}')
 
 
 # COMMAND ----------
@@ -89,11 +120,11 @@ from datetime import datetime, timedelta
 # Anything containing "Patient Exchange and Examination" is scrubbed from
 # sys.path because that path lives on the broken Workspace Files mount.
 # ─────────────────────────────────────────────────────────────────────────────
-_REPO_URL = "https://github.com/luke-schumacher/Time-Series-Models.git"
+_REPO_URL = "https://github.com/NavneetKishanS/Time-Series-Models.git"
 _FALLBACK = "/tmp/tsm"
 _REPO_CANDIDATES = [
     _FALLBACK,
-    "/Workspace/Repos/luke-schumacher/Time-Series-Models",
+    "/Workspace/Repos/NavneetKishanS/Time-Series-Models",
 ]
 
 def _is_healthy_repo(path):
@@ -182,7 +213,8 @@ CONTROLLED_SCHEDULE  = None
 #   (1) match the MODEL_MANIFEST.json that step 04 wrote when it trained them,
 #   (2) are NEWER than the pkl (i.e. not trained on older data), and
 #   (3) come from a pkl whose content is unchanged since training.
-# Any mismatch prints a loud warning. Set env STRICT_FRESHNESS=1 to hard-stop.
+# Mismatches hard-stop by default. Set STRICT_FRESHNESS=0 only for an explicit
+# diagnostic run whose generated output will not be treated as valid.
 # =============================================================================
 import os, time, json, hashlib
 
@@ -237,6 +269,12 @@ if os.path.exists(_man_path):
     with open(_man_path) as _f:
         _man = json.load(_f)
     print(f"\nManifest  trained_at {_man.get('trained_at')}   pkl sha {_man.get('pkl', {}).get('sha256')}")
+    _expected_commit = _man.get("source", {}).get("commit")
+    if _expected_commit and BOOTSTRAP_SOURCE_COMMIT != _expected_commit:
+        _warnings.append(
+            f"Loaded source commit {BOOTSTRAP_SOURCE_COMMIT} != training commit "
+            f"{_expected_commit}."
+        )
     if _man.get("pkl", {}).get("sha256") != _pkl_meta.get("sha256"):
         _warnings.append("Live pkl sha != manifest pkl sha — step 03 re-ran after training. "
                          "Re-run step 04 before generating, or the models don't match this pkl.")
@@ -268,8 +306,9 @@ if _warnings:
     print(f"!! {len(_warnings)} FRESHNESS WARNING(S) — review before trusting this run:")
     for _w in _warnings:
         print(f"   - {_w}")
-    if os.environ.get("STRICT_FRESHNESS") == "1":
+    if os.environ.get("STRICT_FRESHNESS", "1") != "0":
         raise RuntimeError("Model freshness gate failed (STRICT_FRESHNESS=1). See warnings above.")
+    print("!! STRICT_FRESHNESS=0 override active; output is diagnostic only.")
 else:
     print("OK — checkpoints match the manifest, are newer than the pkl, and the pkl is "
           "unchanged since training.")
@@ -367,16 +406,19 @@ exchange_model.eval()
 print("Exchange model loaded.")
 
 # --- load examination model ---
-# Build the model with the duration architecture the checkpoint was actually
-# trained with (recorded in MODEL_MANIFEST.json by step 04). This tolerates
-# a repo refresh between training and generation changing EXAMINATION_MODEL_CONFIG.
+# Build the model with the complete architecture configuration recorded by
+# step 04. The exact source commit and state schema are checked before weights
+# load, so no learned layer can be silently discarded at inference.
 _exam_config = dict(EXAMINATION_MODEL_CONFIG)
 _manifest = globals().get('_man', {})
 if isinstance(_manifest, dict):
     _mc = _manifest.get('model_config', {})
-    if 'examination_duration_distribution' in _mc:
+    if isinstance(_mc.get('examination'), dict):
+        _exam_config.update(_mc['examination'])
+    elif 'examination_duration_distribution' in _mc:
         _exam_config['duration_distribution'] = _mc['examination_duration_distribution']
-    if 'examination_duration_components' in _mc:
+    if (not isinstance(_mc.get('examination'), dict) and
+            'examination_duration_components' in _mc):
         _exam_config['duration_num_components'] = _mc['examination_duration_components']
 examination_model = create_examination_model(_exam_config).to(device)
 try:
@@ -384,26 +426,36 @@ try:
         f"{MODELS_DIR}/examination/examination_model_best.pt",
         map_location=device,
     )
-    # strict=False: allows extra keys in the checkpoint whose layers were
-    # subsequently removed from the model code (e.g. duration_seq_type_bias).
-    # The guard below ensures no weight the model actually needs is absent.
-    _incompatible = examination_model.load_state_dict(_exam_ckpt, strict=False)
-    if _incompatible.missing_keys:
+    _checkpoint_keys = set(_exam_ckpt.keys())
+    _model_keys = set(examination_model.state_dict().keys())
+    _manifest_keys = set(
+        _manifest.get('model_state_schema', {}).get('examination', [])
+    )
+    if _manifest_keys and _checkpoint_keys != _manifest_keys:
         raise RuntimeError(
-            f"Examination checkpoint is missing weights required by the model: "
-            f"{_incompatible.missing_keys}. Re-run step 04 to retrain."
+            "Checkpoint keys differ from the schema recorded by step 04: "
+            f"missing={sorted(_manifest_keys - _checkpoint_keys)[:10]}, "
+            f"unexpected={sorted(_checkpoint_keys - _manifest_keys)[:10]}"
         )
+    if _checkpoint_keys != _model_keys:
+        raise RuntimeError(
+            "Checkpoint and inference model architectures differ: "
+            f"missing={sorted(_model_keys - _checkpoint_keys)[:10]}, "
+            f"unexpected={sorted(_checkpoint_keys - _model_keys)[:10]}"
+        )
+    examination_model.load_state_dict(_exam_ckpt, strict=True)
 except RuntimeError as exc:
     raise RuntimeError(
         "The examination checkpoint does not match the configured duration "
         "architecture. Re-run CSV step 04 with the current repo after step 03, "
-        "then restart Python and rerun step 05."
+        f"then restart Python and rerun step 05. Details: {exc}"
     ) from exc
 examination_model.eval()
 print(
     "Examination model loaded: "
     f"duration_distribution={examination_model.duration_distribution}  "
-    f"components={examination_model.duration_num_components}"
+    f"components={examination_model.duration_num_components}  "
+    f"source_commit={BOOTSTRAP_SOURCE_COMMIT}"
 )
 
 # --- load orchestration model ---
