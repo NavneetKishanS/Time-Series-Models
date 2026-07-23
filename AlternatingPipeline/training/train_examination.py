@@ -33,7 +33,8 @@ class ExaminationDataset(Dataset):
     """Dataset for examination (scan sequence) training."""
 
     def __init__(self, examination_sequences, max_seq_len=None, augment=False,
-                 oversample=1, duration_scale=1.0, abort_oversample=1):
+                 oversample=1, duration_scale=1.0, abort_oversample=1,
+                 extra_conditioning_features=None, leakage_denylist=None):
         if max_seq_len is None:
             max_seq_len = MAX_SEQ_LEN
 
@@ -45,13 +46,19 @@ class ExaminationDataset(Dataset):
         abort_id = SOURCEID_VOCAB['MRI_MSR_34']  # "Stopped by User"
 
         for seq in examination_sequences:
-            conditioning = build_conditioning_tensor(seq['conditioning'])
+            conditioning = build_conditioning_tensor(
+                seq['conditioning'], extra_feature_names=extra_conditioning_features,
+                denylist=leakage_denylist,
+            )
 
             body_region = seq['body_region']
             # Scan-type / scanner conditioning — default to 0 ('other' /
             # first scanner) for pkls built before these fields existed.
             sequence_type = int(seq.get('sequence_type', 0))
             serial_idx = int(seq.get('serial_idx', 0))
+            # SUT trigger/gating mode — default to 0 ('none'/first class) for
+            # pkls built before this field existed (see use_sut_conditioning).
+            trigger_mode = int(seq.get('trigger_mode', 0))
             tokens = seq['sequence']
             durations = seq.get('durations', [0.0] * len(tokens))
 
@@ -89,6 +96,7 @@ class ExaminationDataset(Dataset):
                 'body_region': body_region,
                 'sequence_type': sequence_type,
                 'serial_idx': serial_idx,
+                'trigger_mode': trigger_mode,
                 'input_seq': torch.tensor(input_seq, dtype=torch.long),
                 'target_seq': torch.tensor(target_seq, dtype=torch.long),
                 'target_durations': target_durations,  # kept as list for augmentation
@@ -130,6 +138,7 @@ class ExaminationDataset(Dataset):
             item['input_seq'],
             item['target_seq'],
             torch.tensor(durations, dtype=torch.float32),
+            torch.tensor(item['trigger_mode'], dtype=torch.long),
         )
 
 
@@ -170,7 +179,8 @@ def compute_token_class_weights(sequences, vocab_size=VOCAB_SIZE, smoothing=0.5)
 
 
 def train_examination_model(data_path=None, config=None, training_config=None,
-                            save_dir=None, verbose=True):
+                            save_dir=None, verbose=True,
+                            extra_conditioning_features=None, leakage_denylist=None):
     """
     Train the Examination Model.
 
@@ -180,6 +190,16 @@ def train_examination_model(data_path=None, config=None, training_config=None,
         training_config: Training config dict
         save_dir: Directory to save model
         verbose: Print progress
+        extra_conditioning_features: optional list of extra numeric
+            conditioning feature names (e.g. SUT sequence parameters) read
+            from each sequence's conditioning dict, appended after the base
+            10-dim tensor — see build_conditioning_tensor. None preserves the
+            exact original 10-dim behavior.
+        leakage_denylist: optional set of feature names that must never
+            appear in extra_conditioning_features (e.g. a duration-
+            equivalent field). Enforced at the actual point of tensor
+            construction (build_conditioning_tensor), independent of any
+            upstream check a caller may already have done.
 
     Returns:
         Trained model, training history
@@ -285,10 +305,14 @@ def train_examination_model(data_path=None, config=None, training_config=None,
     train_dataset = ExaminationDataset(
         train_sequences, augment=augment, oversample=oversample,
         duration_scale=duration_scale, abort_oversample=abort_oversample,
+        extra_conditioning_features=extra_conditioning_features,
+        leakage_denylist=leakage_denylist,
     )
     val_dataset = ExaminationDataset(
         val_sequences, augment=False, oversample=1,
         duration_scale=duration_scale, abort_oversample=1,
+        extra_conditioning_features=extra_conditioning_features,
+        leakage_denylist=leakage_denylist,
     )
 
     if verbose:
@@ -298,10 +322,12 @@ def train_examination_model(data_path=None, config=None, training_config=None,
 
     # Trim each batch to its longest real sequence — the tuple layout is
     # (conditioning, body_region, sequence_type, serial_idx, input_seq,
-    # target_seq, durations); positions 4/5/6 are the per-token fields,
-    # measured off the PAD-terminated input_seq at position 4. This is the
-    # dominant CPU speedup: examination scans are short but pad to 128, and
-    # attention is O(L^2). See make_pad_collate.
+    # target_seq, durations, trigger_mode); positions 4/5/6 are the per-token
+    # fields, measured off the PAD-terminated input_seq at position 4.
+    # trigger_mode (position 7) is per-sequence like body_region/serial_idx,
+    # so it rides along untrimmed. This is the dominant CPU speedup:
+    # examination scans are short but pad to 128, and attention is O(L^2).
+    # See make_pad_collate.
     collate = make_pad_collate(seq_indices=(4, 5, 6), length_index=4,
                                pad_token_id=PAD_TOKEN_ID)
     train_loader = DataLoader(
@@ -360,7 +386,7 @@ def train_examination_model(data_path=None, config=None, training_config=None,
         train_loss = 0.0
         train_dur_loss = 0.0
 
-        for conditioning, body_region, sequence_type, serial_idx, input_seq, target_seq, target_durations in tqdm(
+        for conditioning, body_region, sequence_type, serial_idx, input_seq, target_seq, target_durations, trigger_mode in tqdm(
             train_loader, disable=not verbose, desc=f"Epoch {epoch+1}"
         ):
             conditioning = conditioning.to(device)
@@ -370,13 +396,14 @@ def train_examination_model(data_path=None, config=None, training_config=None,
             input_seq = input_seq.to(device)
             target_seq = target_seq.to(device)
             target_durations = target_durations.to(device)
+            trigger_mode = trigger_mode.to(device)
 
             optimizer.zero_grad()
 
             logits, duration_mu, duration_sigma = model(
                 conditioning,
-                {'body_region': body_region,
-                 'sequence_type': sequence_type, 'serial_idx': serial_idx},
+                {'body_region': body_region, 'sequence_type': sequence_type,
+                 'serial_idx': serial_idx, 'trigger_mode': trigger_mode},
                 input_seq,
             )
 
@@ -418,7 +445,7 @@ def train_examination_model(data_path=None, config=None, training_config=None,
         val_loss = 0.0
 
         with torch.no_grad():
-            for conditioning, body_region, sequence_type, serial_idx, input_seq, target_seq, target_durations in val_loader:
+            for conditioning, body_region, sequence_type, serial_idx, input_seq, target_seq, target_durations, trigger_mode in val_loader:
                 conditioning = conditioning.to(device)
                 body_region = body_region.to(device)
                 sequence_type = sequence_type.to(device)
@@ -426,11 +453,12 @@ def train_examination_model(data_path=None, config=None, training_config=None,
                 input_seq = input_seq.to(device)
                 target_seq = target_seq.to(device)
                 target_durations = target_durations.to(device)
+                trigger_mode = trigger_mode.to(device)
 
                 logits, duration_mu, duration_sigma = model(
                     conditioning,
-                    {'body_region': body_region,
-                     'sequence_type': sequence_type, 'serial_idx': serial_idx},
+                    {'body_region': body_region, 'sequence_type': sequence_type,
+                     'serial_idx': serial_idx, 'trigger_mode': trigger_mode},
                     input_seq,
                 )
                 token_loss = model.compute_loss(logits, target_seq)
@@ -510,10 +538,14 @@ def train_examination_model(data_path=None, config=None, training_config=None,
                         continue
                     _inp = torch.tensor([[START_TOKEN_ID] + _tokens],
                                         dtype=torch.long, device=device)
-                    _cond = build_conditioning_tensor(_s['conditioning']).unsqueeze(0).to(device)
+                    _cond = build_conditioning_tensor(
+                        _s['conditioning'], extra_feature_names=extra_conditioning_features,
+                        denylist=leakage_denylist,
+                    ).unsqueeze(0).to(device)
                     _info = {'body_region': torch.tensor([_s['body_region']], device=device),
                              'sequence_type': torch.tensor([_st], device=device),
-                             'serial_idx': torch.tensor([int(_s.get('serial_idx', 0))], device=device)}
+                             'serial_idx': torch.tensor([int(_s.get('serial_idx', 0))], device=device),
+                             'trigger_mode': torch.tensor([int(_s.get('trigger_mode', 0))], device=device)}
                     _mu, _ = model.estimate_durations(_inp, _cond, _info)
                     _m = _mu[0, len(_tokens) - 1].item()
                     _pred_sec = (math.expm1(_m) if model.duration_mode == 'log' else _m) * duration_scale

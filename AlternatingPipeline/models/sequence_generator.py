@@ -67,6 +67,10 @@ class SequenceGeneratorModel(nn.Module):
         # Examination scan-type + per-scanner conditioning (off by default;
         # enabled via config for the examination model only).
         self.use_exam_conditioning = config.get('use_exam_conditioning', False)
+        # Sequence-protocol trigger/gating mode (ECG, peripheral, none, ...),
+        # off by default. Independent of use_exam_conditioning — same opt-in
+        # precedent, examination-model only.
+        self.use_sut_conditioning = config.get('use_sut_conditioning', False)
 
         if self.body_region_mode == 'from_to':
             # Exchange: embed body_from AND body_to, concat both
@@ -101,6 +105,16 @@ class SequenceGeneratorModel(nn.Module):
                 self.duration_seq_type_bias = nn.Embedding(
                     config['num_sequence_types'], self.d_model
                 )
+
+            if self.use_sut_conditioning:
+                # Trigger/gating mode (ECG, peripheral, none, ...) — small
+                # categorical embedding, same sizing convention as the exam
+                # conditioning embeddings above.
+                trigger_emb_dim = self.d_model // 8
+                self.trigger_mode_embedding = nn.Embedding(
+                    config['num_trigger_modes'], trigger_emb_dim
+                )
+                cond_input_dim += trigger_emb_dim
 
         if self.has_phase_type:
             phase_emb_dim = self.d_model // 8  # 32 for d_model=256
@@ -316,9 +330,9 @@ class SequenceGeneratorModel(nn.Module):
         else:
             region_emb = self.body_region_embedding(body_region_info['body_region'])
             parts.append(region_emb)
+            region_t = body_region_info['body_region']
 
             if self.use_exam_conditioning:
-                region_t = body_region_info['body_region']
                 # sequence_type / serial_idx default to 0 ('other' / first
                 # scanner) when a caller does not supply them.
                 seq_t = body_region_info.get('sequence_type')
@@ -329,6 +343,14 @@ class SequenceGeneratorModel(nn.Module):
                     ser_t = torch.zeros_like(region_t)
                 parts.append(self.sequence_type_embedding(seq_t))
                 parts.append(self.serial_embedding(ser_t))
+
+            if self.use_sut_conditioning:
+                # trigger_mode defaults to 0 ('none'/first class) when a
+                # caller does not supply it — same pattern as sequence_type.
+                trig_t = body_region_info.get('trigger_mode')
+                if trig_t is None:
+                    trig_t = torch.zeros_like(region_t)
+                parts.append(self.trigger_mode_embedding(trig_t))
 
         if self.has_phase_type and phase_type is not None:
             phase_emb = self.phase_type_embedding(phase_type)

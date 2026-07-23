@@ -117,20 +117,37 @@ def safe_float(val, default=0.0):
         return default
 
 
-def build_conditioning_tensor(conditioning_dict):
+def build_conditioning_tensor(conditioning_dict, extra_feature_names=None, denylist=None):
     """
-    Convert a conditioning dict to a 10-dim tensor.
+    Convert a conditioning dict to a tensor: the fixed 10-dim base, plus one
+    value per name in extra_feature_names (in order), appended at the end.
 
-    Order: Age, Weight, Height, PTAB, Direction_encoded,
-           hour_sin, hour_cos, dow_sin, dow_cos, is_morning
+    Base order: Age, Weight, Height, PTAB, Direction_encoded,
+                hour_sin, hour_cos, dow_sin, dow_cos, is_morning
 
     Args:
         conditioning_dict: Dict with conditioning feature values
+        extra_feature_names: optional list of additional keys to read from
+            conditioning_dict and append, in order, defaulting to 0.0 when a
+            key is absent
+        denylist: optional set of feature names that must never appear in
+            extra_feature_names (e.g. a duration-equivalent field that would
+            leak the training target into the input). Raises ValueError at
+            the point of tensor construction — independent of whatever a
+            caller may have already checked upstream, so this still catches
+            a bad feature list regardless of how it was assembled.
 
     Returns:
-        torch.Tensor of shape [10]
+        torch.Tensor of shape [10] (or [10 + len(extra_feature_names)])
     """
-    return torch.tensor([
+    if denylist and extra_feature_names:
+        overlap = denylist.intersection(extra_feature_names)
+        if overlap:
+            raise ValueError(
+                f"Leakage guard tripped: {overlap} must never be used as an "
+                f"input feature — it is ~equal to the duration target."
+            )
+    values = [
         safe_float(conditioning_dict.get('Age', 0)),
         safe_float(conditioning_dict.get('Weight', 0)),
         safe_float(conditioning_dict.get('Height', 0)),
@@ -141,4 +158,9 @@ def build_conditioning_tensor(conditioning_dict):
         safe_float(conditioning_dict.get('dow_sin', 0.0)),
         safe_float(conditioning_dict.get('dow_cos', 1.0)),
         safe_float(conditioning_dict.get('is_morning', 0)),
-    ], dtype=torch.float32)
+    ]
+    if extra_feature_names:
+        values.extend(
+            safe_float(conditioning_dict.get(name, 0.0)) for name in extra_feature_names
+        )
+    return torch.tensor(values, dtype=torch.float32)
