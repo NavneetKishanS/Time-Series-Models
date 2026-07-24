@@ -44,6 +44,14 @@ _headers = {"Authorization": f"Bearer {_token}"}
 
 _SKIP = {"outputs", "__pycache__"}
 
+def _export_source(workspace_path, dst):
+    r = requests.get(f"{_host}/api/2.0/workspace/export",
+                     headers=_headers,
+                     params={"path": workspace_path, "format": "SOURCE"})
+    r.raise_for_status()
+    with open(dst, "wb") as f:
+        f.write(base64.b64decode(r.json()["content"]))
+
 def _api_copy_py(workspace_dir, local_dir):
     os.makedirs(local_dir, exist_ok=True)
     resp = requests.get(f"{_host}/api/2.0/workspace/list",
@@ -55,16 +63,22 @@ def _api_copy_py(workspace_dir, local_dir):
         name = os.path.basename(obj["path"])
         if name in _SKIP:
             continue
-        dst = os.path.join(local_dir, name)
         if obj["object_type"] == "DIRECTORY":
-            _api_copy_py(obj["path"], dst)
+            _api_copy_py(obj["path"], os.path.join(local_dir, name))
         elif obj["object_type"] == "FILE" and name.endswith(".py"):
-            r = requests.get(f"{_host}/api/2.0/workspace/export",
-                             headers=_headers,
-                             params={"path": obj["path"], "format": "SOURCE"})
-            r.raise_for_status()
-            with open(dst, "wb") as f:
-                f.write(base64.b64decode(r.json()["content"]))
+            _export_source(obj["path"], os.path.join(local_dir, name))
+        elif obj["object_type"] == "NOTEBOOK":
+            # Databricks auto-detects the "# Databricks notebook source"
+            # header and lists these as NOTEBOOK (not FILE) even for plain
+            # git-tracked .py files inside a Repo — with the .py extension
+            # STRIPPED from `path` (e.g. ".../config", not ".../config.py").
+            # Every file in csv_pipeline_seqparams/ carries that header, so
+            # without this branch _api_copy_py silently copies nothing at
+            # all here (confirmed: local dir came back empty). `format=
+            # SOURCE` still returns the original .py text either way, so
+            # just re-add the extension when writing the local copy.
+            dst_name = name if name.endswith(".py") else f"{name}.py"
+            _export_source(obj["path"], os.path.join(local_dir, dst_name))
 
 _api_copy_py(f"{REPO_ROOT}/AlternatingPipeline", f"{TMP_ROOT}/AlternatingPipeline")
 _api_copy_py(f"{REPO_ROOT}/DatabricksPipeline/csv_pipeline_seqparams",
