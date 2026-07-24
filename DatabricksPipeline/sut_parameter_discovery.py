@@ -192,12 +192,19 @@ print("Fill in once STEP 3/3b identifies a candidate parse function and slot num
 #      the Protocol/Sequence name strings (get_seq() / classify_sequence_type
 #      in 02_exam_preprocessing.py / 03_build_preprocessed_pkl.py).
 #
-# OUTPUT OF THIS NOTEBOOK: once slots are confirmed, copy them into
-# DatabricksPipeline/csv_pipeline_seqparams/config.py:
-#   SUT_SLOT_MAP = {58: 'scanning_time', <n>: 'TR', <n>: 'num_slices',
-#                   <n>: 'trigger_mode', ...}
-#   EXAMINATION_SEQPARAM_FEATURES = ['TR', 'num_slices']  # numeric only —
-#       trigger_mode is categorical, goes through TRIGGER_MODE_VOCAB instead
-#   EXAMINATION_SEQPARAM_SCALE = [<TR divisor>, <num_slices divisor>]  # see
-#       that file's LayerNorm-erasure warning — REQUIRED, not optional
+# RESULT (2026-07-24, real data, serials 183242/176148/176227, Jan 2024):
+# the "SD<n>: value" hypothesis was FALSIFIED (STEP 3 matched 0/20 messages;
+# STEP 3b's comma/pipe/semicolon split found nothing either). The real format
+# is whitespace-delimited, self-named "KEY:VALUE" tokens, e.g.
+# "TR:866 TE:101 SLC:9 SLT:10 FOV:300 ... MUID:17", wrapped in
+# "Protocol: ( ... !s!)". Field sets differ by sequence type (haste vs.
+# ep2d_diff carry different keys), so there is no fixed slot count.
+#
+# Copied into DatabricksPipeline/csv_pipeline_seqparams/config.py:
+#   SUT_FIELD_MAP = {'TR': 'TR', 'SLC': 'num_slices'}  # by name, not position
+#   EXAMINATION_SEQPARAM_FEATURES = ['TR', 'num_slices']
+#   EXAMINATION_SEQPARAM_SCALE = [1000.0, 30.0]
+# trigger_mode is still NOT identified — CMM/CDM/RCM/PHYS/PAC were all
+# constant across the sampled messages, giving no evidence either way.
+# Follow up with Navneet on that specific question before adding it.
 # =============================================================================

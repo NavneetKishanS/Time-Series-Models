@@ -16,14 +16,16 @@ are duplicated (not cross-imported) from csv_pipeline/config.py, matching
 that file's own established convention for this codebase.
 
 *** STATUS ***
-SUT_SLOT_MAP, TRIGGER_MODE_VOCAB, EXAMINATION_SEQPARAM_FEATURES and
-EXAMINATION_SEQPARAM_SCALE below are PLACEHOLDERS pending the data-discovery
-stage. Run DatabricksPipeline/sut_parameter_discovery.py first and replace
-the placeholder values with confirmed slot numbers / ranges before trusting
-any training run built from EXAMINATION_MODEL_CONFIG_SEQPARAMS (assembled in
-04_train_models.py). Until then EXAMINATION_SEQPARAM_FEATURES is empty,
-which is a safe default (equivalent to the old 10-dim conditioning), not a
-silent no-op bug.
+sut_parameter_discovery.py has been run against real MRI_SUT_1005 data. The
+originally-hypothesized labeled "SD<n>: value" format was FALSIFIED (0/20
+real messages matched) — the real format is whitespace-delimited, self-named
+"KEY:VALUE" tokens (e.g. "TR:866 TE:101 SLC:9 ... MUID:17"). TR and num_slices
+(mapped from the "SLC" key) are now CONFIRMED via SUT_FIELD_MAP below and
+active in EXAMINATION_SEQPARAM_FEATURES. trigger_mode remains a PLACEHOLDER —
+no field in the sampled messages showed variation consistent with a
+gating/trigger mode (candidates CMM/CDM/RCM/PHYS/PAC were constant across all
+samples), so TRIGGER_MODE_VOCAB is unused for now and every row defaults to
+'none' (safe, non-leaking default — see _trigger_mode_id below).
 """
 
 # ============================================================================
@@ -155,34 +157,48 @@ COIL_COLUMNS = [
 ]
 
 # ============================================================================
-# SUT SEQUENCE-PARAMETER VOCAB & FEATURE LIST  ***  PLACEHOLDERS  ***
+# SUT SEQUENCE-PARAMETER VOCAB & FEATURE LIST
 #
-# Filled in by DatabricksPipeline/sut_parameter_discovery.py (data-discovery
-# stage). Only SD58 = scanning_time is CONFIRMED (Navneet named it directly
-# on the call, unprompted). Everything else below is a structural
-# placeholder, not a real finding.
+# Confirmed via DatabricksPipeline/sut_parameter_discovery.py against real
+# MRI_SUT_1005 data (Jan 2024, serials 183242/176148/176227). The message is
+# whitespace-delimited "KEY:VALUE" tokens, self-named per field (e.g. TR, TE,
+# SLC, SLT, FA, ...) — NOT the originally-hypothesized numbered "SD<n>: value"
+# scheme, which matched 0/20 real messages. Field sets differ by sequence
+# type (haste vs. ep2d_diff carry different key sets entirely), so there is
+# no fixed slot count to index into — SUT_FIELD_MAP looks fields up BY NAME.
+#
+# 'SLC' -> 'num_slices': confirmed by inspection (values 9/15/18 match
+# plausible slice counts; a separate 'SLT' key already carries slice
+# *thickness*, ruling out the alternative reading). 'TR' needs no renaming —
+# it's the standard MR repetition-time mnemonic already.
+#
+# trigger_mode is NOT yet mapped: none of the candidate fields (CMM, CDM,
+# RCM, PHYS, PAC) varied across the sampled messages, so there's no evidence
+# which (if any) encodes gating/trigger mode. Follow up with Navneet. Until
+# then every row defaults to 'none' via _trigger_mode_id's fallback — a
+# constant, uninformative embedding, not a bug.
+#
+# scanning_time (the original SD58 leakage concern) does not correspond to
+# any literal field in this KEY:VALUE format — there's no "SD" label at all.
+# SUT_LEAKAGE_DENYLIST is kept below as defense-in-depth regardless.
 # ============================================================================
 
-# slot number (within the MRI_SUT_1005 message) -> stable parameter name.
-SUT_SLOT_MAP = {
-    58: 'scanning_time',   # CONFIRMED — Navneet, call transcript. LEAKAGE — see denylist below.
-    # 'TR':           <slot>,  # TODO: confirm via sut_parameter_discovery.py
-    # 'num_slices':   <slot>,  # TODO: confirm via sut_parameter_discovery.py
-    # 'trigger_mode': <slot>,  # TODO: confirm via sut_parameter_discovery.py
+# raw message key -> stable parameter name.
+SUT_FIELD_MAP = {
+    'TR':  'TR',
+    'SLC': 'num_slices',
 }
 
 TRIGGER_MODE_VOCAB = {
     'none': 0, 'ecg': 1, 'peripheral_pulse': 2, 'respiratory': 3,
     'external': 4, 'unknown': 5,
-}  # placeholder categories — finalize against Phase 1 findings
+}  # placeholder categories — trigger_mode field itself is still unidentified
 NUM_TRIGGER_MODES = len(TRIGGER_MODE_VOCAB)
 
-# Numeric SD-parameter feature names that will ride the flat conditioning
-# tensor (see AlternatingPipeline/training/utils.py::build_conditioning_tensor
-# extra_feature_names). Empty until Phase 1 confirms real slot numbers —
-# training against an empty list is equivalent to the OLD 10-dim
-# conditioning (a safe default), not a silent no-op bug.
-EXAMINATION_SEQPARAM_FEATURES = []  # e.g. ['TR', 'num_slices'] once confirmed
+# Numeric SUT parameter feature names that ride the flat conditioning tensor
+# (see AlternatingPipeline/training/utils.py::build_conditioning_tensor
+# extra_feature_names).
+EXAMINATION_SEQPARAM_FEATURES = ['TR', 'num_slices']
 
 # Per-feature O(1) scale divisors, aligned 1:1 with
 # EXAMINATION_SEQPARAM_FEATURES. CRITICAL: an entry here is REQUIRED before
@@ -190,11 +206,11 @@ EXAMINATION_SEQPARAM_FEATURES = []  # e.g. ['TR', 'num_slices'] once confirmed
 # LayerNorm-erasure warning in AlternatingPipeline/models/sequence_generator.py
 # (raw large-magnitude numeric features silently erase categorical
 # conditioning if left unscaled — this exact bug caused three separate
-# multi-week flat-duration incidents in this project). Placeholder guesses
-# once features are added: TR ~300-3000ms -> divide by 1000;
-# num_slices ~1-60 -> divide by 30.
-EXAMINATION_SEQPARAM_SCALE = []  # e.g. [1000.0, 30.0] once confirmed — MUST
-                                  # match EXAMINATION_SEQPARAM_FEATURES length
+# multi-week flat-duration incidents in this project). Real observed ranges
+# from discovery (TR 866-4300ms, SLC/num_slices 9-18) confirm these divisors
+# land features in a sane order of magnitude: TR / 1000; num_slices / 30.
+EXAMINATION_SEQPARAM_SCALE = [1000.0, 30.0]  # MUST match
+                                              # EXAMINATION_SEQPARAM_FEATURES length
 
 # ============================================================================
 # LEAKAGE GUARD — three independent gates:
@@ -209,8 +225,11 @@ EXAMINATION_SEQPARAM_SCALE = []  # e.g. [1000.0, 30.0] once confirmed — MUST
 #            independent of gates #1/#2: it fires regardless of how a caller
 #            assembled extra_conditioning_features, not just the one path
 #            gate #1 already validates.)
-# Görtler's transcript: "scanning time" (SD58) is ~equal to the duration
-# target and must never be an input feature.
+# Görtler's transcript: "scanning time" is ~equal to the duration target and
+# must never be an input feature. The originally-named "SD58" slot doesn't
+# correspond to any literal field in the confirmed KEY:VALUE message format
+# (no "SD" label exists in it at all) — kept here as defense-in-depth in case
+# a future field is found to be duration-equivalent.
 # ============================================================================
 
 SUT_LEAKAGE_DENYLIST = {'scanning_time'}

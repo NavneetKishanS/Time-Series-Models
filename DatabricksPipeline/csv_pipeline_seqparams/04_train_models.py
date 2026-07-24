@@ -153,7 +153,7 @@ if device.type == 'cpu':
 # =============================================================================
 # PRE-FLIGHT PROVENANCE CHECK — same pattern as csv_pipeline/04, extended to
 # fingerprint the seqparams config too (its sha changing across runs is
-# EXPECTED as SUT_SLOT_MAP / EXAMINATION_SEQPARAM_FEATURES get filled in).
+# EXPECTED as SUT_FIELD_MAP / EXAMINATION_SEQPARAM_FEATURES get filled in).
 # =============================================================================
 
 import time, json, hashlib

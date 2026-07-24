@@ -12,12 +12,10 @@
 # "scanning time" (SD58) explicitly excluded as a leakage risk — see
 # csv_pipeline_seqparams/config.py's SUT_LEAKAGE_DENYLIST / assert_no_leakage.
 #
-# STATUS: SUT_SLOT_MAP / EXAMINATION_SEQPARAM_FEATURES are placeholders in
-# config.py until DatabricksPipeline/sut_parameter_discovery.py confirms the
-# real slot map. Running this notebook before that is safe (it will simply
-# produce a pkl equivalent to the old 10-dim conditioning, since an empty
-# EXAMINATION_SEQPARAM_FEATURES is a no-op, not a crash) but pointless for
-# the actual feature-richness goal.
+# STATUS: TR and num_slices are confirmed (SUT_FIELD_MAP / EXAMINATION_SEQPARAM_FEATURES
+# in config.py, per DatabricksPipeline/sut_parameter_discovery.py's real-data
+# findings). trigger_mode remains unidentified and defaults to 'none' for
+# every row until a follow-up with Navneet confirms which field carries it.
 #
 # Inputs:
 #   hive_metastore.eventlog.common_eventlog          (Spark)
@@ -331,28 +329,30 @@ def _add_ptab(df):
 # =============================================================================
 # SUT SEQUENCE-PARAMETER PARSING (NEW — the point of this fork)
 # =============================================================================
-# PLACEHOLDER parser pending DatabricksPipeline/sut_parameter_discovery.py.
-# Assumes labeled "SD<n>: value" pairs (consistent with this scanner
-# software's other labeled messages — Sequence:'...', Protocol:'...',
-# CoilID '...') — if discovery finds a different format (e.g. an unlabeled
-# positional list), update this function to match BEFORE trusting its
-# output. Gracefully returns {} / partial dicts rather than raising, since
-# SUT_SLOT_MAP is expected to be incomplete until Phase 1 confirms slots.
+# Real format confirmed via DatabricksPipeline/sut_parameter_discovery.py:
+# whitespace-delimited, self-named "KEY:VALUE" tokens (e.g.
+# "TR:866 TE:101 SLC:9 ... MUID:17"), wrapped in "Protocol: ( ... !s!)" — NOT
+# the originally-hypothesized labeled "SD<n>: value" scheme (that regex
+# matched 0/20 real messages). Field sets differ by sequence type (haste vs.
+# ep2d_diff carry different keys entirely), so there's no fixed slot count —
+# SUT_FIELD_MAP looks fields up by name, not position. Gracefully returns {}
+# / partial dicts rather than raising, since SUT_FIELD_MAP only covers the
+# currently-confirmed fields (TR, num_slices).
 # =============================================================================
 
-_SD_LABELED_RE = re.compile(r"SD(\d+)\s*[:=]\s*'?([^,'\n]+)'?")
+_SUT_TOKEN_RE = re.compile(r"([A-Za-z][A-Za-z0-9]*):(\S+)")
 
 
 def _parse_sut_message(msg):
     """Parse an MRI_SUT_1005 message into {stable_name: raw_value_str},
-    for every slot present in both the message and SUT_SLOT_MAP."""
-    if not isinstance(msg, str) or not SUT_SLOT_MAP:
+    for every key present in both the message and SUT_FIELD_MAP."""
+    if not isinstance(msg, str) or not SUT_FIELD_MAP:
         return {}
-    raw_slots = {int(n): v.strip() for n, v in _SD_LABELED_RE.findall(msg)}
+    raw_fields = dict(_SUT_TOKEN_RE.findall(msg))
     return {
-        name: raw_slots[slot]
-        for slot, name in SUT_SLOT_MAP.items()
-        if slot in raw_slots
+        name: raw_fields[key]
+        for key, name in SUT_FIELD_MAP.items()
+        if key in raw_fields
     }
 
 
@@ -589,8 +589,10 @@ for serial in SERIAL_NUMBERS:
     coil_rows = df_merged.index[df_merged['MessageIdentification'] == 'MRI_CCS_11'].tolist()
     exam_rows = df_merged.index[df_merged['MessageIdentification'] == 'MRI_EXU_95'].tolist()
     # NEW — SUT sequence-protocol parameter rows. Join semantics (most-recent
-    # -before, same as coil_rows) is a hypothesis — confirm against
-    # sut_parameter_discovery.py STEP 2 (periodic vs. per-measurement).
+    # -before, same as coil_rows) confirmed correct via sut_parameter_discovery.py
+    # STEP 2: SUT fires periodically (ratio ~0.25-0.31 vs. MSR_100 events, not
+    # ~1.0), so several consecutive measurement segments legitimately share
+    # the same preceding SUT event.
     sut_rows = df_merged.index[df_merged['MessageIdentification'] == 'MRI_SUT_1005'].tolist()
 
     n_before = len(examination_sequences)

@@ -25,11 +25,13 @@ def _load_seqparams_config():
 
 
 class LeakageGuardTests(unittest.TestCase):
-    def test_module_imports_cleanly_with_placeholder_empty_features(self):
-        # The current placeholder EXAMINATION_SEQPARAM_FEATURES is empty, so
-        # the module-level gate #1 check must not raise.
+    def test_module_imports_cleanly_with_confirmed_features(self):
+        # TR and num_slices are now confirmed (sut_parameter_discovery.py
+        # real-data findings) — the module-level gate #1 check must not raise
+        # for them, and scanning_time must never appear in this list.
         module = _load_seqparams_config()
-        self.assertEqual(module.EXAMINATION_SEQPARAM_FEATURES, [])
+        self.assertEqual(module.EXAMINATION_SEQPARAM_FEATURES, ['TR', 'num_slices'])
+        self.assertEqual(module.EXAMINATION_SEQPARAM_SCALE, [1000.0, 30.0])
 
     def test_assert_no_leakage_passes_for_clean_feature_list(self):
         module = _load_seqparams_config()
@@ -75,8 +77,13 @@ class ModelConfigAssemblyTests(unittest.TestCase):
         self.assertEqual(result['num_trigger_modes'], module.NUM_TRIGGER_MODES)
         self.assertEqual(result['model_type'], 'examination')  # base fields preserved
 
-    def test_is_a_no_op_widening_when_features_still_placeholder_empty(self):
+    def test_is_a_no_op_widening_when_features_list_is_empty(self):
         module = _load_seqparams_config()
+        # Explicitly empty, independent of the real (now confirmed non-empty)
+        # module defaults — this asserts the general no-op-when-empty
+        # invariant of build_seqparams_model_config itself.
+        module.EXAMINATION_SEQPARAM_FEATURES = []
+        module.EXAMINATION_SEQPARAM_SCALE = []
         base = {'base_conditioning_dim': 10, 'conditioning_scale': [1.0] * 10}
 
         result = module.build_seqparams_model_config(base)
