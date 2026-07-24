@@ -76,9 +76,19 @@ sys.path.insert(0, TMP_ROOT)
 # as csv_pipeline/04_train_models.py (see that file's comment for the full
 # story: a re-run in a persistent Databricks kernel silently re-executes
 # whatever code the kernel first imported unless stale modules are purged).
-for _name, _mod in list(sys.modules.items()):
-    _f = getattr(_mod, "__file__", None) or ""
-    if _f.startswith(TMP_ROOT):
+#
+# Purge BY NAME PREFIX, not by `__file__`: AlternatingPipeline and
+# csv_pipeline_seqparams both lack __init__.py, so Python treats them as
+# namespace packages, and a namespace package's module object has
+# `__file__ is None` (submodules like csv_pipeline_seqparams.config still
+# have a real __file__, but the top-level package entry itself doesn't) — a
+# `__file__`-based check silently never evicts that top-level entry, so a
+# stale namespace package from an earlier run in this kernel (with an
+# incomplete/outdated __path__) can survive this purge and shadow the fresh
+# copy made above.
+_STALE_PREFIXES = ("AlternatingPipeline", "csv_pipeline_seqparams")
+for _name in list(sys.modules):
+    if any(_name == p or _name.startswith(p + ".") for p in _STALE_PREFIXES):
         del sys.modules[_name]
 
 import csv_pipeline_seqparams.config as seqparams_config
