@@ -105,5 +105,41 @@ def test_purge_evicts_stale_namespace_packages(seqparams_config, tmp_path):
         sys.modules.pop("unrelated_module", None)
 
 
+def test_purge_evicts_legacy_top_level_modules_by_file_path(seqparams_config, tmp_path):
+    """The 2026-07-27 regression: name-prefix matching alone is not enough.
+
+    AlternatingPipeline/models/examination_model.py does
+    `from models.sequence_generator import ...` — a legacy TOP-LEVEL name that
+    no prefix in ("AlternatingPipeline", "csv_pipeline_seqparams") matches. It
+    survived a re-run in a persistent kernel, so a fresh sha in the pre-flight
+    sat alongside a stale model class, detectable only via the parameter count.
+    """
+    required = ["AlternatingPipeline.config"]
+    _make_source_tree(str(tmp_path), required)
+
+    legacy = types.ModuleType("models.sequence_generator")
+    legacy.__file__ = os.path.join(str(tmp_path), "AlternatingPipeline", "models",
+                                   "sequence_generator.py")
+    sys.modules["models.sequence_generator"] = legacy
+    sys.modules["config"] = types.ModuleType("config")
+    sys.modules["config"].__file__ = os.path.join(str(tmp_path), "AlternatingPipeline", "config.py")
+
+    elsewhere = types.ModuleType("elsewhere")
+    elsewhere.__file__ = "/usr/lib/python3/elsewhere.py"
+    sys.modules["elsewhere"] = elsewhere
+
+    try:
+        seqparams_config.assert_pipeline_source_fresh(
+            str(tmp_path), required_modules=required, purge=True
+        )
+
+        assert "models.sequence_generator" not in sys.modules
+        assert "config" not in sys.modules
+        assert "elsewhere" in sys.modules, "purge must not evict modules outside tmp_root"
+    finally:
+        for name in ("models.sequence_generator", "config", "elsewhere"):
+            sys.modules.pop(name, None)
+
+
 def test_no_required_modules_is_a_purge_only_noop(seqparams_config, tmp_path):
     assert seqparams_config.assert_pipeline_source_fresh(str(tmp_path)) is True

@@ -100,10 +100,50 @@ sys.path.insert(0, TMP_ROOT)
 # stale namespace package from an earlier run in this kernel (with an
 # incomplete/outdated __path__) can survive this purge and shadow the fresh
 # copy made above.
+# BOTH conditions are required — each catches what the other misses:
+#
+#   by NAME PREFIX: namespace packages (no __init__.py) have __file__ is None
+#     on the top-level module object, so a __file__ check never evicts them.
+#
+#   by __file__ under TMP_ROOT: AlternatingPipeline/models/examination_model.py
+#     does `from models.sequence_generator import ...` — a LEGACY TOP-LEVEL
+#     name, not AlternatingPipeline.models.* — so the prefix list never matches
+#     it. This is how a stale model class survived a re-run on 2026-07-27: the
+#     pre-flight showed the new sha (it reads files directly) while the
+#     executed class was the cached one, betrayed only by the parameter count.
+#     Matching on __file__ is exactly what csv_pipeline/04_train_models.py does.
 _STALE_PREFIXES = ("AlternatingPipeline", "csv_pipeline_seqparams")
-for _name in list(sys.modules):
-    if any(_name == p or _name.startswith(p + ".") for p in _STALE_PREFIXES):
+for _name, _mod in list(sys.modules.items()):
+    _mod_file = (getattr(_mod, "__file__", None) or "").replace("\\", "/")
+    if (any(_name == p or _name.startswith(p + ".") for p in _STALE_PREFIXES)
+            or _mod_file.startswith(TMP_ROOT)):
         del sys.modules[_name]
+
+# The files under TMP_ROOT were just overwritten in place; overwriting does not
+# change the DIRECTORY mtime, so FileFinder can keep serving a cached listing.
+import importlib as _importlib
+_importlib.invalidate_caches()
+
+# Verify the purge actually covered the legacy top-level names, rather than
+# trusting that it did. This assertion is what would have caught the 07-27
+# stale-class run at the copy cell instead of ~5 hours later.
+_MUST_BE_ABSENT = (
+    "AlternatingPipeline.models.sequence_generator",
+    "AlternatingPipeline.models.examination_model",
+    "AlternatingPipeline.config",
+    "models.sequence_generator",
+    "models.examination_model",
+    "config",
+)
+_leftover = [_n for _n in _MUST_BE_ABSENT if _n in sys.modules]
+if _leftover:
+    raise RuntimeError(
+        f"Module purge missed {_leftover} — these would shadow the freshly "
+        f"copied source and train the PREVIOUS architecture while the "
+        f"pre-flight reports the new sha. Restart Python "
+        f"(dbutils.library.restartPython()) and re-run from the top."
+    )
+print(f"[purge] sys.modules clean — {len(_MUST_BE_ABSENT)} pipeline module names evicted")
 
 import csv_pipeline_seqparams.config as seqparams_config
 from AlternatingPipeline.config import EXAMINATION_MODEL_CONFIG, EXAMINATION_TRAINING_CONFIG

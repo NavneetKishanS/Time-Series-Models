@@ -297,8 +297,20 @@ def assert_pipeline_source_fresh(
     import sys as _sys
 
     if purge:
-        for _name in list(_sys.modules):
-            if any(_name == p or _name.startswith(p + ".") for p in stale_prefixes):
+        # BOTH conditions are required — each catches what the other misses.
+        # By NAME PREFIX: namespace packages (no __init__.py) have
+        # __file__ is None on the top-level module object, so a __file__ check
+        # never evicts them. By __file__ UNDER tmp_root:
+        # AlternatingPipeline/models/examination_model.py does
+        # `from models.sequence_generator import ...` — a legacy TOP-LEVEL name
+        # the prefix list cannot match. Missing that second case let a stale
+        # model class survive a re-run on 2026-07-27 while the pre-flight
+        # (which reads files directly) reported the new sha.
+        _root = tmp_root.replace("\\", "/").rstrip("/")
+        for _name, _mod in list(_sys.modules.items()):
+            _mod_file = (getattr(_mod, "__file__", None) or "").replace("\\", "/")
+            if (any(_name == p or _name.startswith(p + ".") for p in stale_prefixes)
+                    or (_root and _mod_file.startswith(_root))):
                 del _sys.modules[_name]
         # The directory listing cached by Python's FileFinder predates the
         # re-copy; without this a freshly-copied file can still be invisible.
