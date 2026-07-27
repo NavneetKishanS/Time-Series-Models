@@ -199,26 +199,144 @@ print("\n" + "="*60)
 print("CRITERION 1 (mandatory): new-feature sensitivity on real data")
 print("="*60)
 
+# Probed over MANY sequences, not one. The original single-sequence version
+# (val_sequences[0]) with an `or 1.0` fallback silently degenerated when that
+# one scan happened to carry TR=0: the "3x perturbation" became 0 -> 3.0 raw,
+# i.e. 0 -> 0.003 after conditioning_scale, which cannot move any prediction.
+# Sequences are also filtered to those with a genuinely non-zero value, so a
+# null result means "the model ignores this feature", not "we fed it nothing".
+PROBE_N = int(os.environ.get('PROBE_N', 80))
+
+
+def _probe_delta(seqs, make_a, make_b):
+    """Mean/max |prediction delta| between two mutations of the same sequences."""
+    deltas = []
+    for _s in seqs:
+        _pa = _predict_one(new_model, make_a(_s), extra_features=EXAMINATION_SEQPARAM_FEATURES)
+        _pb = _predict_one(new_model, make_b(_s), extra_features=EXAMINATION_SEQPARAM_FEATURES)
+        if _pa is None or _pb is None:
+            continue
+        deltas.append(abs(_pa - _pb))
+    if not deltas:
+        return 0.0, 0.0, 0
+    return float(np.mean(deltas)), float(np.max(deltas)), len(deltas)
+
+
+def _scale_sut(factor):
+    """Mutation that multiplies every SUT feature by `factor`."""
+    def _mutate(seq):
+        cond = dict(seq.get('conditioning', {}))
+        for name in EXAMINATION_SEQPARAM_FEATURES:
+            cond[name] = float(cond.get(name, 0.0) or 0.0) * factor
+        return {**seq, 'conditioning': cond}
+    return _mutate
+
+
+def _force(**overrides):
+    """Mutation that overrides top-level categorical conditioning keys."""
+    return lambda seq: {**seq, **overrides}
+
+
 if not EXAMINATION_SEQPARAM_FEATURES:
     print("  SKIPPED — EXAMINATION_SEQPARAM_FEATURES is still empty (placeholder). "
           "Run sut_parameter_discovery.py and retrain before this criterion is meaningful.")
     criterion_1_pass = None
 else:
-    _probe_seq = val_sequences[0]
-    _cond_a = dict(_probe_seq['conditioning'])
-    _cond_b = dict(_probe_seq['conditioning'])
-    for name in EXAMINATION_SEQPARAM_FEATURES:
-        base_val = _cond_a.get(name, 0.0) or 1.0
-        _cond_b[name] = base_val * 3.0  # perturb by 3x
-    _seq_a = {**_probe_seq, 'conditioning': _cond_a}
-    _seq_b = {**_probe_seq, 'conditioning': _cond_b}
-    pred_a = _predict_one(new_model, _seq_a, extra_features=EXAMINATION_SEQPARAM_FEATURES)
-    pred_b = _predict_one(new_model, _seq_b, extra_features=EXAMINATION_SEQPARAM_FEATURES)
-    moved = abs(pred_a - pred_b)
-    criterion_1_pass = moved > 0.5  # half a second — well above float noise
-    print(f"  Perturbing {EXAMINATION_SEQPARAM_FEATURES} 3x moved the prediction by {moved:.2f}s "
-          f"({pred_a:.1f}s -> {pred_b:.1f}s)")
-    print(f"  {'PASS' if criterion_1_pass else 'FAIL — STOP, do not trust criteria below'}")
+    _nonzero = [
+        s for s in val_sequences
+        if any(float(s.get('conditioning', {}).get(n, 0) or 0) > 0
+               for n in EXAMINATION_SEQPARAM_FEATURES)
+    ]
+    print(f"  Held-out sequences with a non-zero {EXAMINATION_SEQPARAM_FEATURES}: "
+          f"{len(_nonzero):,}/{len(val_sequences):,}")
+    if not _nonzero:
+        print("  FAIL — no held-out sequence carries a non-zero value. The features never "
+              "reached the pkl; fix step 03 before reading anything below.")
+        criterion_1_pass = False
+    else:
+        _sut_mean, _sut_max, _sut_n = _probe_delta(
+            _nonzero[:PROBE_N], _scale_sut(1.0), _scale_sut(3.0)
+        )
+        criterion_1_pass = _sut_mean > 0.5  # half a second — well above float noise
+        print(f"  Perturbing {EXAMINATION_SEQPARAM_FEATURES} 3x over {_sut_n} sequences moved "
+              f"the prediction by mean {_sut_mean:.3f}s (max {_sut_max:.3f}s)")
+        print(f"  {'PASS' if criterion_1_pass else 'FAIL — STOP, do not trust criteria below'}")
+
+# COMMAND ----------
+
+# =============================================================================
+# CRITERION 1b — IS THE CONDITIONING TOKEN ALIVE AT ALL?
+#
+# Criterion 1 failing does not by itself mean the SUT features are useless. It
+# could equally mean the duration head cannot see the conditioning token that
+# carries them. Those two have completely different remedies, so distinguish
+# them here before spending a retrain on either.
+#
+# In estimate_durations(), sequence_type reaches the duration encoder TWICE:
+# through the conditioning token AND through duration_seq_type_bias, which is
+# added to every token position. body_region, serial_idx, trigger_mode, TR and
+# num_slices reach it ONLY through the single conditioning token at position 0.
+#
+# So sequence_type is the positive control. If it moves the prediction hard
+# while body_region — which has a 2.3x real duration spread (ABDOMEN ~63s vs
+# SPINE ~144s) — does not, the conditioning token is effectively dead to the
+# duration head, and no amount of SUT feature engineering will help until that
+# is fixed.
+# =============================================================================
+
+print("\n" + "="*60)
+print("CRITERION 1b: which conditioning channels move the duration head?")
+print("="*60)
+
+_probe_seqs = val_sequences[:PROBE_N]
+_channel_probes = [
+    ("sequence_type (scout vs space)",
+     _force(sequence_type=SEQUENCE_TYPE_VOCAB['scout']),
+     _force(sequence_type=SEQUENCE_TYPE_VOCAB['space']),
+     "per-position bias + cond token  <- POSITIVE CONTROL"),
+    ("body_region (ABDOMEN vs SPINE)",
+     _force(body_region=BODY_REGION_TO_ID['ABDOMEN']),
+     _force(body_region=BODY_REGION_TO_ID['SPINE']),
+     "conditioning token only"),
+    ("serial_idx (0 vs 1)",
+     _force(serial_idx=0), _force(serial_idx=1),
+     "conditioning token only"),
+]
+if EXAMINATION_SEQPARAM_FEATURES:
+    _channel_probes.append((
+        f"{'+'.join(EXAMINATION_SEQPARAM_FEATURES)} (1x vs 3x)",
+        _scale_sut(1.0), _scale_sut(3.0),
+        "conditioning token only",
+    ))
+
+_channel_results = {}
+for _label, _mk_a, _mk_b, _path in _channel_probes:
+    _mean_d, _max_d, _n = _probe_delta(_probe_seqs, _mk_a, _mk_b)
+    _channel_results[_label] = _mean_d
+    print(f"  {_label:<38} mean|delta|={_mean_d:>8.3f}s  max={_max_d:>8.3f}s  ({_path})")
+
+_control_label = _channel_probes[0][0]
+_control = _channel_results.get(_control_label, 0.0)
+_cond_only = [v for k, v in _channel_results.items() if k != _control_label]
+
+print()
+if _control < 1.0:
+    print("  INCONCLUSIVE — even the positive control barely moved. The duration head is "
+          "not responding to ANY conditioning; investigate the checkpoint itself.")
+elif _cond_only and max(_cond_only) < 1.0:
+    print("  >> CONDITIONING TOKEN IS DEAD. sequence_type moves the duration head only "
+          "because duration_seq_type_bias injects it at every token position; every "
+          "channel that arrives solely via the conditioning token moves it by <1s.")
+    print("     body_region alone has a ~2.3x real duration spread, so this is a model "
+          "defect, not a property of the data.")
+    print("     REMEDY: inject the conditioning token per-position into the duration "
+          "encoder, mirroring duration_seq_type_bias (zero-init keeps existing "
+          "checkpoints loadable). That unblocks body_region, serial_idx AND the SUT "
+          "features together — retraining for the SUT features alone would not fix it.")
+else:
+    print("  Conditioning token IS live — at least one cond-token-only channel moves the "
+          "duration head. A null result for the SUT features is then about those "
+          "features, not about the architecture.")
 
 # COMMAND ----------
 
@@ -356,6 +474,19 @@ print("VERDICT SUMMARY")
 print("="*60)
 if old_model is None:
     print(f"  Baseline: SKIPPED ({baseline_status}) — criteria below are new-model-only")
+
+if _channel_results:
+    _cond_only_max = max(
+        (v for k, v in _channel_results.items() if k != _control_label), default=0.0
+    )
+    if _control >= 1.0 and _cond_only_max < 1.0:
+        print("  Criterion 1b (conditioning token): DEAD — only sequence_type reaches the "
+              "duration head. Fix the per-position injection before retraining for features.")
+    elif _control < 1.0:
+        print("  Criterion 1b (conditioning token): INCONCLUSIVE — positive control did not move.")
+    else:
+        print(f"  Criterion 1b (conditioning token): LIVE — best cond-token-only channel "
+              f"moves {_cond_only_max:.2f}s")
 
 if criterion_1_pass is None:
     print("  Criterion 1 (sensitivity): SKIPPED — no real SUT features trained yet")
