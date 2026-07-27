@@ -291,6 +291,7 @@ EXAMINATION_DURATION_SCALE = EXAMINATION_TRAINING_CONFIG['duration_scale']  # 60
 from AlternatingPipeline.models.exchange_model    import create_exchange_model
 from AlternatingPipeline.models.examination_model import create_examination_model
 from AlternatingPipeline.models.orchestration_model import create_orchestration_model
+from AlternatingPipeline.models.checkpoint_compat import load_checkpoint_lenient
 from AlternatingPipeline.data.orchestration_preprocessing import (
     extract_orchestration_samples, build_demographic_distributions,
     _compute_scanner_stats,
@@ -332,21 +333,27 @@ customer_schedules = data['customer_schedules']
 print(f"Customers: {list(customer_schedules.keys())}")
 
 # --- load exchange model ---
+# load_checkpoint_lenient tolerates params added/removed since training, but
+# refuses a checkpoint whose parameter SHAPES differ — that means a different
+# architecture wrote it, and `strict=False` cannot absorb it either (PyTorch
+# raises on size mismatch regardless of `strict`). Failing here with a named
+# diagnosis beats generating from a half-initialised model.
 exchange_model = create_exchange_model(EXCHANGE_MODEL_CONFIG).to(device)
-exchange_model.load_state_dict(
-    torch.load(f"{MODELS_DIR}/exchange/exchange_model_best.pt", map_location=device)
+load_checkpoint_lenient(
+    exchange_model,
+    torch.load(f"{MODELS_DIR}/exchange/exchange_model_best.pt", map_location=device),
+    label="exchange checkpoint",
 )
 exchange_model.eval()
 print("Exchange model loaded.")
 
 # --- load examination model ---
 examination_model = create_examination_model(EXAMINATION_MODEL_CONFIG).to(device)
-_exam_ckpt = torch.load(f"{MODELS_DIR}/examination/examination_model_best.pt", map_location=device)
-_missing, _unexpected = examination_model.load_state_dict(_exam_ckpt, strict=False)
-if _missing:
-    print(f"  Examination model: {len(_missing)} new params not in checkpoint (zero-init): {_missing[:4]}")
-if _unexpected:
-    print(f"  Examination model: {len(_unexpected)} unexpected keys ignored: {_unexpected[:4]}")
+load_checkpoint_lenient(
+    examination_model,
+    torch.load(f"{MODELS_DIR}/examination/examination_model_best.pt", map_location=device),
+    label="examination checkpoint",
+)
 examination_model.eval()
 print("Examination model loaded.")
 
@@ -385,7 +392,7 @@ orch_ckpt = torch.load(f"{MODELS_DIR}/orchestration/orchestration_model_best.pt"
 orch_config = dict(ORCHESTRATION_MODEL_CONFIG)
 orch_config['num_scanners'] = orch_ckpt['scanner_embedding.weight'].shape[0]
 orchestration_model = create_orchestration_model(orch_config).to(device)
-orchestration_model.load_state_dict(orch_ckpt)
+load_checkpoint_lenient(orchestration_model, orch_ckpt, label="orchestration checkpoint")
 orchestration_model.eval()
 print("Orchestration model loaded.")
 
