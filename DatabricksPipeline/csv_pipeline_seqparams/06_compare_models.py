@@ -27,9 +27,21 @@ from collections import defaultdict
 import numpy as np
 import torch
 
-_AP_PATH = "/tmp/alternating_pipeline_src"
+_AP_PATH = "/tmp/alternating_pipeline_src"  # matches 04_train_models.py's TMP_ROOT
 if _AP_PATH not in sys.path:
     sys.path.insert(0, _AP_PATH)
+
+# This notebook does not copy the source itself — 04_train_models.py does, and
+# /tmp survives the whole cluster lifetime. Fail with instructions if that copy
+# predates a module this notebook needs. (assert_pipeline_source_fresh comes
+# from `%run ./config` above, which is always loaded fresh from the Workspace.)
+assert_pipeline_source_fresh(_AP_PATH, required_modules=[
+    "AlternatingPipeline.config",
+    "AlternatingPipeline.models.examination_model",
+    "AlternatingPipeline.models.checkpoint_compat",
+    "AlternatingPipeline.training.utils",
+    "AlternatingPipeline.validation.metrics",
+])
 
 from AlternatingPipeline.config import (
     EXAMINATION_MODEL_CONFIG, EXAMINATION_TRAINING_CONFIG,

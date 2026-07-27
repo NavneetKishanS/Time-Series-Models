@@ -258,6 +258,72 @@ assert len(EXAMINATION_SEQPARAM_FEATURES) == len(EXAMINATION_SEQPARAM_SCALE), (
 )
 
 # ============================================================================
+# STALE-SOURCE GUARD for the notebooks that IMPORT AlternatingPipeline from a
+# /tmp copy rather than copying it themselves.
+#
+# 04_train_models.py copies the repo to TMP_ROOT via _api_copy_py.
+# 05_feature_analysis.py and 06_compare_models.py do NOT — they just
+# sys.path.insert that directory and import. /tmp survives for the entire life
+# of the cluster, so a copy made before a `git pull` stays stale indefinitely:
+# any module ADDED to the repo since that copy fails to import, with a bare
+# ModuleNotFoundError that points at the module rather than at the stale copy.
+# (Observed 2026-07-27: checkpoint_compat.py, added after the 07-24 training
+# run, was missing from a TMP_ROOT copied during that run on a cluster that had
+# been up ever since.)
+#
+# Lives here because config.py is `%run`-loaded straight from the Workspace by
+# all three notebooks, so it is always current — unlike anything under
+# TMP_ROOT, which is exactly what cannot be trusted at this point.
+# ============================================================================
+
+def assert_pipeline_source_fresh(
+    tmp_root,
+    required_modules=(),
+    purge=True,
+    stale_prefixes=("AlternatingPipeline", "csv_pipeline_seqparams"),
+):
+    """Verify TMP_ROOT actually has the modules this notebook needs.
+
+    Also evicts stale imports of them from the long-lived kernel, by NAME
+    PREFIX — these are namespace packages whose top-level module object has
+    `__file__ is None`, so a `__file__`-based purge silently misses it (see
+    04_train_models.py for the full story).
+
+    Raises RuntimeError naming the missing modules and the exact steps to fix
+    it, instead of letting the import fail with an unrelated-looking error.
+    """
+    import importlib
+    import os as _os
+    import sys as _sys
+
+    if purge:
+        for _name in list(_sys.modules):
+            if any(_name == p or _name.startswith(p + ".") for p in stale_prefixes):
+                del _sys.modules[_name]
+        # The directory listing cached by Python's FileFinder predates the
+        # re-copy; without this a freshly-copied file can still be invisible.
+        importlib.invalidate_caches()
+
+    missing = [
+        dotted for dotted in required_modules
+        if not _os.path.isfile(_os.path.join(tmp_root, *dotted.split(".")) + ".py")
+    ]
+    if missing:
+        raise RuntimeError(
+            f"Stale source copy at {tmp_root} — missing: {', '.join(missing)}.\n"
+            f"This directory was copied by 04_train_models.py before those modules "
+            f"existed, and /tmp persists for the whole cluster lifetime, so it never "
+            f"refreshes on its own.\n"
+            f"Fix:\n"
+            f"  1. Pull the Databricks Repos clone so it is on the latest commit.\n"
+            f"  2. Re-run 04_train_models.py CELLS 1-2 ONLY (the _api_copy_py cell) — "
+            f"do NOT run the training cell.\n"
+            f"  3. Re-run this notebook."
+        )
+    return True
+
+
+# ============================================================================
 # MODEL CONFIG ASSEMBLY — the single source of truth for combining
 # AlternatingPipeline.config.EXAMINATION_MODEL_CONFIG with this pipeline's
 # SUT additions. 04_train_models.py, 05_feature_analysis.py, and

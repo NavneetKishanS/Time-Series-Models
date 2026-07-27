@@ -133,6 +133,14 @@ _AP_PATH = "/tmp/alternating_pipeline_src"  # matches 04_train_models.py's TMP_R
 if _AP_PATH not in sys.path:
     sys.path.insert(0, _AP_PATH)
 
+# See 06_compare_models.py — this notebook relies on 04's copy, which /tmp keeps
+# alive across the whole cluster lifetime and never refreshes on its own.
+assert_pipeline_source_fresh(_AP_PATH, required_modules=[
+    "AlternatingPipeline.config",
+    "AlternatingPipeline.models.examination_model",
+    "AlternatingPipeline.training.utils",
+])
+
 from AlternatingPipeline.config import (
     EXAMINATION_MODEL_CONFIG, EXAMINATION_TRAINING_CONFIG, START_TOKEN_ID,
 )
