@@ -145,6 +145,7 @@ from AlternatingPipeline.config import (
     EXAMINATION_MODEL_CONFIG, EXAMINATION_TRAINING_CONFIG, START_TOKEN_ID,
 )
 from AlternatingPipeline.models.examination_model import create_examination_model
+from AlternatingPipeline.models.checkpoint_compat import load_checkpoint_lenient
 from AlternatingPipeline.training.utils import temporal_split, build_conditioning_tensor
 
 CHECKPOINT_PATH = f"{MODELS_DIR}/examination/examination_model_best.pt"
@@ -157,7 +158,14 @@ else:
     EXAMINATION_MODEL_CONFIG_SEQPARAMS = build_seqparams_model_config(EXAMINATION_MODEL_CONFIG)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = create_examination_model(EXAMINATION_MODEL_CONFIG_SEQPARAMS)
-    model.load_state_dict(torch.load(CHECKPOINT_PATH, map_location=device))
+    # Lenient: tolerates params added since the checkpoint was trained (e.g.
+    # duration_cond_bias, which is zero-initialised and therefore a no-op),
+    # while still refusing a checkpoint from a different architecture.
+    load_checkpoint_lenient(
+        model,
+        torch.load(CHECKPOINT_PATH, map_location=device),
+        label=f"examination checkpoint ({CHECKPOINT_PATH})",
+    )
     model = model.to(device)
     model.eval()
 

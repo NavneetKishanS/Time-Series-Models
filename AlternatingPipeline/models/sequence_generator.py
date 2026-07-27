@@ -208,15 +208,51 @@ class SequenceGeneratorModel(nn.Module):
 
         self.duration_head = SinglePassDurationHead(self.d_model, hidden_dim=128, dropout=dropout)
 
+        # Per-position projection of the conditioning token into the duration
+        # encoder. The conditioning token is prepended at position 0 and the
+        # duration head reads only positions 1..N, so conditioning can reach it
+        # ONLY through attention back to that one position — and measurement
+        # showed it does not. On the 2026-07-24 examination checkpoint
+        # (06_compare_models.py Criterion 1b), perturbing each channel moved the
+        # duration head by:
+        #
+        #     sequence_type (scout vs space)    249.475s   <- per-position bias
+        #     body_region   (ABDOMEN vs SPINE)    0.000s   <- cond token only
+        #     serial_idx    (0 vs 1)              0.001s   <- cond token only
+        #     TR+num_slices (1x vs 3x)            0.002s   <- cond token only
+        #
+        # sequence_type is the only channel with a per-position path
+        # (duration_seq_type_bias) and the only one the head responds to.
+        # body_region has a ~2.3x real duration spread (ABDOMEN ~63s vs SPINE
+        # ~144s), so a 0.000s response is a model defect, not a property of the
+        # data — the head had learned to ignore position 0 entirely once the
+        # easier per-position route existed for the dominant feature.
+        #
+        # ZERO-INITIALISED, so this is a strict no-op until trained: every
+        # existing checkpoint loads (the key is simply missing) and predicts
+        # exactly as it did before. Gradients still flow — d(Wx)/dW = x — so it
+        # learns from the first step, the same way duration_seq_type_bias did.
+        # Created unconditionally: the exchange model has the identical dead-
+        # conditioning shape (Stage 3b's "no variability across customers"), and
+        # zero-init means adding it there costs nothing until that model is
+        # retrained too.
+        self.duration_cond_bias = nn.Linear(self.d_model, self.d_model)
+
         self._init_weights()
+
+    # Parameters that must start at exactly zero so the paths they feed are
+    # no-ops for checkpoints trained before they existed.
+    _ZERO_INIT_PARAMS = ('duration_seq_type_bias', 'duration_cond_bias')
 
     def _init_weights(self):
         for name, p in self.named_parameters():
-            if p.dim() > 1:
-                if 'duration_seq_type_bias' in name:
-                    nn.init.zeros_(p)
-                else:
-                    nn.init.xavier_uniform_(p)
+            if any(zero_name in name for zero_name in self._ZERO_INIT_PARAMS):
+                # Covers bias vectors too: nn.Linear's default init is uniform,
+                # NOT zero, so a dim>1 check alone would leave the bias live and
+                # silently shift every pre-existing checkpoint's predictions.
+                nn.init.zeros_(p)
+            elif p.dim() > 1:
+                nn.init.xavier_uniform_(p)
 
     @staticmethod
     def _force_token_subset(logits, row_idx, token_ids):
@@ -402,6 +438,15 @@ class SequenceGeneratorModel(nn.Module):
             if seq_t is not None:
                 st_bias = self.duration_seq_type_bias(seq_t)  # [batch, d_model]
                 tok_emb = tok_emb + st_bias.unsqueeze(1)      # broadcast over seq dim
+
+        # Inject the FULL conditioning at every token position, for the same
+        # reason and by the same mechanism. Position 0 below still carries the
+        # conditioning token; this adds a direct route that does not depend on
+        # the encoder choosing to attend back to it. Zero-initialised, so this
+        # contributes exactly nothing until trained — see __init__ for the
+        # measurements that motivated it.
+        if hasattr(self, 'duration_cond_bias'):
+            tok_emb = tok_emb + self.duration_cond_bias(cond_token)  # broadcast over seq dim
 
         # Prepend conditioning token
         combined = torch.cat([cond_token, tok_emb], dim=1)  # [batch, 1+seq_len, d_model]

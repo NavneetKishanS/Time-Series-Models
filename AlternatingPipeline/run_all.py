@@ -50,6 +50,7 @@ def _load_models(device):
     import torch
     from models.exchange_model import create_exchange_model
     from models.examination_model import create_examination_model
+    from models.checkpoint_compat import load_checkpoint_lenient
 
     # Load Exchange Model
     print("Loading Exchange Model...")
@@ -59,7 +60,11 @@ def _load_models(device):
         exchange_path = os.path.join(MODEL_SAVE_DIR, 'exchange', 'exchange_model_final.pt')
 
     if os.path.exists(exchange_path):
-        exchange_model.load_state_dict(torch.load(exchange_path, map_location=device, weights_only=True))
+        load_checkpoint_lenient(
+            exchange_model,
+            torch.load(exchange_path, map_location=device, weights_only=True),
+            label='exchange checkpoint',
+        )
         print(f"  Loaded: {exchange_path}")
     else:
         raise FileNotFoundError(f"Exchange model not found at {exchange_path}")
@@ -72,7 +77,11 @@ def _load_models(device):
         examination_path = os.path.join(MODEL_SAVE_DIR, 'examination', 'examination_model_final.pt')
 
     if os.path.exists(examination_path):
-        examination_model.load_state_dict(torch.load(examination_path, map_location=device, weights_only=True))
+        load_checkpoint_lenient(
+            examination_model,
+            torch.load(examination_path, map_location=device, weights_only=True),
+            label='examination checkpoint',
+        )
         print(f"  Loaded: {examination_path}")
     else:
         raise FileNotFoundError(f"Examination model not found at {examination_path}")
@@ -101,7 +110,12 @@ def _load_orchestration_model(device):
         orch_path = os.path.join(MODEL_SAVE_DIR, 'orchestration', 'orchestration_model_final.pt')
 
     if os.path.exists(orch_path):
-        model.load_state_dict(torch.load(orch_path, map_location=device, weights_only=True))
+        from models.checkpoint_compat import load_checkpoint_lenient
+        load_checkpoint_lenient(
+            model,
+            torch.load(orch_path, map_location=device, weights_only=True),
+            label='orchestration checkpoint',
+        )
         print(f"  Loaded: {orch_path}")
     else:
         raise FileNotFoundError(f"Orchestration model not found at {orch_path}")
