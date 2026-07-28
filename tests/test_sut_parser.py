@@ -92,23 +92,54 @@ class ParseSutMessageTests(unittest.TestCase):
 
     def test_parses_tr_and_num_slices_from_haste_message(self):
         result = self.parse(_HASTE_MSG_1)
-        self.assertEqual(result, {'TR': '866', 'num_slices': '9'})
+        self.assertEqual(result, {
+            'TR': '866', 'num_slices': '9', 'ST': '8', 'TST': '9',
+            'averages': '1', 'concatenations': '1',
+            'phase_encoding_lines': '333', 'parallel_imaging_factor': '2',
+            'field_of_view': '300',
+        })
 
     def test_parses_different_values_from_a_second_haste_message(self):
         result = self.parse(_HASTE_MSG_2)
-        self.assertEqual(result, {'TR': '1000', 'num_slices': '15'})
+        self.assertEqual(result, {
+            'TR': '1000', 'num_slices': '15', 'ST': '15', 'TST': '17',
+            'averages': '1', 'concatenations': '1',
+            'phase_encoding_lines': '333', 'parallel_imaging_factor': '2',
+            'field_of_view': '300',
+        })
 
     def test_parses_tr_and_num_slices_from_a_different_sequence_type(self):
         # ep2d_diff carries a different field set entirely (DIFF, BV0, EF, ...)
-        # from haste — TR/SLC must still resolve correctly by name.
+        # from haste — every mapped key must still resolve by name.
         result = self.parse(_EP2D_DIFF_MSG)
-        self.assertEqual(result, {'TR': '4300', 'num_slices': '18'})
+        self.assertEqual(result, {
+            'TR': '4300', 'num_slices': '18', 'ST': '400', 'TST': '401',
+            'averages': '1', 'concatenations': '1',
+            'phase_encoding_lines': '80', 'parallel_imaging_factor': '2',
+            'field_of_view': '200',
+        })
+
+    def test_st_is_the_computed_acquisition_time_not_a_measurement(self):
+        """SLC x TR reproduces ST exactly, on both haste messages.
+
+        This is the evidence that ST is the protocol's NOMINAL time of
+        acquisition — computed from the parameters and therefore knowable
+        before the scan runs — rather than a measured elapsed time, which would
+        not land on the computed product to the second. It is the argument that
+        ST is not the SD58 leakage risk, so if this ever stops holding the
+        interpretation in SUT_FIELD_MAP needs revisiting before ST is promoted
+        into EXAMINATION_SEQPARAM_FEATURES.
+        """
+        for message in (_HASTE_MSG_1, _HASTE_MSG_2):
+            parsed = self.parse(message)
+            computed = int(parsed['num_slices']) * int(parsed['TR']) / 1000.0
+            self.assertAlmostEqual(computed, float(parsed['ST']), delta=0.25)
 
     def test_ignores_unmapped_tokens(self):
         result = self.parse(_HASTE_MSG_1)
-        self.assertNotIn('FOV', result)
         self.assertNotIn('MUID', result)
-        self.assertEqual(set(result), {'TR', 'num_slices'})
+        self.assertNotIn('SLT', result)   # slice THICKNESS, not slice count
+        self.assertNotIn('TE', result)
 
     def test_non_string_message_returns_empty_dict(self):
         self.assertEqual(self.parse(None), {})

@@ -27,6 +27,7 @@ from data.preprocessing import load_preprocessed_data
 from data.archive_duration_priors import load_examination_priors
 from data.examination_duration_calibration import calibrate_examination_durations
 from training.utils import temporal_split, build_conditioning_tensor, make_pad_collate
+from data.protocol_vocab import RARE_PROTOCOL_ID, protocol_id
 
 
 class ExaminationDataset(Dataset):
@@ -34,7 +35,8 @@ class ExaminationDataset(Dataset):
 
     def __init__(self, examination_sequences, max_seq_len=None, augment=False,
                  oversample=1, duration_scale=1.0, abort_oversample=1,
-                 extra_conditioning_features=None, leakage_denylist=None):
+                 extra_conditioning_features=None, leakage_denylist=None,
+                 protocol_vocab=None):
         if max_seq_len is None:
             max_seq_len = MAX_SEQ_LEN
 
@@ -59,6 +61,15 @@ class ExaminationDataset(Dataset):
             # SUT trigger/gating mode — default to 0 ('none'/first class) for
             # pkls built before this field existed (see use_sut_conditioning).
             trigger_mode = int(seq.get('trigger_mode', 0))
+            # Protocol id. The pkl stores only the raw name; ids come from a
+            # vocabulary frozen at train time and saved beside the checkpoint,
+            # so an embedding row always means the same protocol. No vocab (or
+            # a pkl predating protocol_name) -> RARE_PROTOCOL_ID for every row,
+            # which is exactly the pre-protocol behaviour.
+            protocol = (
+                protocol_id(seq.get('protocol_name'), protocol_vocab)
+                if protocol_vocab else RARE_PROTOCOL_ID
+            )
             tokens = seq['sequence']
             durations = seq.get('durations', [0.0] * len(tokens))
 
@@ -97,6 +108,7 @@ class ExaminationDataset(Dataset):
                 'sequence_type': sequence_type,
                 'serial_idx': serial_idx,
                 'trigger_mode': trigger_mode,
+                'protocol': protocol,
                 'input_seq': torch.tensor(input_seq, dtype=torch.long),
                 'target_seq': torch.tensor(target_seq, dtype=torch.long),
                 'target_durations': target_durations,  # kept as list for augmentation
@@ -139,6 +151,7 @@ class ExaminationDataset(Dataset):
             item['target_seq'],
             torch.tensor(durations, dtype=torch.float32),
             torch.tensor(item['trigger_mode'], dtype=torch.long),
+            torch.tensor(item['protocol'], dtype=torch.long),
         )
 
 
@@ -180,7 +193,8 @@ def compute_token_class_weights(sequences, vocab_size=VOCAB_SIZE, smoothing=0.5)
 
 def train_examination_model(data_path=None, config=None, training_config=None,
                             save_dir=None, verbose=True,
-                            extra_conditioning_features=None, leakage_denylist=None):
+                            extra_conditioning_features=None, leakage_denylist=None,
+                            protocol_vocab=None):
     """
     Train the Examination Model.
 
@@ -307,12 +321,14 @@ def train_examination_model(data_path=None, config=None, training_config=None,
         duration_scale=duration_scale, abort_oversample=abort_oversample,
         extra_conditioning_features=extra_conditioning_features,
         leakage_denylist=leakage_denylist,
+        protocol_vocab=protocol_vocab,
     )
     val_dataset = ExaminationDataset(
         val_sequences, augment=False, oversample=1,
         duration_scale=duration_scale, abort_oversample=1,
         extra_conditioning_features=extra_conditioning_features,
         leakage_denylist=leakage_denylist,
+        protocol_vocab=protocol_vocab,
     )
 
     if verbose:
@@ -322,10 +338,12 @@ def train_examination_model(data_path=None, config=None, training_config=None,
 
     # Trim each batch to its longest real sequence — the tuple layout is
     # (conditioning, body_region, sequence_type, serial_idx, input_seq,
-    # target_seq, durations, trigger_mode); positions 4/5/6 are the per-token
-    # fields, measured off the PAD-terminated input_seq at position 4.
-    # trigger_mode (position 7) is per-sequence like body_region/serial_idx,
-    # so it rides along untrimmed. This is the dominant CPU speedup:
+    # target_seq, durations, trigger_mode, protocol); positions 4/5/6 are the
+    # per-token fields, measured off the PAD-terminated input_seq at position 4.
+    # trigger_mode (7) and protocol (8) are per-sequence like body_region/
+    # serial_idx, so they ride along untrimmed — which is why protocol was
+    # appended at the END rather than inserted next to the other categoricals.
+    # This is the dominant CPU speedup:
     # examination scans are short but pad to 128, and attention is O(L^2).
     # See make_pad_collate.
     collate = make_pad_collate(seq_indices=(4, 5, 6), length_index=4,
@@ -386,7 +404,7 @@ def train_examination_model(data_path=None, config=None, training_config=None,
         train_loss = 0.0
         train_dur_loss = 0.0
 
-        for conditioning, body_region, sequence_type, serial_idx, input_seq, target_seq, target_durations, trigger_mode in tqdm(
+        for conditioning, body_region, sequence_type, serial_idx, input_seq, target_seq, target_durations, trigger_mode, protocol in tqdm(
             train_loader, disable=not verbose, desc=f"Epoch {epoch+1}"
         ):
             conditioning = conditioning.to(device)
@@ -397,13 +415,15 @@ def train_examination_model(data_path=None, config=None, training_config=None,
             target_seq = target_seq.to(device)
             target_durations = target_durations.to(device)
             trigger_mode = trigger_mode.to(device)
+            protocol = protocol.to(device)
 
             optimizer.zero_grad()
 
             logits, duration_mu, duration_sigma = model(
                 conditioning,
                 {'body_region': body_region, 'sequence_type': sequence_type,
-                 'serial_idx': serial_idx, 'trigger_mode': trigger_mode},
+                 'serial_idx': serial_idx, 'trigger_mode': trigger_mode,
+                 'protocol': protocol},
                 input_seq,
             )
 
@@ -445,7 +465,7 @@ def train_examination_model(data_path=None, config=None, training_config=None,
         val_loss = 0.0
 
         with torch.no_grad():
-            for conditioning, body_region, sequence_type, serial_idx, input_seq, target_seq, target_durations, trigger_mode in val_loader:
+            for conditioning, body_region, sequence_type, serial_idx, input_seq, target_seq, target_durations, trigger_mode, protocol in val_loader:
                 conditioning = conditioning.to(device)
                 body_region = body_region.to(device)
                 sequence_type = sequence_type.to(device)
@@ -454,11 +474,13 @@ def train_examination_model(data_path=None, config=None, training_config=None,
                 target_seq = target_seq.to(device)
                 target_durations = target_durations.to(device)
                 trigger_mode = trigger_mode.to(device)
+                protocol = protocol.to(device)
 
                 logits, duration_mu, duration_sigma = model(
                     conditioning,
                     {'body_region': body_region, 'sequence_type': sequence_type,
-                     'serial_idx': serial_idx, 'trigger_mode': trigger_mode},
+                     'serial_idx': serial_idx, 'trigger_mode': trigger_mode,
+                     'protocol': protocol},
                     input_seq,
                 )
                 token_loss = model.compute_loss(logits, target_seq)
@@ -531,7 +553,7 @@ def train_examination_model(data_path=None, config=None, training_config=None,
             print("\nPost-train duration probe (unpadded input, best checkpoint):")
         with torch.no_grad():
             for _st, _seqs in sorted(_probe_by_type.items()):
-                _p, _t = [], []
+                _p, _t, _s_vals = [], [], []
                 for _s in _seqs[:25]:
                     _tokens = _s['sequence'][:model.max_seq_len - 1]
                     if not _tokens:
@@ -545,11 +567,16 @@ def train_examination_model(data_path=None, config=None, training_config=None,
                     _info = {'body_region': torch.tensor([_s['body_region']], device=device),
                              'sequence_type': torch.tensor([_st], device=device),
                              'serial_idx': torch.tensor([int(_s.get('serial_idx', 0))], device=device),
-                             'trigger_mode': torch.tensor([int(_s.get('trigger_mode', 0))], device=device)}
-                    _mu, _ = model.estimate_durations(_inp, _cond, _info)
+                             'trigger_mode': torch.tensor([int(_s.get('trigger_mode', 0))], device=device),
+                             'protocol': torch.tensor([
+                                 protocol_id(_s.get('protocol_name'), protocol_vocab)
+                                 if protocol_vocab else RARE_PROTOCOL_ID
+                             ], device=device)}
+                    _mu, _sg = model.estimate_durations(_inp, _cond, _info)
                     _m = _mu[0, len(_tokens) - 1].item()
                     _pred_sec = (math.expm1(_m) if model.duration_mode == 'log' else _m) * duration_scale
                     _p.append(_pred_sec)
+                    _s_vals.append(_sg[0, len(_tokens) - 1].item())
                     _t.append(sum(max(0.0, d) for d in _s.get('durations', [])))
                 if _p:
                     _name = ID_TO_SEQUENCE_TYPE.get(_st, str(_st))
@@ -558,11 +585,25 @@ def train_examination_model(data_path=None, config=None, training_config=None,
                         'n': len(_p),
                         'predicted_s': round(sum(_p) / len(_p), 2),
                         'target_s': round(sum(_t) / len(_t), 2),
+                        # Predicted sigma in log space. Generation samples
+                        # expm1(Normal(mu, sigma)), so the rendered MEAN is
+                        # inflated over the median by exp(sigma^2/2) — sigma is
+                        # what decides whether synthetic durations match reality
+                        # in spread, and nothing has ever checked it. The 06-23
+                        # model sat at ~0.47 (rendered mean 105.2s against a real
+                        # 105.2s); the 07-24 one produced a rendered mean of
+                        # 274.4s, implying ~1.8. Real per-type log-sd is 0.05-0.72.
+                        'predicted_sigma': round(sum(_s_vals) / len(_s_vals), 4),
+                        'mean_median_ratio': round(
+                            math.exp((sum(_s_vals) / len(_s_vals)) ** 2 / 2), 2
+                        ),
                     })
                     if verbose:
                         print(f"    {_name:<8} n={len(_p):>3}  "
                               f"predicted={probe_rows[-1]['predicted_s']:>7.1f}s"
-                              f"  target={probe_rows[-1]['target_s']:>7.1f}s")
+                              f"  target={probe_rows[-1]['target_s']:>7.1f}s"
+                              f"  sigma={probe_rows[-1]['predicted_sigma']:>6.3f}"
+                              f"  (mean/median x{probe_rows[-1]['mean_median_ratio']:.2f})")
 
     probe = {'rows': probe_rows}
     if len(probe_rows) >= 2:

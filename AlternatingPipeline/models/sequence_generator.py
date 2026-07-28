@@ -106,6 +106,48 @@ class SequenceGeneratorModel(nn.Module):
                     config['num_sequence_types'], self.d_model
                 )
 
+                # PROTOCOL — the operator-selected protocol name, the strongest
+                # duration signal available and the one this model has never
+                # been shown. Measured held out on the real exam CSVs (group
+                # means fitted on 80%, scored on 20%):
+                #
+                #     sequence_type (12 values)    R2 31.2%   MAE 53.5s
+                #     Sequence raw string (44)     R2 42.2%   MAE 46.6s
+                #     protocol identity (~1,590)   R2 82.0%   MAE 17.2s
+                #     (this model, for reference)             MAE 50.3s
+                #
+                # A per-protocol lookup beats the trained model threefold. The
+                # variance was never missing — the 76%-unexplained figure came
+                # from decomposing by the coarse sequence_type bucket, which is
+                # all the model could see. Within a protocol, duration is close
+                # to deterministic (residual sd 25.7s, median CV 0.134).
+                #
+                # It gets BOTH paths deliberately: the conditioning embedding
+                # for the token decoder, and a per-position bias for the
+                # duration encoder. sequence_type is the only channel this
+                # model has ever responded to and the per-position bias is why;
+                # everything riding the conditioning token alone measures
+                # ~0.000s under perturbation. Optional, so exchange and any
+                # config predating this are untouched.
+                # Deliberately ADDED to the projected conditioning rather than
+                # concatenated onto its input: concatenation widens
+                # conditioning_projection, and PyTorch refuses a shape-mismatched
+                # checkpoint no matter what `strict` says, so every existing
+                # examination checkpoint would stop loading the moment this
+                # landed — steps 05/06/07 would all break for the length of a
+                # retrain. protocol_cond_proj is zero-initialised, so this is a
+                # strict no-op until trained while gradients still flow
+                # (d(Wx)/dW = x), the same contract duration_cond_bias uses.
+                num_protocols = config.get('num_protocols')
+                if num_protocols:
+                    self.protocol_embedding = nn.Embedding(
+                        num_protocols, exam_emb_dim
+                    )
+                    self.protocol_cond_proj = nn.Linear(exam_emb_dim, self.d_model)
+                    self.duration_protocol_bias = nn.Embedding(
+                        num_protocols, self.d_model
+                    )
+
             if self.use_sut_conditioning:
                 # Trigger/gating mode (ECG, peripheral, none, ...) — small
                 # categorical embedding, same sizing convention as the exam
@@ -242,7 +284,10 @@ class SequenceGeneratorModel(nn.Module):
 
     # Parameters that must start at exactly zero so the paths they feed are
     # no-ops for checkpoints trained before they existed.
-    _ZERO_INIT_PARAMS = ('duration_seq_type_bias', 'duration_cond_bias')
+    _ZERO_INIT_PARAMS = (
+        'duration_seq_type_bias', 'duration_cond_bias',
+        'duration_protocol_bias', 'protocol_cond_proj',
+    )
 
     def _init_weights(self):
         for name, p in self.named_parameters():
@@ -394,6 +439,21 @@ class SequenceGeneratorModel(nn.Module):
 
         combined = torch.cat(parts, dim=-1)
         cond_proj = self.conditioning_projection(combined)  # [batch, d_model]
+
+        # Protocol joins here rather than in `parts` so the projection's input
+        # width — and every existing checkpoint — stays valid. Absent key ->
+        # RARE_PROTOCOL_ID (0), the reserved bucket for protocols below the
+        # frequency floor and anything unseen at serve time.
+        if hasattr(self, 'protocol_embedding'):
+            proto_t = body_region_info.get('protocol')
+            if proto_t is None:
+                proto_t = torch.zeros(
+                    cond_proj.shape[0], dtype=torch.long, device=cond_proj.device
+                )
+            cond_proj = cond_proj + self.protocol_cond_proj(
+                self.protocol_embedding(proto_t)
+            )
+
         cond_seq = cond_proj.unsqueeze(1)  # [batch, 1, d_model]
         cond_encoded = self.pos_encoder(cond_seq)
         memory = self.conditioning_encoder(cond_encoded)  # [batch, 1, d_model]
@@ -438,6 +498,18 @@ class SequenceGeneratorModel(nn.Module):
             if seq_t is not None:
                 st_bias = self.duration_seq_type_bias(seq_t)  # [batch, d_model]
                 tok_emb = tok_emb + st_bias.unsqueeze(1)      # broadcast over seq dim
+
+        # Same mechanism for the protocol, which carries far more of the
+        # duration signal than the scan type does (82.0% of held-out variance
+        # vs 31.2%). Zero-initialised, so this is a strict no-op for any
+        # checkpoint trained before it existed.
+        if hasattr(self, 'duration_protocol_bias'):
+            proto_t = body_region_info.get('protocol')
+            if proto_t is None:
+                proto_t = torch.zeros(
+                    token_ids.shape[0], dtype=torch.long, device=token_ids.device
+                )
+            tok_emb = tok_emb + self.duration_protocol_bias(proto_t).unsqueeze(1)
 
         # Inject the FULL conditioning at every token position, for the same
         # reason and by the same mechanism. Position 0 below still carries the

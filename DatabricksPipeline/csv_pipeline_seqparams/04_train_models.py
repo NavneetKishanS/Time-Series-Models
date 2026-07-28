@@ -275,6 +275,92 @@ print("=" * 64)
 # COMMAND ----------
 
 # =============================================================================
+# PROTOCOL VOCABULARY + GO/NO-GO GATE
+# -----------------------------------------------------------------------------
+# The protocol name is the strongest duration signal available and the one this
+# model has never seen. Measured held out on the real exam CSVs: protocol
+# identity R2 82.0% / MAE 17.2s, against sequence_type's R2 31.2% / MAE 53.5s
+# and the trained model's own MAE 50.3s.
+#
+# THIS GATE EXISTS BECAUSE THOSE NUMBERS COME FROM A DIFFERENT QUANTITY. They
+# were measured on step 02's `duration` (mean 105.2s, sd 91.0s); the model
+# trains on this pkl's `total_duration` (mean 115.6s, sd 214.6s), built from
+# event timediffs and capped at MAX_EXAMINATION_DURATION. If the relationship
+# does not survive that change of definition, the honest finding is the
+# discrepancy between the two — and it is far cheaper to learn that here than
+# after a retrain.
+#
+# The vocabulary is frozen HERE, not in step 03, and written next to the
+# checkpoint: an embedding row must always mean the same protocol, so ids
+# cannot be free to shift when preprocessing is re-run.
+# =============================================================================
+
+import numpy as np
+
+from AlternatingPipeline.data.protocol_vocab import (
+    RARE_PROTOCOL_ID, build_protocol_vocab, heldout_group_r2, protocol_id,
+)
+
+PROTOCOL_MIN_COUNT = int(os.environ.get('PROTOCOL_MIN_COUNT', 3))
+PROTOCOL_GATE_MIN_R2 = float(os.environ.get('PROTOCOL_GATE_MIN_R2', 60.0))
+
+_exam_seqs = data['examination']
+_names = [s.get('protocol_name', '') for s in _exam_seqs]
+_named = sum(1 for n in _names if n)
+print("=" * 64)
+print(" PROTOCOL GATE")
+print("=" * 64)
+print(f"  sequences with a protocol name: {_named:,}/{len(_names):,} "
+      f"({100 * _named / max(1, len(_names)):.1f}%)")
+if not _named:
+    raise RuntimeError(
+        "No sequence carries 'protocol_name'. This pkl predates the protocol "
+        "work — re-run csv_pipeline_seqparams/03_build_preprocessed_pkl.py."
+    )
+
+PROTOCOL_VOCAB = build_protocol_vocab(_names, min_count=PROTOCOL_MIN_COUNT)
+NUM_PROTOCOLS = len(PROTOCOL_VOCAB) + 1          # +1 for RARE_PROTOCOL_ID
+_ids = np.array([protocol_id(n, PROTOCOL_VOCAB) for n in _names])
+_durations = np.array([float(s.get('total_duration', 0.0)) for s in _exam_seqs])
+_keep = _durations > 0
+
+print(f"  vocabulary: {len(PROTOCOL_VOCAB):,} protocols "
+      f"(min_count={PROTOCOL_MIN_COUNT}) + 1 rare bucket = {NUM_PROTOCOLS:,} rows")
+print(f"  rows falling to the rare bucket: "
+      f"{100 * (_ids == RARE_PROTOCOL_ID).mean():.1f}%")
+
+_p_r2, _p_mae, _p_cov = heldout_group_r2(_ids[_keep], _durations[_keep])
+_s_r2, _s_mae, _s_cov = heldout_group_r2(
+    np.array([int(s.get('sequence_type', 0)) for s in _exam_seqs])[_keep],
+    _durations[_keep],
+)
+print(f"\n  held-out variance of total_duration explained by a group-mean predictor:")
+print(f"    sequence_type (current)  R2 {_s_r2:>5.1f}%   MAE {_s_mae:>6.1f}s")
+print(f"    protocol                 R2 {_p_r2:>5.1f}%   MAE {_p_mae:>6.1f}s   "
+      f"coverage {_p_cov:.1f}%")
+print(f"\n  PROTOCOL-MEAN BASELINE MAE = {_p_mae:.1f}s — this is the bar the retrained\n"
+      f"  model must beat. Beating the previous checkpoint is not sufficient: a\n"
+      f"  model can ignore a new input entirely and still look improved, which is\n"
+      f"  exactly what happened with TR/num_slices.")
+
+if _p_r2 < PROTOCOL_GATE_MIN_R2:
+    raise RuntimeError(
+        f"PROTOCOL GATE FAILED: protocol explains {_p_r2:.1f}% of total_duration "
+        f"held out, below the {PROTOCOL_GATE_MIN_R2:.0f}% threshold, despite "
+        f"reaching 82.0% on step 02's `duration` column. Do not spend a retrain "
+        f"— reconcile the two duration definitions first (this pkl's "
+        f"total_duration comes from event timediffs and is capped at "
+        f"MAX_EXAMINATION_DURATION; step 02's is endTime - startTime with its "
+        f"own outlier filter). Set PROTOCOL_GATE_MIN_R2 to override."
+    )
+print(f"\n  GATE PASSED ({_p_r2:.1f}% >= {PROTOCOL_GATE_MIN_R2:.0f}%)")
+print("=" * 64)
+
+EXAMINATION_MODEL_CONFIG_SEQPARAMS['num_protocols'] = NUM_PROTOCOLS
+
+# COMMAND ----------
+
+# =============================================================================
 # TRAIN EXAMINATION MODEL
 # =============================================================================
 
@@ -297,11 +383,40 @@ examination_model, examination_history = train_examination_model(
     # feature list regardless of how extra_conditioning_features was
     # assembled, not just the one path gate #1 already validated.
     leakage_denylist=seqparams_config.SUT_LEAKAGE_DENYLIST,
+    protocol_vocab=PROTOCOL_VOCAB,
     verbose=True,
 )
 
 print(f"\nBest val loss:       {min(examination_history['val_loss']):.4f}")
 print(f"Best val perplexity: {min(examination_history['val_perplexity']):.2f}")
+
+# COMMAND ----------
+
+# =============================================================================
+# FREEZE THE PROTOCOL VOCABULARY NEXT TO THE CHECKPOINT
+# -----------------------------------------------------------------------------
+# The checkpoint's protocol_embedding / duration_protocol_bias rows are indexed
+# by these ids. Steps 05/06/07 MUST read this file rather than rebuilding the
+# vocabulary from a pkl: rebuilding is only identical while the pkl is byte-for
+# -byte the same, and the failure mode of a silent mismatch is every protocol
+# predicting some other protocol's duration — a wrong answer that still looks
+# perfectly plausible. Same survivability rationale as duration_probe.json:
+# Databricks drops cell output on long runs, so this has to be an artefact.
+# =============================================================================
+
+_vocab_path = f"{MODELS_DIR}/examination/protocol_vocab.json"
+with open(_vocab_path, "w") as _f:
+    json.dump({
+        "min_count": PROTOCOL_MIN_COUNT,
+        "num_protocols": NUM_PROTOCOLS,
+        "rare_protocol_id": RARE_PROTOCOL_ID,
+        "heldout_r2_pct": round(_p_r2, 2),
+        "heldout_mae_s": round(_p_mae, 2),
+        "sequence_type_heldout_r2_pct": round(_s_r2, 2),
+        "sequence_type_heldout_mae_s": round(_s_mae, 2),
+        "vocab": PROTOCOL_VOCAB,
+    }, _f, indent=2)
+print(f"Wrote protocol vocabulary ({len(PROTOCOL_VOCAB):,} protocols) → {_vocab_path}")
 
 # COMMAND ----------
 
@@ -320,6 +435,10 @@ _manifest = {
     "num_trigger_modes": EXAMINATION_MODEL_CONFIG_SEQPARAMS['num_trigger_modes'],
     "base_conditioning_dim": EXAMINATION_MODEL_CONFIG_SEQPARAMS['base_conditioning_dim'],
     "extra_conditioning_features": seqparams_config.EXAMINATION_SEQPARAM_FEATURES,
+    "num_protocols": NUM_PROTOCOLS,
+    "protocol_min_count": PROTOCOL_MIN_COUNT,
+    "protocol_heldout_r2_pct": round(_p_r2, 2),
+    "protocol_baseline_mae_s": round(_p_mae, 2),
 }
 _manifest_path = f"{MODELS_DIR}/MODEL_MANIFEST.json"
 with open(_manifest_path, "w") as _f:

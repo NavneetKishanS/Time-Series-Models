@@ -184,9 +184,36 @@ COIL_COLUMNS = [
 # ============================================================================
 
 # raw message key -> stable parameter name.
+#
+# Fields below TR/num_slices are PARSED but do NOT reach the model: only names
+# listed in EXAMINATION_SEQPARAM_FEATURES do. They land in each sequence's
+# audit-only `sut_debug` so the within-protocol residual (sd 25.7s after
+# conditioning on protocol) can be analysed without another Spark rebuild.
+#
+# Why these seven: acquisition time is roughly TR x PEL x AVG x CONC /
+# (PAT x TF), so TR is one of six multiplicands and the one that varies least
+# within a protocol. That is the physical reason TR alone scored 0.0%
+# permutation importance — not a model defect.
+#
+# ST/TST are almost certainly the protocol's NOMINAL acquisition time, not a
+# measurement: SLC x TR reproduces ST exactly on both sampled haste messages
+# (9 x 866ms -> ST:8; 15 x 1000ms -> ST:15), and a measured elapsed time would
+# not land on the computed product to the second. Görtler names them "scanning
+# time" / "total scanning time". A nominal, protocol-derived TA is known before
+# the scan and is not the SD58 leak, but that reading is NOT yet confirmed with
+# him — which is why they are parsed for analysis and kept out of
+# EXAMINATION_SEQPARAM_FEATURES until it is. Names stay as the raw message
+# mnemonics rather than baking an unverified interpretation into an identifier.
 SUT_FIELD_MAP = {
-    'TR':  'TR',
-    'SLC': 'num_slices',
+    'TR':   'TR',
+    'SLC':  'num_slices',
+    'ST':   'ST',        # nominal acquisition time, seconds (see above)
+    'TST':  'TST',       # nominal total scan time, seconds (ST + 1-2s)
+    'AVG':  'averages',       # NEX/NSA — how many times the protocol acquires
+    'CONC': 'concatenations',
+    'PEL':  'phase_encoding_lines',
+    'PAT':  'parallel_imaging_factor',
+    'FOV':  'field_of_view',
 }
 
 TRIGGER_MODE_VOCAB = {

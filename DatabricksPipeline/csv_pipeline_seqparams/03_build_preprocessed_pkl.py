@@ -253,6 +253,34 @@ def _seq_type_from_msg(msg):
     m = re.search(r"Sequence:\s*'([^']*)'", msg)
     return classify_sequence_type(m.group(1) if m else '')
 
+
+def _protocol_from_msg(msg):
+    """Extract the raw protocol name from the SAME MRI_MSR_100 message.
+
+    The message carries `Protocol: '<name>'` alongside the `Sequence: '<name>'`
+    that _seq_type_from_msg already reads, and csv_pipeline/02_exam_preprocessing
+    has always pulled it into the exam CSVs — it just never reached the pkl, so
+    the model has only ever seen the 12-value sequence_type bucket derived from
+    the other field.
+
+    That bucket explains 31.6% of duration variance held out (MAE 53.1s, against
+    the trained model's own 50.3s). This string explains 82.0% (MAE 17.2s), so it
+    is the single most informative thing available and it is chosen by the
+    operator before the scan runs — no leakage.
+
+    Kept RAW and unnormalised: the synthetic CSV's Protocol column must carry
+    exactly what the real one does or Qlik cannot put them on one dimension, and
+    a later protocol-name text feature needs the original string. Normalisation
+    and id assignment happen at train time (see AlternatingPipeline/data/
+    protocol_vocab.py). `[^']*` rather than 02's greedy `(.*)',` — equivalent on
+    all 3,000 real names (none contains an apostrophe) and it cannot run past
+    the closing quote.
+    """
+    if not isinstance(msg, str):
+        return ''
+    m = re.search(r"Protocol:\s*'([^']*)'", msg)
+    return m.group(1).strip() if m else ''
+
 # COMMAND ----------
 
 # =============================================================================
@@ -506,6 +534,8 @@ _t = time.perf_counter()
 examination_sequences = []
 _sut_parse_hits = 0
 _sut_parse_total = 0
+_protocol_parse_hits = 0
+_protocol_parse_total = 0
 
 for serial in SERIAL_NUMBERS:
     print(f"\n  --- {serial} ---")
@@ -625,6 +655,10 @@ for serial in SERIAL_NUMBERS:
             continue
 
         seq_type = _seq_type_from_msg(segment.iloc[0].get('Message'))
+        protocol_name = _protocol_from_msg(segment.iloc[0].get('Message'))
+        _protocol_parse_total += 1
+        if protocol_name:
+            _protocol_parse_hits += 1
 
         body_region_str = _normalize_bodygroup(str(segment.iloc[0].get('BodyGroup_to', 'UNKNOWN')).upper())
         _pe = bisect.bisect_left(exam_rows, start_row) - 1
@@ -682,6 +716,11 @@ for serial in SERIAL_NUMBERS:
             'conditioning': conditioning,
             'body_region': body_region,
             'sequence_type': int(seq_type),
+            # Raw operator-chosen protocol name. No id here on purpose: the
+            # vocabulary is a model artefact, built and frozen at train time so
+            # the checkpoint's embedding rows can never drift from the ids the
+            # pkl was written with.
+            'protocol_name': protocol_name,
             'serial_idx': int(serial_idx),
             'trigger_mode': int(trigger_mode_id),
             'coil_config': coil_config,
@@ -699,6 +738,18 @@ print(f"\nTotal examination sequences: {len(examination_sequences)}")
 print(f"SUT parse hit rate: {_sut_parse_hits}/{_sut_parse_total} segments had a "
       f"preceding MRI_SUT_1005 event with at least one recognized slot "
       f"({100 * _sut_parse_hits / max(1, _sut_parse_total):.1f}%)")
+
+# Protocol names drive the duration model from here on, so a silent drop in
+# parse rate must be visible immediately rather than showing up as a collapsed
+# vocabulary at train time. Real serials carry ~324 distinct protocols each.
+_protocol_names = [s['protocol_name'] for s in examination_sequences if s['protocol_name']]
+print(f"Protocol parse hit rate: {_protocol_parse_hits}/{_protocol_parse_total} "
+      f"MRI_MSR_100 messages carried a Protocol field "
+      f"({100 * _protocol_parse_hits / max(1, _protocol_parse_total):.1f}%)  "
+      f"— {len(set(_protocol_names)):,} distinct protocols")
+if _protocol_parse_total and _protocol_parse_hits / _protocol_parse_total < 0.9:
+    print("  !! Protocol parse rate is below 90%. The duration model conditions "
+          "on this field; check the MRI_MSR_100 message format before training.")
 _t = _timeit('exam extraction', _t)
 
 _print_body_group_sanity()

@@ -148,9 +148,13 @@ class ExaminationDatasetTriggerModeTests(unittest.TestCase):
         return seq
 
     def test_item_carries_trigger_mode_as_eighth_field(self):
+        """Position matters: make_pad_collate trims by index (seq_indices=(4,5,6)),
+        so per-sequence categoricals must stay at the tail. protocol was appended
+        as the ninth field for exactly that reason — see test_protocol_conditioning.
+        """
         dataset = ExaminationDataset([self._fake_sequence(trigger_mode=2)], max_seq_len=8)
         item = dataset[0]
-        self.assertEqual(len(item), 8)
+        self.assertEqual(len(item), 9)
         self.assertEqual(item[7].item(), 2)
 
     def test_missing_trigger_mode_defaults_to_zero(self):
