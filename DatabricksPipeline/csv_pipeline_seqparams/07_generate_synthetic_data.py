@@ -350,6 +350,7 @@ from AlternatingPipeline.data.orchestration_preprocessing import (
     extract_orchestration_samples, build_demographic_distributions,
     _compute_scanner_stats,
 )
+from AlternatingPipeline.generation.day_budget import DayBudget
 from AlternatingPipeline.generation.output_integrity import (
     GenerationIntegrityError,
     repair_examination_sequence,
@@ -375,6 +376,13 @@ STRICT_OUTPUT_VALIDATION = (
         '1' if GENERATION_CONFIG.get('strict_output_validation', True) else '0',
     ) != '0'
 )
+# Longest wall-clock span one synthetic day may occupy. See DayBudget for why
+# an unbounded day is what produced "exam row N overlaps the preceding
+# examination" on 2026-07-28.
+MAX_DAY_SPAN_SEC = float(os.environ.get(
+    'MAX_DAY_SPAN_SEC',
+    GENERATION_CONFIG.get('max_day_span_sec', 13 * 3600),
+))
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Device: {device}")
@@ -1155,6 +1163,7 @@ for customer_idx, (serial_str, daily_schedules) in enumerate(customer_schedules.
     expected_exchange_blocks = 0
     regeneration_count = 0
     fallback_exam_count = 0
+    day_budget = DayBudget(MAX_DAY_SPAN_SEC)
 
     # Generate dates from the synthetic range (outside training window — no leakage)
     _start = datetime.strptime(SYNTH_DATE_START, '%Y-%m-%d')
@@ -1205,8 +1214,17 @@ for customer_idx, (serial_str, daily_schedules) in enumerate(customer_schedules.
         prev_region     = START_REGION_ID
         prev_patient_id = 'START'
         step_counter    = {}
+        patients_served = 0
+        last_served     = None
+        day_dropped_scans = 0
 
         for p_idx, patient in enumerate(patients):
+            # A scanner day has to end. Without this the day runs on until the
+            # orchestration plan is exhausted, and a day longer than 24 h
+            # starts before the previous one has finished — see DayBudget.
+            if not day_budget.accepts_patient(current_t, patients_served):
+                break
+
             pat_id     = patient['patient_id']
             region_id  = patient['body_region_id']
             phase_type = PHASE_TYPES['startup'] if p_idx == 0 else PHASE_TYPES['between']
@@ -1247,8 +1265,11 @@ for customer_idx, (serial_str, daily_schedules) in enumerate(customer_schedules.
             # synthetic output degenerates to exactly 1 scan per patient.
             num_scans = max(1, int(np.random.poisson(8)))
             num_scans = min(num_scans, 20)          # clamp the tail
-            expected_exam_counts[pat_id] = num_scans
+            scans_rendered = 0
             for _scan in range(num_scans):
+                if not day_budget.accepts_scan(current_t, scans_rendered):
+                    day_dropped_scans += num_scans - scans_rendered
+                    break
                 # Draw a scan type from this region's real mix and condition
                 # the model on it — this is what gives duration variability
                 # (short scouts vs long TSE/SPACE) instead of a flat mean.
@@ -1266,14 +1287,27 @@ for customer_idx, (serial_str, daily_schedules) in enumerate(customer_schedules.
                 regeneration_count += retries
                 fallback_exam_count += int(used_fallback)
                 all_exam_rows.extend(exam_rows)
+                scans_rendered += 1
+            # Record what was actually rendered, not what was planned — the
+            # integrity check compares these two and a truncated patient must
+            # not read as a lost scan.
+            expected_exam_counts[pat_id] = scans_rendered
             exam_sample_idx += 1   # one sample_idx per patient (matches step 02)
 
+            patients_served += 1
+            last_served     = patient
             prev_region     = region_id
             prev_patient_id = pat_id
 
+        day_budget.record_day(len(patients) - patients_served, day_dropped_scans)
+        if patients_served < len(patients) or day_dropped_scans:
+            print(f"    !! day truncated at {current_t / 3600:.1f}h — served "
+                  f"{patients_served}/{len(patients)} patients, dropped "
+                  f"{day_dropped_scans} scan(s)")
+
         # ── SHUTDOWN EXCHANGE ──
-        if patients:
-            last_patient = patients[-1]
+        if last_served is not None:
+            last_patient = last_served
             cond = _build_cond_tensor(last_patient, current_t, day_start)
             with torch.no_grad():
                 sd_tokens, sd_durations, sd_mu, sd_sigma = exchange_model.generate(
@@ -1327,23 +1361,38 @@ for customer_idx, (serial_str, daily_schedules) in enumerate(customer_schedules.
             f"fallback_scans={fallback_exam_count}"
         )
 
+    _budget_summary = day_budget.summary()
+    if _budget_summary:
+        print(f"  !! {_budget_summary}")
+
     # ── Duration diagnostic: surface model-vs-real calibration up front ──
-    # Real exam_duration mean ≈ 105 s on serials 176148/183242. If synthetic
-    # mean lands far outside ~80-150 s, the per-token duration model is
-    # mis-calibrated and Qlik comparison will look broken regardless of the
-    # rest of the pipeline. We also emit median tokens-per-block so the
-    # operator can tell whether the inflation is per-token-too-large or
-    # too-many-tokens-per-MSR_100→MSR_104 window.
+    # Reference values are measured over all 40,921 rows of the real exam CSVs
+    # (qlik/data/real/exam): mean 105.2 s, median 89 s, p99 392 s, and only
+    # 0.06% of scans longer than 600 s. A synthetic mean far off that band, or
+    # a long-scan share orders of magnitude above it, means the duration model
+    # is mis-calibrated and the Qlik comparison will look broken regardless of
+    # the rest of the pipeline.
+    #
+    # The mean alone is not enough: the 2026-07-28 run reported mean 274.4 s
+    # with median 49.0 s — a right median with a tail heavy enough to nearly
+    # triple the mean — and slipped under the old 30-300 s band unflagged.
+    # Median and the >600 s share are what separate "shifted" from "over-
+    # dispersed", so both are printed.
     if all_exam_rows:
-        durs = [r['duration'] for r in all_exam_rows if r.get('duration', 0) > 0]
+        durs = sorted(r['duration'] for r in all_exam_rows if r.get('duration', 0) > 0)
         if durs:
             mean_dur = sum(durs) / len(durs)
-            sorted_d = sorted(durs)
-            med_dur  = sorted_d[len(sorted_d) // 2]
-            flag = ''
-            if mean_dur < 30 or mean_dur > 300:
-                flag = '  ⚠ off-band (real ≈ 105 s) — examination duration model needs recalibration'
-            print(f"  Exam duration: mean={mean_dur:.1f}s  median={med_dur:.1f}s  n={len(durs)}{flag}")
+            med_dur  = durs[len(durs) // 2]
+            p99_dur  = durs[min(len(durs) - 1, int(0.99 * len(durs)))]
+            long_share = 100.0 * sum(d > 600 for d in durs) / len(durs)
+            flags = []
+            if not 60 <= mean_dur <= 200:
+                flags.append('mean off-band (real 105 s, per-serial 75-168 s)')
+            if long_share > 3.0:
+                flags.append(f'{long_share:.1f}% of scans >600 s (real 0.06%) — over-dispersed')
+            flag = ('  ⚠ ' + '; '.join(flags)) if flags else ''
+            print(f"  Exam duration: mean={mean_dur:.1f}s  median={med_dur:.1f}s  "
+                  f"p99={p99_dur:.0f}s  >600s={long_share:.2f}%  n={len(durs)}{flag}")
 
     # ── Save exchange CSV ──
     if all_exchange_rows:

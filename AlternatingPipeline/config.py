@@ -413,6 +413,12 @@ GENERATION_CONFIG = {
     'max_regeneration_attempts': 5,
     'max_rendered_exam_duration_sec': 4000,
     'strict_output_validation': True,
+    # A generated day is laid out end to end from 07:00 with no idle time, so
+    # nothing stops it running past midnight and colliding with the next day —
+    # which is how the 2026-07-28 run produced overlapping examinations. Real
+    # days on these serials span at most 12.4 h, so 13 h leaves headroom for a
+    # genuinely busy day while still bounding an over-generated one.
+    'max_day_span_sec': 13 * 3600,
 }
 
 # ============================================================================
