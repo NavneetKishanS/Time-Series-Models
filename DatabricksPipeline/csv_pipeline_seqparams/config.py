@@ -190,30 +190,64 @@ COIL_COLUMNS = [
 # audit-only `sut_debug` so the within-protocol residual (sd 25.7s after
 # conditioning on protocol) can be analysed without another Spark rebuild.
 #
-# Why these seven: acquisition time is roughly TR x PEL x AVG x CONC /
+# Why this set: acquisition time is roughly TR x PEL x AVG x CONC /
 # (PAT x TF), so TR is one of six multiplicands and the one that varies least
 # within a protocol. That is the physical reason TR alone scored 0.0%
-# permutation importance — not a model defect.
+# permutation importance — not a model defect. TF (turbo factor) was the last
+# missing multiplicand and is now mapped.
 #
-# ST/TST are almost certainly the protocol's NOMINAL acquisition time, not a
-# measurement: SLC x TR reproduces ST exactly on both sampled haste messages
-# (9 x 866ms -> ST:8; 15 x 1000ms -> ST:15), and a measured elapsed time would
-# not land on the computed product to the second. Görtler names them "scanning
-# time" / "total scanning time". A nominal, protocol-derived TA is known before
-# the scan and is not the SD58 leak, but that reading is NOT yet confirmed with
-# him — which is why they are parsed for analysis and kept out of
-# EXAMINATION_SEQPARAM_FEATURES until it is. Names stay as the raw message
-# mnemonics rather than baking an unverified interpretation into an identifier.
+# ST is CONFIRMED (2026-07-31) to be decided BEFORE the measurement — a planned
+# value, not an observed outcome, so it is not the SD58 leak and is admissible
+# as a model feature. Note SLC x TR reproduces ST for haste (9 x 866ms -> ST:8;
+# 15 x 1000ms -> ST:15) but NOT for ep2d_diff (18 x 4300ms = 77s vs ST:400), so
+# it is a genuine per-family computation rather than a redundant product of two
+# fields already held. Names stay as the raw message mnemonics.
+#
+# NOT here on purpose: DLL (sequence binary) and OR (orientation) are STRINGS.
+# They are extracted separately in 03_build_preprocessed_pkl.py — a category id
+# mixed into a scaled numeric vector is meaningless, and they need embeddings
+# like sequence_type, not a divisor.
 SUT_FIELD_MAP = {
     'TR':   'TR',
     'SLC':  'num_slices',
-    'ST':   'ST',        # nominal acquisition time, seconds (see above)
-    'TST':  'TST',       # nominal total scan time, seconds (ST + 1-2s)
+    'ST':   'ST',        # acquisition time, seconds — planned, see above
+    'TST':  'TST',       # total scan time, seconds (ST + 1-2s)
+    'SLT':  'slice_thickness',   # mm. Görtler: set by gradient strength, so
+                                 # calculated rather than measured. THIS is the
+                                 # field he described when asked about "ST".
     'AVG':  'averages',       # NEX/NSA — how many times the protocol acquires
     'CONC': 'concatenations',
     'PEL':  'phase_encoding_lines',
     'PAT':  'parallel_imaging_factor',
+    'PATP': 'parallel_imaging_phase',
+    'ACC':  'acceleration_factor',
     'FOV':  'field_of_view',
+    # WARNING — sequence-scoped, NOT universal: TF is present on the haste
+    # (TSE-family) messages and ABSENT on ep2d_diff, which uses an echo factor
+    # (EF) instead. _safe_float(...) defaults a missing key to 0.0, and a turbo
+    # factor of 0 is not a real value — it means "does not apply to this
+    # sequence". Safe while it stays out of EXAMINATION_SEQPARAM_FEATURES;
+    # promoting it needs an explicit presence flag or scoping by sequence
+    # family. Same applies to any DIFF/BV0/BVM/EF field added later.
+    'TF':   'turbo_factor',      # last missing multiplicand in the TA formula
+    'TE':   'TE',                # echo time, ms — with TR/FA gives the
+    'FA':   'flip_angle',        # weighting (T1/T2/PD) behind Görtler's
+                                 # parameter-derived "generated protocol name"
+    'BR':   'base_resolution',
+    'REP':  'repetitions',
+    'PPF':  'phase_partial_fourier',
+    'SPF':  'slice_partial_fourier',
+    'ES':   'echo_spacing',      # microseconds
+    'BW':   'bandwidth',         # Hz/px
+}
+
+# String-valued SUT keys, extracted separately from the numeric map above.
+# Both are Siemens-standard and customer-agnostic — unlike the protocol name,
+# which is customer-authored (3.8M names across 15k customers) and is why
+# Görtler ruled protocol identity out as a feature for the general model.
+SUT_CATEGORICAL_FIELD_MAP = {
+    'DLL': 'sequence_binary',   # e.g. '%SiemensSeq%\\haste' -> 'haste'
+    'OR':  'orientation',       # e.g. 'CT' / 'SCT' / 'T'
 }
 
 TRIGGER_MODE_VOCAB = {

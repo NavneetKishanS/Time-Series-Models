@@ -23,19 +23,26 @@ def _load_config():
     return module
 
 
-def _load_parse_sut_message():
-    """Extract and exec just `_SUT_TOKEN_RE` / `_parse_sut_message` from the
-    Databricks notebook source, without running the rest of the file — the
-    rest unconditionally queries Spark at module level and can't be imported
-    outside Databricks. Using the real source (via ast) rather than a
-    hand-copied regex keeps this test tied to the actual implementation.
+def _load_sut_parsers():
+    """Extract and exec just the SUT parsing helpers from the Databricks
+    notebook source, without running the rest of the file — the rest
+    unconditionally queries Spark at module level and can't be imported outside
+    Databricks. Using the real source (via ast) rather than a hand-copied regex
+    keeps this test tied to the actual implementation.
     """
     config = _load_config()
     with open(_PARSER_PATH) as f:
         source = f.read()
     tree = ast.parse(source)
-    wanted = {'_SUT_TOKEN_RE', '_parse_sut_message'}
-    namespace = {'re': re, 'SUT_FIELD_MAP': config.SUT_FIELD_MAP}
+    wanted = {
+        '_SUT_TOKEN_RE', '_parse_sut_message',
+        '_parse_sut_raw', '_parse_sut_categoricals',
+    }
+    namespace = {
+        're': re,
+        'SUT_FIELD_MAP': config.SUT_FIELD_MAP,
+        'SUT_CATEGORICAL_FIELD_MAP': config.SUT_CATEGORICAL_FIELD_MAP,
+    }
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name in wanted:
             segment = ast.get_source_segment(source, node)
@@ -49,7 +56,10 @@ def _load_parse_sut_message():
         else:
             continue
         exec(compile(segment, _PARSER_PATH, 'exec'), namespace)
-    return namespace['_parse_sut_message']
+    missing = wanted - set(namespace)
+    if missing:
+        raise AssertionError(f"not found in {_PARSER_PATH}: {sorted(missing)}")
+    return namespace
 
 
 # Real MRI_SUT_1005 messages from sut_parameter_discovery.py's STEP 1 output
@@ -88,62 +98,161 @@ _EP2D_DIFF_MSG = (
 
 class ParseSutMessageTests(unittest.TestCase):
     def setUp(self):
-        self.parse = _load_parse_sut_message()
+        self.parse = _load_sut_parsers()['_parse_sut_message']
 
-    def test_parses_tr_and_num_slices_from_haste_message(self):
+    def test_parses_the_mapped_fields_from_haste_message(self):
         result = self.parse(_HASTE_MSG_1)
         self.assertEqual(result, {
             'TR': '866', 'num_slices': '9', 'ST': '8', 'TST': '9',
-            'averages': '1', 'concatenations': '1',
+            'slice_thickness': '10', 'averages': '1', 'concatenations': '1',
             'phase_encoding_lines': '333', 'parallel_imaging_factor': '2',
-            'field_of_view': '300',
+            'parallel_imaging_phase': '2', 'acceleration_factor': '2',
+            'field_of_view': '300', 'turbo_factor': '256', 'TE': '101',
+            'flip_angle': '110', 'base_resolution': '320', 'repetitions': '0',
+            'phase_partial_fourier': '1', 'slice_partial_fourier': '16',
+            'echo_spacing': '5920', 'bandwidth': '710',
         })
 
     def test_parses_different_values_from_a_second_haste_message(self):
         result = self.parse(_HASTE_MSG_2)
         self.assertEqual(result, {
             'TR': '1000', 'num_slices': '15', 'ST': '15', 'TST': '17',
-            'averages': '1', 'concatenations': '1',
+            'slice_thickness': '8', 'averages': '1', 'concatenations': '1',
             'phase_encoding_lines': '333', 'parallel_imaging_factor': '2',
-            'field_of_view': '300',
+            'parallel_imaging_phase': '2', 'acceleration_factor': '2',
+            'field_of_view': '300', 'turbo_factor': '256', 'TE': '101',
+            'flip_angle': '110', 'base_resolution': '320', 'repetitions': '0',
+            'phase_partial_fourier': '1', 'slice_partial_fourier': '16',
+            'echo_spacing': '5920', 'bandwidth': '710',
         })
 
-    def test_parses_tr_and_num_slices_from_a_different_sequence_type(self):
+    def test_parses_a_different_sequence_type(self):
         # ep2d_diff carries a different field set entirely (DIFF, BV0, EF, ...)
-        # from haste — every mapped key must still resolve by name.
+        # from haste — every mapped key present must still resolve by name.
         result = self.parse(_EP2D_DIFF_MSG)
         self.assertEqual(result, {
             'TR': '4300', 'num_slices': '18', 'ST': '400', 'TST': '401',
-            'averages': '1', 'concatenations': '1',
+            'slice_thickness': '5', 'averages': '1', 'concatenations': '1',
             'phase_encoding_lines': '80', 'parallel_imaging_factor': '2',
-            'field_of_view': '200',
+            'parallel_imaging_phase': '2', 'acceleration_factor': '2',
+            'field_of_view': '200', 'TE': '70', 'flip_angle': '90',
+            'base_resolution': '130', 'repetitions': '0',
+            'phase_partial_fourier': '8', 'slice_partial_fourier': '16',
+            'echo_spacing': '960', 'bandwidth': '1538',
         })
 
-    def test_st_is_the_computed_acquisition_time_not_a_measurement(self):
-        """SLC x TR reproduces ST exactly, on both haste messages.
+    def test_turbo_factor_is_sequence_scoped_not_universal(self):
+        """TF is on the TSE-family (haste) messages and absent from ep2d_diff.
 
-        This is the evidence that ST is the protocol's NOMINAL time of
-        acquisition — computed from the parameters and therefore knowable
-        before the scan runs — rather than a measured elapsed time, which would
-        not land on the computed product to the second. It is the argument that
-        ST is not the SD58 leakage risk, so if this ever stops holding the
-        interpretation in SUT_FIELD_MAP needs revisiting before ST is promoted
-        into EXAMINATION_SEQPARAM_FEATURES.
+        EPI has no turbo factor — it uses an echo factor (EF) instead. This
+        matters because _safe_float(sut_values.get('turbo_factor')) defaults a
+        missing key to 0.0, and a turbo factor of 0 is not a real value, it
+        means "does not apply to this sequence". Harmless while turbo_factor
+        stays out of EXAMINATION_SEQPARAM_FEATURES; promoting it needs an
+        explicit presence flag or scoping by sequence family. Pinned so the
+        asymmetry is visible rather than discovered as a silent zero column.
+        """
+        self.assertEqual(self.parse(_HASTE_MSG_1)['turbo_factor'], '256')
+        self.assertNotIn('turbo_factor', self.parse(_EP2D_DIFF_MSG))
+        self.assertIn('EF:', _EP2D_DIFF_MSG)
+
+    def test_st_is_a_computed_acquisition_time_for_haste(self):
+        """SLC x TR reproduces ST on both haste messages.
+
+        ST is CONFIRMED (2026-07-31) to be decided before the measurement — a
+        planned value, not an observed outcome — so it is not the SD58 leak and
+        is admissible as a model feature. This test keeps the supporting
+        arithmetic visible: a measured elapsed time would not land on the
+        computed product to the second.
         """
         for message in (_HASTE_MSG_1, _HASTE_MSG_2):
             parsed = self.parse(message)
             computed = int(parsed['num_slices']) * int(parsed['TR']) / 1000.0
             self.assertAlmostEqual(computed, float(parsed['ST']), delta=0.25)
 
+    def test_st_is_not_merely_slices_times_tr(self):
+        """The haste identity does NOT generalise — ep2d_diff breaks it.
+
+        18 slices x 4300ms = 77.4s against ST:400. Diffusion covers all slices
+        per TR and repeats over directions/b-values, so ST is a real
+        per-sequence-family computation rather than a redundant product of two
+        fields already in the feature set. That is why ST is worth having at
+        all, and why nobody should "simplify" it away as derivable.
+        """
+        parsed = self.parse(_EP2D_DIFF_MSG)
+        computed = int(parsed['num_slices']) * int(parsed['TR']) / 1000.0
+        self.assertLess(computed, float(parsed['ST']) / 4)
+
     def test_ignores_unmapped_tokens(self):
         result = self.parse(_HASTE_MSG_1)
-        self.assertNotIn('MUID', result)
-        self.assertNotIn('SLT', result)   # slice THICKNESS, not slice count
-        self.assertNotIn('TE', result)
+        for unmapped in ('MUID', 'VER', 'SNR', 'POS', 'DLL', 'OR'):
+            self.assertNotIn(unmapped, result)
 
     def test_non_string_message_returns_empty_dict(self):
         self.assertEqual(self.parse(None), {})
         self.assertEqual(self.parse(float('nan')), {})
+
+
+class ParseSutRawTests(unittest.TestCase):
+    """The unfiltered capture — what makes the parameter route testable offline.
+
+    Görtler (2026-07-31) wants the general duration model on sequence +
+    sequence parameters rather than the customer-authored protocol name. Each
+    candidate field would otherwise cost a Spark rebuild to evaluate, so step
+    03 keeps every token.
+    """
+
+    def setUp(self):
+        self.raw = _load_sut_parsers()['_parse_sut_raw']
+
+    def test_captures_far_more_than_the_mapped_subset(self):
+        for message in (_HASTE_MSG_1, _HASTE_MSG_2, _EP2D_DIFF_MSG):
+            self.assertGreaterEqual(len(self.raw(message)), 50)
+
+    def test_captures_the_fields_the_mapped_parse_drops(self):
+        result = self.raw(_HASTE_MSG_1)
+        # DLL/OR are the customer-agnostic categoricals; SNR/MUID/VER are
+        # unmapped on purpose but must still survive the raw capture.
+        for key in ('DLL', 'OR', 'SNR', 'MUID', 'VER', 'ES', 'TF'):
+            self.assertIn(key, result)
+
+    def test_does_not_capture_the_wrapper_word_protocol(self):
+        # The tokens are wrapped in "Protocol: ( ... !s!)" — "Protocol" is
+        # followed by a space, so it must not be read as a KEY:VALUE pair.
+        self.assertNotIn('Protocol', self.raw(_HASTE_MSG_1))
+
+    def test_non_string_message_returns_empty_dict(self):
+        self.assertEqual(self.raw(None), {})
+        self.assertEqual(self.raw(float('nan')), {})
+
+
+class ParseSutCategoricalsTests(unittest.TestCase):
+    def setUp(self):
+        self.cats = _load_sut_parsers()['_parse_sut_categoricals']
+
+    def test_extracts_the_sequence_binary_leaf_from_the_dll_path(self):
+        self.assertEqual(
+            self.cats(_HASTE_MSG_1)['sequence_binary'], 'haste')
+        self.assertEqual(
+            self.cats(_EP2D_DIFF_MSG)['sequence_binary'], 'ep2d_diff')
+
+    def test_extracts_orientation(self):
+        self.assertEqual(self.cats(_HASTE_MSG_1)['orientation'], 'CT')
+        self.assertEqual(self.cats(_HASTE_MSG_2)['orientation'], 'SCT')
+        self.assertEqual(self.cats(_EP2D_DIFF_MSG)['orientation'], 'T')
+
+    def test_returns_strings_not_ids(self):
+        """Ids come from a vocab frozen at train time, never from step 03.
+
+        Same rule as protocol_name: if the pkl carried ids, a vocabulary change
+        would silently remap a checkpoint's embedding rows.
+        """
+        for value in self.cats(_HASTE_MSG_1).values():
+            self.assertIsInstance(value, str)
+
+    def test_non_string_message_returns_empty_dict(self):
+        self.assertEqual(self.cats(None), {})
+        self.assertEqual(self.cats(float('nan')), {})
 
 
 if __name__ == '__main__':

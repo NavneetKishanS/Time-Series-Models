@@ -384,6 +384,51 @@ def _parse_sut_message(msg):
     }
 
 
+def _parse_sut_raw(msg):
+    """Every KEY:VALUE token in the message, unfiltered by SUT_FIELD_MAP.
+
+    Görtler (2026-07-31) wants the general duration model built on sequence +
+    sequence parameters rather than the customer-authored protocol name. The
+    real messages carry ~60 fields and SUT_FIELD_MAP has never covered more
+    than a handful, so a pkl built from _parse_sut_message alone cannot answer
+    which parameters matter — every candidate field would need another Spark
+    rebuild to test. Keeping the whole parse means that question is answered
+    once, offline, forever.
+
+    Audit/analysis only, exactly like `sut_debug`: never merged into
+    'conditioning'. Only names in EXAMINATION_SEQPARAM_FEATURES reach the model.
+    """
+    if not isinstance(msg, str):
+        return {}
+    return dict(_SUT_TOKEN_RE.findall(msg))
+
+
+def _parse_sut_categoricals(msg):
+    """The string-valued SUT keys, kept out of the numeric parameter vector.
+
+    `DLL` is the Siemens sequence binary ('%SiemensSeq%\\haste' -> 'haste') and
+    `OR` the slice orientation. Both are Siemens-standard and therefore
+    transfer across customers, unlike the protocol name. They are categories,
+    so they need embeddings like sequence_type — mixing a category id into a
+    scaled numeric tensor is meaningless (bucket 3 of the four-shape design
+    note). Raw strings here on purpose: the vocabulary is a model artefact,
+    built and frozen at train time so a checkpoint's embedding rows can never
+    drift from the ids the pkl was written with — same reasoning as
+    protocol_name below.
+    """
+    if not isinstance(msg, str):
+        return {}
+    raw_fields = dict(_SUT_TOKEN_RE.findall(msg))
+    out = {}
+    for key, name in SUT_CATEGORICAL_FIELD_MAP.items():
+        val = raw_fields.get(key)
+        if val is None:
+            continue
+        # DLL arrives as a path-ish '%SiemensSeq%\haste'; keep the leaf only.
+        out[name] = val.replace('\\', '/').rsplit('/', 1)[-1].strip()
+    return out
+
+
 def _trigger_mode_id(sut_values):
     """Map the parsed trigger_mode string to its TRIGGER_MODE_VOCAB id,
     defaulting to 'none'/0 when absent or unrecognized."""
@@ -534,6 +579,7 @@ _t = time.perf_counter()
 examination_sequences = []
 _sut_parse_hits = 0
 _sut_parse_total = 0
+_sut_binary_hits = 0
 _protocol_parse_hits = 0
 _protocol_parse_total = 0
 
@@ -676,13 +722,15 @@ for serial in SERIAL_NUMBERS:
 
         # NEW — SUT sequence-protocol parameters (most-recent-before start_row)
         _ps = bisect.bisect_left(sut_rows, start_row) - 1
-        sut_values = (
-            _parse_sut_message(df_merged.iloc[sut_rows[_ps]]['Message'])
-            if _ps >= 0 else {}
-        )
+        _sut_msg = df_merged.iloc[sut_rows[_ps]]['Message'] if _ps >= 0 else None
+        sut_values = _parse_sut_message(_sut_msg)
+        sut_raw = _parse_sut_raw(_sut_msg)
+        sut_categoricals = _parse_sut_categoricals(_sut_msg)
         _sut_parse_total += 1
         if sut_values:
             _sut_parse_hits += 1
+        if sut_categoricals.get('sequence_binary'):
+            _sut_binary_hits += 1
 
         # Only the features in EXAMINATION_SEQPARAM_FEATURES ever reach the
         # model — never the raw unfiltered sut_values (which may include
@@ -721,13 +769,23 @@ for serial in SERIAL_NUMBERS:
             # the checkpoint's embedding rows can never drift from the ids the
             # pkl was written with.
             'protocol_name': protocol_name,
+            # Siemens-standard sequence descriptors from the SUT message —
+            # customer-agnostic, unlike protocol_name, and therefore the
+            # categorical inputs the general model is allowed to use. Raw
+            # strings; ids are assigned from a vocab frozen at train time.
+            'sequence_binary': sut_categoricals.get('sequence_binary', ''),
+            'orientation': sut_categoricals.get('orientation', ''),
             'serial_idx': int(serial_idx),
             'trigger_mode': int(trigger_mode_id),
             'coil_config': coil_config,
-            # Audit-only — full unfiltered SUT parse, INCLUDING scanning_time.
-            # Never merge this into 'conditioning'. Used only for Phase 1's
-            # SD58-vs-real-duration validation cross-check and debugging.
+            # Audit-only — the SUT_FIELD_MAP-filtered parse. Never merge this
+            # into 'conditioning'. Used for the SD58-vs-real-duration
+            # validation cross-check and debugging.
             'sut_debug': sut_values,
+            # Audit-only — EVERY key in the message, so a new candidate
+            # parameter can be evaluated offline instead of costing another
+            # Spark rebuild. Same rule: never merged into 'conditioning'.
+            'sut_raw': sut_raw,
             'total_duration': total_duration,
             'start_datetime': start_dt,
         })
@@ -739,17 +797,41 @@ print(f"SUT parse hit rate: {_sut_parse_hits}/{_sut_parse_total} segments had a 
       f"preceding MRI_SUT_1005 event with at least one recognized slot "
       f"({100 * _sut_parse_hits / max(1, _sut_parse_total):.1f}%)")
 
-# Protocol names drive the duration model from here on, so a silent drop in
-# parse rate must be visible immediately rather than showing up as a collapsed
-# vocabulary at train time. Real serials carry ~324 distinct protocols each.
+# The general duration model is being rebuilt on sequence + sequence parameters
+# (Görtler, 2026-07-31), so the breadth of the raw capture is now a first-class
+# health check: a message format change that silently narrows it would strand
+# the whole parameter route. Real messages carry ~60 keys.
+_raw_keys = set()
+_raw_key_counts = {}
+for _s in examination_sequences:
+    for _k in _s['sut_raw']:
+        _raw_keys.add(_k)
+        _raw_key_counts[_k] = _raw_key_counts.get(_k, 0) + 1
+_binaries = {s['sequence_binary'] for s in examination_sequences if s['sequence_binary']}
+print(f"SUT raw capture: {len(_raw_keys)} distinct keys across all messages "
+      f"(SUT_FIELD_MAP covers {len(SUT_FIELD_MAP)} of them)")
+print(f"Sequence binary (DLL) hit rate: {_sut_binary_hits}/{_sut_parse_total} "
+      f"({100 * _sut_binary_hits / max(1, _sut_parse_total):.1f}%) "
+      f"— {len(_binaries)} distinct: {sorted(_binaries)[:12]}")
+if len(_raw_keys) < 40:
+    print(f"  !! Only {len(_raw_keys)} distinct SUT keys captured; the sampled "
+          f"real messages carry ~60. Check the MRI_SUT_1005 message format "
+          f"before running the parameter decomposition.")
+
+# Protocol names are the held-out BENCHMARK the parameter model is scored
+# against (82.0% / 15.3s MAE with scanner) — not a model input; Görtler ruled
+# customer-authored protocol names out of the general model. A silent drop in
+# parse rate would quietly remove the yardstick, so it stays reported. Real
+# serials carry ~324 distinct protocols each.
 _protocol_names = [s['protocol_name'] for s in examination_sequences if s['protocol_name']]
 print(f"Protocol parse hit rate: {_protocol_parse_hits}/{_protocol_parse_total} "
       f"MRI_MSR_100 messages carried a Protocol field "
       f"({100 * _protocol_parse_hits / max(1, _protocol_parse_total):.1f}%)  "
       f"— {len(set(_protocol_names)):,} distinct protocols")
 if _protocol_parse_total and _protocol_parse_hits / _protocol_parse_total < 0.9:
-    print("  !! Protocol parse rate is below 90%. The duration model conditions "
-          "on this field; check the MRI_MSR_100 message format before training.")
+    print("  !! Protocol parse rate is below 90%. This is the benchmark the "
+          "parameter model is scored against; check the MRI_MSR_100 message "
+          "format before training.")
 _t = _timeit('exam extraction', _t)
 
 _print_body_group_sanity()
