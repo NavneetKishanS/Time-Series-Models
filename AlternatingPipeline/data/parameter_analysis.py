@@ -27,6 +27,7 @@ the same report are directly comparable.
 """
 
 import math
+from datetime import timedelta
 
 import numpy as np
 
@@ -200,6 +201,56 @@ def heldout_regressor_score(features, values, holdout_frac=0.2, seed=0,
     if not r2s:
         raise ValueError("no usable train/test split was produced")
     return float(np.mean(r2s)), float(np.mean(maes))
+
+
+def terminator_clusters(sequences):
+    """Find segments that end on the SAME terminator event.
+
+    `03_build_preprocessed_pkl.py:676` binds every MRI_MSR_100 to the next
+    MRI_MSR_104/34 in the log, so two MSR_100 events before one terminator
+    produce two OVERLAPPING segments ending at the same instant, both claiming
+    the same measurement. `csv_pipeline/02_exam_preprocessing.py:220` handles
+    the same case differently — it emits one row per finish event, dated from
+    the *most recent* MSR_100 — which is one reason the pkl carries far more
+    rows than the exam CSVs the ±15s benchmark was measured on.
+
+    The shorter segment is the one step 02 would have kept: the later MSR_100 is
+    the measurement that actually ran, and the longer segment has swallowed
+    whatever preceded it. So `is_primary` marks the shortest member of each
+    cluster, giving the caller a one-segment-per-terminator view to compare
+    against.
+
+    Returns a dict of arrays aligned with `sequences`:
+      size        — how many segments share this segment's terminator (1 = none)
+      is_primary  — True for the shortest member of each cluster, exactly once
+    """
+    def _duration(seq):
+        value = _to_float(seq.get('total_duration'))
+        return math.inf if math.isnan(value) else value
+
+    keys = []
+    for index, seq in enumerate(sequences):
+        start, duration = seq.get('start_datetime'), _duration(seq)
+        if start is None or math.isinf(duration):
+            # Cannot be placed in time — must stand alone rather than merge
+            # with every other unplaceable segment.
+            keys.append(('unplaced', index))
+        else:
+            keys.append((seq.get('serial_idx', 0),
+                         start + timedelta(seconds=duration)))
+
+    members = {}
+    for index, key in enumerate(keys):
+        members.setdefault(key, []).append(index)
+
+    size = np.ones(len(sequences), dtype=int)
+    is_primary = np.zeros(len(sequences), dtype=bool)
+    for rows in members.values():
+        size[rows] = len(rows)
+        # min() is stable, so ties resolve to the earliest row.
+        is_primary[min(rows, key=lambda i: _duration(sequences[i]))] = True
+
+    return {'size': size, 'is_primary': is_primary}
 
 
 def within_group_variation(group_labels, values, min_group_size=10):

@@ -35,8 +35,31 @@ resolved before anything is reported to Görtler or spent on a retrain.
    Step 02's `duration`: mean 105.2s, median 89s, sd 91.0s over 40,921 rows.
    The median FELL while the mean rose and the sd more than doubled. Protocol
    scores 82.0% / 17.2s on the second and 63.3% / 31.2s on the first, so every
-   MAE 03b printed is inflated by whatever this is. Sections B and C quantify
-   it.
+   MAE 03b printed is inflated by whatever this is.
+
+   Measured locally 2026-08-03 by matching the 07-24 pkl against the step-02
+   exam CSVs scan-by-scan (same serial, start within 90s): the two definitions
+   AGREE. 73.0% of matched pairs have byte-identical durations and the pair
+   correlation is 0.82. So this is a POPULATION difference, not a different
+   quantity — the pkl carries ~15,800 measurements the CSVs never had, and they
+   are both shorter on average (median 73 vs 88) and far more tailed (467 rows
+   above 1000s against 1 in the CSVs). Two mechanisms are already identified:
+
+     (a) OVERLAPPING SEGMENTS. Step 03 binds every MRI_MSR_100 to the next
+         MRI_MSR_104/34, so two MSR_100 events before one terminator yield two
+         segments ending at the same instant. 17.0% of pkl rows sit in such a
+         cluster. Step 02 instead emits one row per finish event, dated from the
+         most recent MSR_100. Keeping one segment per terminator locally moved
+         the pkl to mean 94.1s / sd 125.5s, from 115.6s / 214.6s.
+     (b) STEP 02 DROPS ROWS THE PKL KEEPS. `get_seq`
+         (02_exam_preprocessing.py:100) requires BOTH `Sequence: '...'` and
+         `Protocol: '...',` to parse; on failure `start` goes False and the
+         whole measurement is discarded. Step 03's `_seq_type_from_msg` falls
+         back to 'other' and keeps it. Step 02 also drops duration > 4000s and
+         accepts MSR_26/22/24/25/40 as terminators, which step 03 does not —
+         an error-terminated measurement therefore runs on to the next MSR_104.
+
+   Sections B, B2 and C quantify what is left on the real pkl.
 
 Run after 03b. Output decides whether Stage C happens, whether step 03's join
 needs fixing first, or both.
@@ -68,6 +91,7 @@ from AlternatingPipeline.data.protocol_vocab import (
 )
 from AlternatingPipeline.data.parameter_analysis import (
     heldout_regressor_score, numeric_field_inventory, numeric_matrix,
+    terminator_clusters,
 )
 
 PKL_PATH = os.environ.get('PKL_PATH', PKL_OUTPUT)
@@ -221,6 +245,73 @@ if _long.any():
 # COMMAND ----------
 
 # =============================================================================
+# B2 — HOW MANY SEGMENTS ARE THE SAME MEASUREMENT COUNTED TWICE?
+#
+# 03_build_preprocessed_pkl.py:676 walks every MRI_MSR_100 and ends its segment
+# at the next MRI_MSR_104/34. Two MSR_100 events before one terminator therefore
+# produce two segments that END AT THE SAME INSTANT — the earlier one having
+# swallowed the gap and whatever ran in it.
+#
+# csv_pipeline/02_exam_preprocessing.py:220 does not do this: it emits one row
+# per finish event and dates it from the MOST RECENT MSR_100. So the shorter
+# member of each cluster is the measurement step 02 kept, and the longer member
+# has no counterpart in the CSVs the ±15s benchmark was measured on.
+#
+# Measured on the local 07-24 pkl: 17.0% of rows sit in a cluster, and keeping
+# one segment per terminator moved mean 115.6 -> 94.1s and sd 214.6 -> 125.5s.
+# =============================================================================
+
+rule()
+print(" B2. OVERLAPPING SEGMENTS (same terminator, counted more than once)")
+rule()
+
+clusters = terminator_clusters(sequences)
+cluster_size = clusters['size']
+is_primary = clusters['is_primary']
+shared = cluster_size > 1
+
+print(f"\n  segments                          {len(sequences):>8,}")
+print(f"  distinct terminator events        {int(is_primary.sum()):>8,}")
+print(f"  segments sharing a terminator     {int(shared.sum()):>8,}   "
+      f"({100.0 * shared.mean():.1f}% of rows)")
+
+print(f"\n  {'segments per terminator':<26} {'clusters':>9} {'rows':>9} "
+      f"{'mean dur':>10} {'median':>9}")
+rule('-')
+for size in sorted(set(cluster_size.tolist())):
+    member = cluster_size == size
+    if not member.any():
+        continue
+    print(f"    {size:<24} {int(member.sum() // size):>9,} {int(member.sum()):>9,} "
+          f"{durations[member].mean():>9.1f}s {np.median(durations[member]):>8.0f}s")
+rule('-')
+
+print(f"\n  the two views of the target:")
+print(f"    {'view':<34} {'n':>8} {'mean':>9} {'median':>8} {'sd':>9} {'>600s':>7}")
+rule('-')
+for label, mask in [
+    ('as-is (what 03b used)', np.ones(len(durations), dtype=bool)),
+    ('one segment per terminator', is_primary),
+]:
+    member = durations[mask]
+    print(f"    {label:<34} {member.size:>8,} {member.mean():>8.1f}s "
+          f"{np.median(member):>7.0f}s {member.std():>8.1f}s "
+          f"{100.0 * (member > 600).mean():>6.1f}%")
+print(f"    {'step 02 `duration` <- the benchmark':<34} {40921:>8,} "
+      f"{105.2:>8.1f}s {89:>7.0f}s {91.0:>8.1f}s {0.1:>6.1f}%")
+rule('-')
+
+print("""
+  If dedup alone moves the sd most of the way from 214.7s to 91.0s, the heavy
+  tail is a segmentation artefact rather than a property of the scans, and
+  step 03 should keep one segment per terminator before anything is retrained.
+  What dedup does NOT close is the remaining row count: step 02 additionally
+  discards every measurement whose MSR_100 message fails `get_seq`, which is a
+  separate filter and needs its own decision.""")
+
+# COMMAND ----------
+
+# =============================================================================
 # C — HOW MUCH OF THE 24.0s vs 15.3s GAP IS THE TARGET?
 #
 # Recompute the protocol benchmark on progressively cleaner targets. If it
@@ -241,9 +332,12 @@ serial_protocol = np.array(
 
 variants = [
     ('as-is (what 03b used)', np.ones(len(durations), dtype=bool)),
+    ('one segment per terminator', is_primary),
     ('excluding aborts', ~is_abort),
     ('excluding aborts, >=10s', ~is_abort & (durations >= 10)),
     ('excluding aborts, 10-600s', ~is_abort & (durations >= 10) & (durations <= 600)),
+    ('deduped + non-abort, 10-600s',
+     is_primary & ~is_abort & (durations >= 10) & (durations <= 600)),
 ]
 print(f"\n  {'target':<32} {'n':>8} {'sd':>8} {'protocol':>10} "
       f"{'serial+proto':>13}")
@@ -276,7 +370,7 @@ rule()
 print(" D. PARAMETERS ON JOIN-VALID ROWS ONLY")
 rule()
 
-clean = ~is_abort & (durations >= 10) & (durations <= 600)
+clean = is_primary & ~is_abort & (durations >= 10) & (durations <= 600)
 inventory = numeric_field_inventory(sequences)
 fields = [
     row['key'] for row in inventory

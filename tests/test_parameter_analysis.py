@@ -2,6 +2,7 @@ import math
 import os
 import sys
 import unittest
+from datetime import datetime, timedelta
 
 import numpy as np
 
@@ -12,6 +13,7 @@ from AlternatingPipeline.data.parameter_analysis import (  # noqa: E402
     heldout_regressor_score,
     numeric_field_inventory,
     numeric_matrix,
+    terminator_clusters,
     weighting_bucket,
     within_group_variation,
 )
@@ -205,6 +207,66 @@ class HeldoutRegressorScoreTests(unittest.TestCase):
     def test_length_mismatch_raises(self):
         with self.assertRaises(ValueError):
             heldout_regressor_score(np.zeros((5, 2)), np.zeros(4))
+
+
+def _segment(serial, start, duration):
+    return {
+        'serial_idx': serial,
+        'start_datetime': datetime(2024, 1, 2, 8, 0, 0) + timedelta(seconds=start),
+        'total_duration': float(duration),
+    }
+
+
+class TerminatorClusterTests(unittest.TestCase):
+    """Step 03 binds every MRI_MSR_100 to the next MRI_MSR_104/34.
+
+    Two MSR_100 events before one terminator therefore produce two OVERLAPPING
+    segments that end at the same instant and both claim the same measurement.
+    Step 02 emits a single row for that case, pairing the finish event with the
+    most recent MSR_100 — so the shorter segment is the real measurement and the
+    longer one has swallowed whatever came before it.
+    """
+
+    def test_segments_sharing_a_terminator_form_one_cluster(self):
+        # Two starts, 30s apart, both running to the same instant (t=120).
+        clusters = terminator_clusters([
+            _segment(0, start=0, duration=120),
+            _segment(0, start=30, duration=90),
+        ])
+        self.assertEqual(list(clusters['size']), [2, 2])
+
+    def test_primary_is_the_shortest_segment_in_the_cluster(self):
+        clusters = terminator_clusters([
+            _segment(0, start=0, duration=120),
+            _segment(0, start=30, duration=90),
+        ])
+        self.assertEqual(list(clusters['is_primary']), [False, True])
+
+    def test_segments_on_different_scanners_never_cluster(self):
+        clusters = terminator_clusters([
+            _segment(0, start=0, duration=120),
+            _segment(1, start=0, duration=120),
+        ])
+        self.assertEqual(list(clusters['size']), [1, 1])
+        self.assertEqual(list(clusters['is_primary']), [True, True])
+
+    def test_exactly_one_primary_per_cluster_even_when_durations_tie(self):
+        clusters = terminator_clusters([
+            _segment(0, start=0, duration=60),
+            _segment(0, start=0, duration=60),
+            _segment(0, start=0, duration=60),
+        ])
+        self.assertEqual(list(clusters['size']), [3, 3, 3])
+        self.assertEqual(sum(clusters['is_primary']), 1)
+
+    def test_segments_without_a_start_datetime_stand_alone(self):
+        """A segment we cannot place in time must not be silently merged."""
+        clusters = terminator_clusters([
+            {'serial_idx': 0, 'start_datetime': None, 'total_duration': 60.0},
+            {'serial_idx': 0, 'start_datetime': None, 'total_duration': 60.0},
+        ])
+        self.assertEqual(list(clusters['size']), [1, 1])
+        self.assertEqual(list(clusters['is_primary']), [True, True])
 
 
 if __name__ == '__main__':
