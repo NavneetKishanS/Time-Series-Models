@@ -12,10 +12,12 @@
 # "scanning time" (SD58) explicitly excluded as a leakage risk — see
 # csv_pipeline_seqparams/config.py's SUT_LEAKAGE_DENYLIST / assert_no_leakage.
 #
-# STATUS: TR and num_slices are confirmed (SUT_FIELD_MAP / EXAMINATION_SEQPARAM_FEATURES
-# in config.py, per DatabricksPipeline/sut_parameter_discovery.py's real-data
-# findings). trigger_mode remains unidentified and defaults to 'none' for
-# every row until a follow-up with Navneet confirms which field carries it.
+# STATUS: this notebook writes the WHOLE SEQPARAM_CANDIDATES union into every
+# row's conditioning, not just the parameters the selected PARAM_SET uses, so
+# one rebuild serves every parameter set and switching sets costs a training
+# run rather than another Spark job. trigger_mode remains unidentified and
+# defaults to 'none' for every row until a follow-up with Navneet confirms
+# which field carries it.
 #
 # Inputs:
 #   hive_metastore.eventlog.common_eventlog          (Spark)
@@ -364,8 +366,9 @@ def _add_ptab(df):
 # matched 0/20 real messages). Field sets differ by sequence type (haste vs.
 # ep2d_diff carry different keys entirely), so there's no fixed slot count —
 # SUT_FIELD_MAP looks fields up by name, not position. Gracefully returns {}
-# / partial dicts rather than raising, since SUT_FIELD_MAP only covers the
-# currently-confirmed fields (TR, num_slices).
+# / partial dicts rather than raising, since SUT_FIELD_MAP covers only the
+# confirmed fields out of the ~60 in a real message — and of those, different
+# sequence families carry different subsets.
 # =============================================================================
 
 _SUT_TOKEN_RE = re.compile(r"([A-Za-z][A-Za-z0-9]*):(\S+)")
@@ -872,13 +875,25 @@ for serial in SERIAL_NUMBERS:
             if sut_binary_before != sut_categoricals.get('sequence_binary', ''):
                 _sut_join_changed += 1
 
-        # Only the features in EXAMINATION_SEQPARAM_FEATURES ever reach the
-        # model — never the raw unfiltered sut_values (which may include
-        # scanning_time). Leakage gate #2: re-check the runtime dict keys,
+        # Write the WHOLE candidate union, not just the selected PARAM_SET.
+        # build_conditioning_tensor reads only the names in
+        # extra_conditioning_features, so the surplus keys are inert at
+        # training time — and one Spark rebuild then serves every parameter
+        # set, instead of costing another one per switch.
+        #
+        # Each name carries its OWN missing default. 0.0 is right for a
+        # measurement (absent means "not recorded") and wrong for a
+        # multiplicative factor like turbo_factor, which is absent on
+        # ep2d_diff and means "does not apply", not "zero" — see
+        # SEQPARAM_CANDIDATES in config.py.
+        #
+        # Still never the raw unfiltered sut_values (which may include
+        # scanning_time/ST). Leakage gate #2: re-check the runtime dict keys,
         # not just the static config list, right before they get merged.
         numeric_seqparams = {
-            name: _safe_float(sut_values.get(name))
-            for name in EXAMINATION_SEQPARAM_FEATURES
+            name: _safe_float(sut_values.get(name),
+                              default=SEQPARAM_MISSING_DEFAULTS[name])
+            for name in SEQPARAM_ALL_CANDIDATES
         }
         assert_no_leakage(numeric_seqparams.keys())
         trigger_mode_id = _trigger_mode_id(sut_values)
@@ -1064,12 +1079,45 @@ if examination_sequences:
           f"(all-zero => SUT parsing found nothing yet — expected until "
           f"sut_parameter_discovery.py confirms the real slot map)")
 
-    if EXAMINATION_SEQPARAM_FEATURES:
-        for name in EXAMINATION_SEQPARAM_FEATURES:
-            vals = np.array([s['conditioning'].get(name, 0.0) for s in examination_sequences])
-            print(f"  {name}: mean={vals.mean():.2f} std={vals.std():.2f} "
-                  f"min={vals.min():.2f} max={vals.max():.2f} "
-                  f"(all-zero/constant => parsing likely not finding this slot yet)")
+    # Every candidate is written to every row, so report every candidate — not
+    # just the selected PARAM_SET. The 'p99/div' column is the important one:
+    # an unscaled large-magnitude numeric silently erases the categorical
+    # conditioning through LayerNorm, which has cost this project three
+    # separate multi-week flat-duration incidents. It is invisible in the
+    # trained model and obvious here, so it gets checked here.
+    if SEQPARAM_ALL_CANDIDATES:
+        print(f"\n  {'candidate':<24} {'present':>8} {'p50':>10} {'p99':>10} "
+              f"{'divisor':>9} {'p99/div':>9}")
+        _scale_warnings = []
+        for name in SEQPARAM_ALL_CANDIDATES:
+            _divisor, _default = SEQPARAM_CANDIDATES[name]
+            vals = np.array([s['conditioning'].get(name, _default)
+                             for s in examination_sequences], dtype=float)
+            # "present" = not sitting at the default. A field at its default on
+            # every row is either unparsed or does not apply to this corpus.
+            _present = float(np.mean(vals != _default)) * 100.0
+            _p50, _p99 = np.percentile(vals, 50), np.percentile(vals, 99)
+            _scaled = _p99 / _divisor if _divisor else float('inf')
+            _flag = '' if 0.05 <= _scaled <= 20.0 else '  <-- CHECK DIVISOR'
+            if _flag:
+                _scale_warnings.append((name, _divisor, _p99, _scaled))
+            _sel = '*' if name in EXAMINATION_SEQPARAM_FEATURES else ' '
+            print(f" {_sel}{name:<24} {_present:>7.1f}% {_p50:>10.2f} "
+                  f"{_p99:>10.2f} {_divisor:>9.1f} {_scaled:>9.3f}{_flag}")
+        print(f"  (* = in the selected PARAM_SET={PARAM_SET!r}; "
+              f"'present' is the share of rows NOT at the missing default)")
+
+        if _scale_warnings:
+            print("\n  !! SCALE WARNING — these divisors put the feature far "
+                  "from O(1) after scaling:")
+            for name, _divisor, _p99, _scaled in _scale_warnings:
+                print(f"       {name}: p99 {_p99:.2f} / {_divisor:.1f} = "
+                      f"{_scaled:.3f}")
+            print("     Fix SEQPARAM_CANDIDATES in config.py before training on "
+                  "any set that\n     includes one of these. A feature scaled "
+                  "far above O(1) erases the\n     categorical conditioning "
+                  "through LayerNorm; one scaled far below it\n     is simply "
+                  "invisible to the model. Neither shows up as an error.")
 
     _msr34 = SOURCEID_VOCAB.get('MRI_MSR_34', 15)
     n_abort = sum(1 for s in examination_sequences if _msr34 in s['sequence'])

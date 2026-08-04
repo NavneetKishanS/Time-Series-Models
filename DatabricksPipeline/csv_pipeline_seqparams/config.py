@@ -20,13 +20,43 @@ sut_parameter_discovery.py has been run against real MRI_SUT_1005 data. The
 originally-hypothesized labeled "SD<n>: value" format was FALSIFIED (0/20
 real messages matched) — the real format is whitespace-delimited, self-named
 "KEY:VALUE" tokens (e.g. "TR:866 TE:101 SLC:9 ... MUID:17"). TR and num_slices
-(mapped from the "SLC" key) are now CONFIRMED via SUT_FIELD_MAP below and
-active in EXAMINATION_SEQPARAM_FEATURES. trigger_mode remains a PLACEHOLDER —
+(mapped from the "SLC" key) are CONFIRMED via SUT_FIELD_MAP below.
+
+WHICH parameters reach the model is now a single switch, PARAM_SET, defined
+immediately below this docstring: two named sets (`luke`, the acquisition-time
+formula; `navneet`, the 2026-08-04 domain-expert selection) drawn from one
+SEQPARAM_CANDIDATES table. trigger_mode remains a PLACEHOLDER —
 no field in the sampled messages showed variation consistent with a
 gating/trigger mode (candidates CMM/CDM/RCM/PHYS/PAC were constant across all
 samples), so TRIGGER_MODE_VOCAB is unused for now and every row defaults to
 'none' (safe, non-leaking default — see _trigger_mode_id below).
 """
+
+import os
+
+# ============================================================================
+# PARAM_SET — WHICH PARAMETERS GO INTO THE MODEL. The one switch.
+#
+# Görtler's action item from the 2026-08-04 call: "there isn't really a clear
+# part of the code where you can select which parameters are put into the
+# model, it's mostly they are split up ... that we can run two different model
+# results, based on two parameter selections."
+#
+# This file is the only one all seven notebooks %run, and 03/04/05/06/07 all
+# read EXAMINATION_SEQPARAM_FEATURES / EXAMINATION_SEQPARAM_SCALE / MODELS_DIR
+# / ANALYSIS_DIR from here. Resolving those four from PARAM_SET reaches every
+# call site without editing any of them.
+#
+# The named sets are defined in PARAM_SETS, further down next to the candidate
+# table they draw from. Override without editing this file:
+#
+#     PARAM_SET=navneet   (env var, same convention as PKL_PATH / TARGET_MAE_S)
+#
+# Models and analysis output are namespaced by this value — see MODELS_DIR /
+# ANALYSIS_DIR below — so two runs never overwrite each other's checkpoint.
+# ============================================================================
+
+PARAM_SET = os.environ.get('PARAM_SET', 'luke').strip().lower()
 
 # ============================================================================
 # TARGET SCANNERS & DATE RANGE — identical to csv_pipeline/, for a like-for-
@@ -50,9 +80,19 @@ EXAMINATION_TABLE = "hive_metastore.examination.examination_workflow"
 
 BODY_GROUP_MAPPING_PATH = "/dbfs/FileStore/tables/bodyupdated.xlsx"
 
+# ONE pkl serves every parameter set: step 03 writes the whole
+# SEQPARAM_ALL_CANDIDATES union into 'conditioning', and training reads only
+# the names in EXAMINATION_SEQPARAM_FEATURES. So switching sets costs a
+# training run, not another Spark rebuild.
 PKL_OUTPUT   = "/dbfs/FileStore/csv_pipeline_seqparams/preprocessed_data.pkl"
-MODELS_DIR   = "/dbfs/FileStore/csv_pipeline_seqparams/models"
-ANALYSIS_DIR = "/dbfs/FileStore/csv_pipeline_seqparams/analysis"
+
+# Models and analysis ARE namespaced by PARAM_SET. Two sets can widen
+# base_conditioning_dim to the same number while meaning different things per
+# column, so a shared directory would silently overwrite one checkpoint with
+# the other and leave the comparison unreadable — with nothing in the manifest
+# to say which set produced it.
+MODELS_DIR   = f"/dbfs/FileStore/csv_pipeline_seqparams/models/{PARAM_SET}"
+ANALYSIS_DIR = f"/dbfs/FileStore/csv_pipeline_seqparams/analysis/{PARAM_SET}"
 
 # Note: no EXAM_OUTPUT_DIR / step-02 CSV export in this pipeline. Unlike
 # csv_pipeline/, this fork has no 02_exam_preprocessing.py — the examination-
@@ -232,12 +272,24 @@ COIL_COLUMNS = [
 # permutation importance — not a model defect. TF (turbo factor) was the last
 # missing multiplicand and is now mapped.
 #
-# ST is CONFIRMED (2026-07-31) to be decided BEFORE the measurement — a planned
-# value, not an observed outcome, so it is not the SD58 leak and is admissible
-# as a model feature. Note SLC x TR reproduces ST for haste (9 x 866ms -> ST:8;
-# 15 x 1000ms -> ST:15) but NOT for ep2d_diff (18 x 4300ms = 77s vs ST:400), so
-# it is a genuine per-family computation rather than a redundant product of two
-# fields already held. Names stay as the raw message mnemonics.
+# ST/TST are PARSED but DENYLISTED as features — see SUT_LEAKAGE_DENYLIST.
+#
+# The 2026-07-31 reading was that ST is decided BEFORE the measurement, so a
+# planned value rather than an observed outcome, and therefore admissible. The
+# 2026-08-04 call overrides that: 03c section E measured ST as exact on ~86-87%
+# of rows, and a duration model handed a field that IS the answer 86% of the
+# time learns identity instead of physics. Being computed pre-scan does not
+# make it a legal input; it makes it a *second* copy of the target. 07 would
+# also have to synthesise ST before it could generate with it, which is the
+# same problem one step later.
+#
+# It stays in SUT_FIELD_MAP on purpose — 03c section E's ST-vs-duration
+# diagnosis reads it out of sut_debug, and that work continues.
+#
+# (Note SLC x TR reproduces ST for haste (9 x 866ms -> ST:8; 15 x 1000ms ->
+# ST:15) but NOT for ep2d_diff (18 x 4300ms = 77s vs ST:400) — a genuine
+# per-family computation, which is precisely why it carries target information
+# the individual fields do not.) Names stay as the raw message mnemonics.
 #
 # NOT here on purpose: DLL (sequence binary) and OR (orientation) are STRINGS.
 # They are extracted separately in 03_build_preprocessed_pkl.py — a category id
@@ -258,13 +310,16 @@ SUT_FIELD_MAP = {
     'PATP': 'parallel_imaging_phase',
     'ACC':  'acceleration_factor',
     'FOV':  'field_of_view',
-    # WARNING — sequence-scoped, NOT universal: TF is present on the haste
-    # (TSE-family) messages and ABSENT on ep2d_diff, which uses an echo factor
-    # (EF) instead. _safe_float(...) defaults a missing key to 0.0, and a turbo
-    # factor of 0 is not a real value — it means "does not apply to this
-    # sequence". Safe while it stays out of EXAMINATION_SEQPARAM_FEATURES;
-    # promoting it needs an explicit presence flag or scoping by sequence
-    # family. Same applies to any DIFF/BV0/BVM/EF field added later.
+    # SEQUENCE-SCOPED, not universal: TF is on the haste (TSE-family) messages
+    # and ABSENT on ep2d_diff, which uses an echo factor (EF) instead. That was
+    # a blocker while every missing feature defaulted to 0.0 — a turbo factor
+    # of 0 is not a real value, it means "does not apply to this sequence".
+    # RESOLVED by the per-name missing default in SEQPARAM_CANDIDATES: TF
+    # defaults to 1.0, which is not a fudge but the physically correct neutral
+    # (one echo per TR is exactly what a non-turbo sequence does), and it is
+    # the identity element of the TA formula's divisor. Any DIFF/BV0/BVM/EF
+    # field added later needs the same treatment — a default that means
+    # "does not apply", not a zero.
     'TF':   'turbo_factor',      # last missing multiplicand in the TA formula
     'TE':   'TE',                # echo time, ms — with TR/FA gives the
     'FA':   'flip_angle',        # weighting (T1/T2/PD) behind Görtler's
@@ -292,22 +347,129 @@ TRIGGER_MODE_VOCAB = {
 }  # placeholder categories — trigger_mode field itself is still unidentified
 NUM_TRIGGER_MODES = len(TRIGGER_MODE_VOCAB)
 
+# ============================================================================
+# THE CANDIDATE TABLE — every numeric parameter any PARAM_SET may draw on.
+#
+#   name -> (scale divisor, value to write when the field is absent)
+#
+# ONE keyed table rather than two positionally-aligned lists, because the
+# aligned-list arrangement it replaces could desync silently and needed an
+# assert at the bottom of this file to catch it. Here a name cannot have a
+# divisor without a default, or land at the wrong index.
+#
+# THE DIVISOR is not cosmetic. An unscaled large-magnitude numeric silently
+# erases the categorical conditioning through LayerNorm — see the
+# conditioning_scale warning in AlternatingPipeline/models/sequence_generator.py.
+# That exact bug caused three separate multi-week flat-duration incidents in
+# this project. Divisors come from the observed p99 (03b section 1's
+# 'suggested divisor' column); step 03 re-checks each one against real data at
+# write time and warns when p99/divisor lands outside [0.05, 20].
+#
+# THE MISSING DEFAULT matters just as much, and is why this table exists at
+# all. _safe_float in step 03 and safe_float in
+# AlternatingPipeline/training/utils.py both default an absent key to 0.0. For
+# the multiplicative factors in the acquisition-time formula
+#
+#     TA ~= TR x PEL x AVG x CONC / (PAT x TF)
+#
+# zero is WRONG: those fields are sequence-scoped, and absent means "does not
+# apply to this sequence family", not "zero of it". 1.0 is the identity element
+# of the formula and the physically correct reading — one average, one
+# concatenation, no parallel-imaging acceleration, one echo per TR. A genuine
+# measurement (TR, slice count, matrix lines) has no neutral value, so those
+# keep 0.0 and the model learns the missing-ness.
+# ============================================================================
+
+# Divisors and defaults are calibrated against the real sampled messages
+# pinned in tests/test_sut_parser.py (haste + ep2d_diff, serial 176148),
+# not guessed — the observed values are in the comments.
+SEQPARAM_CANDIDATES = {
+    # MEASUREMENTS — no neutral value. 0.0 reads as "not recorded", which is
+    # a distinction the model can learn.
+    'TR':                      (1000.0, 0.0),   # ms;  observed 866 / 1000 / 4300
+    'num_slices':              (  30.0, 0.0),   # SLC; observed 9 / 15 / 18
+    'phase_encoding_lines':    ( 256.0, 0.0),   # PEL; observed 333 / 80
+    'base_resolution':         ( 256.0, 0.0),   # BR;  observed 320 / 130
+    # MULTIPLICATIVE FACTORS — 1-based, so 1.0 is the identity element of the
+    # TA formula and the correct reading of "does not apply to this sequence".
+    'averages':                (   1.0, 1.0),   # AVG; observed 1
+    'concatenations':          (   1.0, 1.0),   # CONC; observed 1
+    'parallel_imaging_factor': (   1.0, 1.0),   # PAT; observed 2
+    'turbo_factor':            ( 256.0, 1.0),   # TF;  observed 256 on haste,
+                                                #      ABSENT on ep2d_diff (EF)
+    # REP is 0-BASED — it counts ADDITIONAL measurements, and all three sampled
+    # messages carry REP:0 for a single-measurement scan. So the neutral value
+    # here is 0, not 1, and an absent REP means the same thing the common
+    # present value does. (Watch this one in 03e's leave-one-out: a field that
+    # is 0 on nearly every row cannot carry a set, whatever the physics says.)
+    'repetitions':             (   1.0, 0.0),   # REP; observed 0 on all three
+    # PPF/SPF are Siemens ENUM CODES, not fractions — observed PPF 1 and 8,
+    # SPF 16. Scaled by the apparent ceiling of the shared enum so both land
+    # at O(1) and stay on one scale, since they are the same kind of quantity.
+    # Being an enum, the model reads them as ordered categories rather than
+    # ratios; step 03's divisor check will flag it if a value ever exceeds 16.
+    'phase_partial_fourier':   (  16.0, 1.0),   # PPF; observed 1 / 8
+    'slice_partial_fourier':   (  16.0, 1.0),   # SPF; observed 16
+}
+
+# ============================================================================
+# THE TWO NAMED SETS. Select with PARAM_SET at the top of this file.
+# ============================================================================
+
+PARAM_SETS = {
+    # The acquisition-time formula, as its own multiplicands. Every term of
+    # TA ~= TR x PEL x AVG x CONC / (PAT x TF), plus the slice count. The bet
+    # is that handing the model the factors it would need to reconstruct the
+    # formula beats handing it a shorter list of stronger correlates.
+    'luke': [
+        'TR', 'num_slices', 'phase_encoding_lines', 'averages',
+        'concatenations', 'parallel_imaging_factor', 'turbo_factor',
+    ],
+    # Görtler, 2026-08-04. Deliberately NOT the formula: he argued most timing
+    # parameters are physically real but redundant, because echo spacing, TE
+    # and slice thickness all impose constraints that surface as a floor on TR,
+    # and TR is repeated hundreds of times per scan. So the set is TR plus only
+    # the things that change HOW MANY TRs run.
+    #   base_resolution — the gap he flagged: "512 will take two times longer"
+    #                     than 256. Already parsed as BR, never promoted.
+    #   partial Fourier — the genuine exception to the redundancy argument. A
+    #                     256-line acquisition drops to ~136 lines (128 + a few
+    #                     to sample the matrix centre twice), roughly halving
+    #                     the time. Not a longer TR — fewer of them.
+    # Ruled out by name in that call: flip angle, echo spacing, TE, slice
+    # thickness, field of view, MUID, ST.
+    'navneet': [
+        'TR', 'num_slices', 'averages', 'repetitions',
+        'base_resolution', 'phase_partial_fourier', 'slice_partial_fourier',
+    ],
+}
+
+if PARAM_SET not in PARAM_SETS:
+    raise ValueError(
+        f"PARAM_SET={PARAM_SET!r} is not a known parameter set. "
+        f"Choose one of {sorted(PARAM_SETS)}, or add it to PARAM_SETS in "
+        f"csv_pipeline_seqparams/config.py."
+    )
+
 # Numeric SUT parameter feature names that ride the flat conditioning tensor
 # (see AlternatingPipeline/training/utils.py::build_conditioning_tensor
-# extra_feature_names).
-EXAMINATION_SEQPARAM_FEATURES = ['TR', 'num_slices']
+# extra_feature_names). Resolved from PARAM_SET — this is the name every
+# downstream notebook already reads, which is why the switch reaches all of
+# them without touching any.
+EXAMINATION_SEQPARAM_FEATURES = list(PARAM_SETS[PARAM_SET])
+EXAMINATION_SEQPARAM_SCALE = [
+    SEQPARAM_CANDIDATES[name][0] for name in EXAMINATION_SEQPARAM_FEATURES
+]
 
-# Per-feature O(1) scale divisors, aligned 1:1 with
-# EXAMINATION_SEQPARAM_FEATURES. CRITICAL: an entry here is REQUIRED before
-# adding the matching feature name above — see the conditioning_scale /
-# LayerNorm-erasure warning in AlternatingPipeline/models/sequence_generator.py
-# (raw large-magnitude numeric features silently erase categorical
-# conditioning if left unscaled — this exact bug caused three separate
-# multi-week flat-duration incidents in this project). Real observed ranges
-# from discovery (TR 866-4300ms, SLC/num_slices 9-18) confirm these divisors
-# land features in a sane order of magnitude: TR / 1000; num_slices / 30.
-EXAMINATION_SEQPARAM_SCALE = [1000.0, 30.0]  # MUST match
-                                              # EXAMINATION_SEQPARAM_FEATURES length
+# What step 03 writes into every row's 'conditioning' — the union of every set,
+# not just the selected one. build_conditioning_tensor reads only the names in
+# extra_feature_names, so the surplus keys are inert at training time, and one
+# Spark rebuild then serves every parameter set.
+SEQPARAM_ALL_CANDIDATES = list(SEQPARAM_CANDIDATES)
+
+SEQPARAM_MISSING_DEFAULTS = {
+    name: default for name, (_, default) in SEQPARAM_CANDIDATES.items()
+}
 
 # ============================================================================
 # LEAKAGE GUARD — three independent gates:
@@ -327,27 +489,93 @@ EXAMINATION_SEQPARAM_SCALE = [1000.0, 30.0]  # MUST match
 # correspond to any literal field in the confirmed KEY:VALUE message format
 # (no "SD" label exists in it at all) — kept here as defense-in-depth in case
 # a future field is found to be duration-equivalent.
+#
+# TWO denylists, because there are two distinct objections and only the first
+# was ever guarded:
+#
+#   SUT_LEAKAGE_DENYLIST     bans a field for being ~equal to the TARGET.
+#   SUT_IDENTIFIER_DENYLIST  bans a field for being an IDENTITY — an id that
+#                            cannot transfer to another customer or another
+#                            day, which is the objection that ruled the
+#                            protocol name out as a feature in the first place.
 # ============================================================================
 
-SUT_LEAKAGE_DENYLIST = {'scanning_time'}
+# ST/TST join scanning_time here as of the 2026-08-04 call — see the long note
+# above SUT_FIELD_MAP. 03c section E measured ST as exact on ~86-87% of rows.
+SUT_LEAKAGE_DENYLIST = {'scanning_time', 'ST', 'TST'}
+
+# 03d_identifier_leakage_check.py, run 2026-08-04, ACQUITTED MUID as a protocol
+# proxy: purity MUID -> protocol 29.8% (the leak threshold was ~90%), 11,409
+# MUIDs against 3,357 protocols — finer than the protocol, not a coarser
+# Siemens family id — and dropping MUID+VER moved the parameter model by -0.0s
+# (19.6s either way). As a predictor in its own right it scored R2 -19.6% /
+# 72.5s MAE, WORSE than the serial-alone baseline (5.8% / 66.9s): the signature
+# of a high-cardinality nuisance id, not a hidden protocol.
+#
+# Görtler described the mechanism unprompted in the same week's call, and it
+# matches the measurement exactly: MUID is a per-day measurement counter that
+# resets nightly and skips the ids consumed by adjustment scans, so it carries
+# ordering information and nothing else.
+#
+# Denylisted anyway, per 03d's own verdict: a field that CAN leak should not be
+# one retrain away from leaking. VER (scanner software version) is not a scan
+# property at all — it splits the corpus by install, which lets a tree memorise
+# per-site behaviour.
+SUT_IDENTIFIER_DENYLIST = {'MUID', 'VER'}
 
 
-def assert_no_leakage(feature_names, denylist=SUT_LEAKAGE_DENYLIST):
-    """Raise if any denylisted (duration-equivalent) name is present.
+def assert_no_leakage(feature_names, denylist=SUT_LEAKAGE_DENYLIST,
+                      identifier_denylist=SUT_IDENTIFIER_DENYLIST):
+    """Raise if any banned name is present, naming which objection applies.
 
     feature_names: any iterable of feature-name strings (a static config
         list, or the actual runtime keys of a conditioning dict).
     """
+    feature_names = list(feature_names)
+
     overlap = denylist.intersection(feature_names)
     if overlap:
         raise ValueError(
-            f"Leakage guard tripped: {overlap} must never be used as an "
-            f"input feature — it is ~equal to the duration target."
+            f"Leakage guard tripped: {sorted(overlap)} must never be used as "
+            f"an input feature — it is ~equal to the duration target."
+        )
+
+    identity = (identifier_denylist or set()).intersection(feature_names)
+    if identity:
+        raise ValueError(
+            f"Identifier guard tripped: {sorted(identity)} must never be used "
+            f"as an input feature — it identifies a measurement, a day or an "
+            f"install rather than describing the scan, so it cannot transfer "
+            f"to another customer."
         )
 
 
-# Gate #1 — fires the moment this config module is loaded.
-assert_no_leakage(EXAMINATION_SEQPARAM_FEATURES)
+# Gate #1 — fires the moment this config module is loaded, for EVERY named set
+# rather than only the selected one. A typo in a set nobody has run yet is a
+# bug you want to hear about now, not on the day you switch to it.
+for _set_name, _set_features in PARAM_SETS.items():
+    assert_no_leakage(_set_features)
+
+    _unknown = [n for n in _set_features if n not in SEQPARAM_CANDIDATES]
+    if _unknown:
+        raise ValueError(
+            f"PARAM_SETS[{_set_name!r}] names {_unknown}, which have no entry "
+            f"in SEQPARAM_CANDIDATES. Every feature needs an explicit scale "
+            f"divisor and missing-value default before it can reach the model "
+            f"(see the LayerNorm-erasure warning above)."
+        )
+
+# Every candidate must be something the SUT parser actually produces, or step
+# 03 would write its default into every row forever and the feature would look
+# dead rather than misspelled.
+_unmapped = [n for n in SEQPARAM_CANDIDATES if n not in set(SUT_FIELD_MAP.values())]
+if _unmapped:
+    raise ValueError(
+        f"SEQPARAM_CANDIDATES names {_unmapped}, which SUT_FIELD_MAP never "
+        f"produces. Add the raw message key to SUT_FIELD_MAP first, or the "
+        f"feature will be a constant."
+    )
+
 assert len(EXAMINATION_SEQPARAM_FEATURES) == len(EXAMINATION_SEQPARAM_SCALE), (
     "EXAMINATION_SEQPARAM_FEATURES and EXAMINATION_SEQPARAM_SCALE must be "
     "the same length — every new numeric feature needs an explicit scale "

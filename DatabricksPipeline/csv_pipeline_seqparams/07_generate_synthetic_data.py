@@ -9,9 +9,12 @@
 #
 #   1. The examination model is built with build_seqparams_model_config() and
 #      loaded from the csv_pipeline_seqparams checkpoint.
-#   2. Its conditioning tensor is 12-dim (10 base + TR + num_slices) and its
-#      info dict carries trigger_mode.
-#   3. TR/num_slices do not exist for a synthetic scan, so they are SAMPLED
+#   2. Its conditioning tensor is 10 base dims + one column per
+#      EXAMINATION_SEQPARAM_FEATURES, which the PARAM_SET switch in config.py
+#      selects — so the width follows the chosen parameter set and the
+#      checkpoint must come from the matching MODELS_DIR. Its info dict
+#      carries trigger_mode.
+#   3. Those parameters do not exist for a synthetic scan, so they are SAMPLED
 #      per (body_region, sequence_type) from the real training distribution
 #      via AlternatingPipeline/data/sut_parameter_sampling.py.
 #

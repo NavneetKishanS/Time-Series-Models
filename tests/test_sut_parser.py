@@ -144,13 +144,14 @@ class ParseSutMessageTests(unittest.TestCase):
     def test_turbo_factor_is_sequence_scoped_not_universal(self):
         """TF is on the TSE-family (haste) messages and absent from ep2d_diff.
 
-        EPI has no turbo factor — it uses an echo factor (EF) instead. This
-        matters because _safe_float(sut_values.get('turbo_factor')) defaults a
-        missing key to 0.0, and a turbo factor of 0 is not a real value, it
-        means "does not apply to this sequence". Harmless while turbo_factor
-        stays out of EXAMINATION_SEQPARAM_FEATURES; promoting it needs an
-        explicit presence flag or scoping by sequence family. Pinned so the
-        asymmetry is visible rather than discovered as a silent zero column.
+        EPI has no turbo factor — it uses an echo factor (EF) instead. That
+        blocked TF as a feature for as long as every missing value defaulted to
+        0.0, since a turbo factor of 0 is not a real value: it means "does not
+        apply to this sequence". Resolved by the per-name missing default in
+        SEQPARAM_CANDIDATES (TF -> 1.0, one echo per TR, the identity element
+        of the TA formula), which is what let TF into the 'luke' set. Pinned so
+        the asymmetry stays visible rather than being rediscovered as a silent
+        zero column.
         """
         self.assertEqual(self.parse(_HASTE_MSG_1)['turbo_factor'], '256')
         self.assertNotIn('turbo_factor', self.parse(_EP2D_DIFF_MSG))
@@ -159,11 +160,16 @@ class ParseSutMessageTests(unittest.TestCase):
     def test_st_is_a_computed_acquisition_time_for_haste(self):
         """SLC x TR reproduces ST on both haste messages.
 
-        ST is CONFIRMED (2026-07-31) to be decided before the measurement — a
-        planned value, not an observed outcome — so it is not the SD58 leak and
-        is admissible as a model feature. This test keeps the supporting
-        arithmetic visible: a measured elapsed time would not land on the
-        computed product to the second.
+        ST is decided before the measurement — a planned value, not an observed
+        outcome — which is why the 2026-07-31 reading called it admissible. The
+        2026-08-04 call overrode that and DENYLISTED it: computed pre-scan or
+        not, 03c section E measured ST as exact on ~86-87% of rows, so it is a
+        second copy of the target rather than a description of the scan.
+
+        The arithmetic still matters and is still parsed — 03c section E reads
+        ST out of sut_debug to diagnose the ST-vs-duration gap — so it stays
+        pinned here. A measured elapsed time would not land on the computed
+        product to the second.
         """
         for message in (_HASTE_MSG_1, _HASTE_MSG_2):
             parsed = self.parse(message)
@@ -176,8 +182,11 @@ class ParseSutMessageTests(unittest.TestCase):
         18 slices x 4300ms = 77.4s against ST:400. Diffusion covers all slices
         per TR and repeats over directions/b-values, so ST is a real
         per-sequence-family computation rather than a redundant product of two
-        fields already in the feature set. That is why ST is worth having at
-        all, and why nobody should "simplify" it away as derivable.
+        fields already in the feature set.
+
+        Which is exactly why it is denylisted rather than merely redundant: ST
+        carries duration information the individual parameters do not, and
+        handing a duration model that information is handing it the answer.
         """
         parsed = self.parse(_EP2D_DIFF_MSG)
         computed = int(parsed['num_slices']) * int(parsed['TR']) / 1000.0
@@ -224,6 +233,83 @@ class ParseSutRawTests(unittest.TestCase):
     def test_non_string_message_returns_empty_dict(self):
         self.assertEqual(self.raw(None), {})
         self.assertEqual(self.raw(float('nan')), {})
+
+
+class ConditioningUnionTests(unittest.TestCase):
+    """Step 03 writes the WHOLE candidate union into 'conditioning', not just
+    the selected PARAM_SET's features.
+
+    That is what lets one Spark rebuild serve both parameter sets — switching
+    sets costs a training run instead of another hour of Spark. The surplus
+    keys are inert at training time because build_conditioning_tensor reads
+    only the names in extra_feature_names.
+
+    Reproduces step 03's construction rather than importing it: the surrounding
+    module queries Spark at import and cannot run outside Databricks.
+    """
+
+    def setUp(self):
+        self.config = _load_config()
+        self.parse = _load_sut_parsers()['_parse_sut_message']
+
+    def _numeric_seqparams(self, message):
+        """Step 03's dict comprehension, kept in step with it by
+        StepDefinitionTests in test_seqparams_config_guard.py."""
+        parsed = self.parse(message)
+        out = {}
+        for name in self.config.SEQPARAM_ALL_CANDIDATES:
+            default = self.config.SEQPARAM_MISSING_DEFAULTS[name]
+            try:
+                out[name] = float(parsed[name])
+            except (KeyError, TypeError, ValueError):
+                out[name] = default
+        return out
+
+    def test_writes_every_candidate_regardless_of_selected_set(self):
+        values = self._numeric_seqparams(_HASTE_MSG_1)
+        self.assertEqual(set(values), set(self.config.SEQPARAM_ALL_CANDIDATES))
+        # Both named sets must be fully satisfiable from one pkl.
+        for name, features in self.config.PARAM_SETS.items():
+            with self.subTest(param_set=name):
+                self.assertTrue(set(features).issubset(values))
+
+    def test_reads_the_real_values_off_a_haste_message(self):
+        values = self._numeric_seqparams(_HASTE_MSG_1)
+        self.assertEqual(values['TR'], 866.0)
+        self.assertEqual(values['num_slices'], 9.0)
+        self.assertEqual(values['phase_encoding_lines'], 333.0)
+        self.assertEqual(values['base_resolution'], 320.0)
+        self.assertEqual(values['turbo_factor'], 256.0)
+
+    def test_absent_turbo_factor_becomes_one_not_zero(self):
+        # The whole reason the candidate table carries a per-name default.
+        # ep2d_diff has no TF at all; 0.0 would tell the model this sequence
+        # had a turbo factor of zero, which is not a thing.
+        values = self._numeric_seqparams(_EP2D_DIFF_MSG)
+        self.assertNotIn('turbo_factor', self.parse(_EP2D_DIFF_MSG))
+        self.assertEqual(values['turbo_factor'], 1.0)
+
+    def test_a_real_zero_survives_rather_than_becoming_the_default(self):
+        # REP:0 is present and means "no additional measurements". It must be
+        # read as the 0 it is, not confused with an absent field.
+        self.assertEqual(self.parse(_HASTE_MSG_1)['repetitions'], '0')
+        self.assertEqual(self._numeric_seqparams(_HASTE_MSG_1)['repetitions'], 0.0)
+
+    def test_denylisted_fields_never_reach_the_conditioning_dict(self):
+        # Gate #2: ST/TST/scanning_time and the identifier fields must not be
+        # in what step 03 merges into 'conditioning', whatever the message said.
+        values = self._numeric_seqparams(_HASTE_MSG_1)
+        self.config.assert_no_leakage(values.keys())  # must not raise
+        banned = (self.config.SUT_LEAKAGE_DENYLIST
+                  | self.config.SUT_IDENTIFIER_DENYLIST)
+        self.assertEqual(banned.intersection(values), set())
+        # ...even though the message plainly carries them.
+        for token in ('ST:8', 'TST:9', 'MUID:17', 'VER:'):
+            self.assertIn(token, _HASTE_MSG_1)
+
+    def test_an_empty_message_yields_every_default(self):
+        values = self._numeric_seqparams(None)
+        self.assertEqual(values, dict(self.config.SEQPARAM_MISSING_DEFAULTS))
 
 
 class ParseSutCategoricalsTests(unittest.TestCase):
