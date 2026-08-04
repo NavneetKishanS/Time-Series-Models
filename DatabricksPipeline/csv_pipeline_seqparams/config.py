@@ -149,6 +149,24 @@ MAX_EXAMINATION_DURATION = 3000
 MIN_EXAMINATION_DURATION = 10
 MAX_PER_TOKEN_DURATION   = 600
 
+# Keep ONE segment per MRI_MSR_104/34 terminator, dated from the most recent
+# MRI_MSR_100 — the same rule csv_pipeline/02_exam_preprocessing.py:220 uses.
+#
+# Binding every MSR_100 to the next terminator made two MSR_100 events before
+# one terminator produce two OVERLAPPING segments that both claimed the same
+# measurement. 03c section B2 measured that on 16.9% of rows and showed it was
+# the whole reason the pkl's durations ran fat against the exam CSVs the ±15s
+# benchmark came from (mean 115.7s → 94.1s, sd 214.7s → 125.5s once deduped).
+# Section C scored the consequence on held-out data:
+#
+#     as-is        protocol 31.2s   serial+protocol 24.0s
+#     deduped      protocol 18.3s   serial+protocol 15.4s   <- recovers the 15.3s benchmark
+#     + non-abort, 10-600s          serial+protocol 11.4s   <- beats it
+#
+# Set False to rebuild the old overlapping population for comparison. It drops
+# ~17% of rows, so it is a population decision, not a bug fix — hence a flag.
+DEDUPE_SHARED_TERMINATOR = True
+
 COIL_COLUMNS = [
     'BC', 'SP1', 'SP2', 'SP3', 'SP4', 'SP5', 'SP6', 'SP7', 'SP8', '15K',
     'HW1', 'HW2', 'HW3', 'HE1', 'HE2', 'HE3', 'HE4', 'NE1', 'NE2', 'SHL',

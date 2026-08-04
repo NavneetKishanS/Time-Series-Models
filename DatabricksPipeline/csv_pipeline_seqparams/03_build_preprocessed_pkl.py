@@ -435,6 +435,74 @@ def _trigger_mode_id(sut_values):
     raw = str(sut_values.get('trigger_mode', 'none')).strip().lower()
     return TRIGGER_MODE_VOCAB.get(raw, TRIGGER_MODE_VOCAB.get('unknown', 0))
 
+
+def _segment_bounds(start_rows, end_rows, n_rows, dedupe=True):
+    """One (start_row, end_row) pair per measurement.
+
+    Every MRI_MSR_100 binds to the next MRI_MSR_104/34. When two MSR_100
+    events precede one terminator, that produced two OVERLAPPING segments
+    ending at the same instant, both claiming the same measurement —
+    03c section B2 measured this on 16.9% of rows, and it is why the pkl's
+    duration distribution had a fat tail (mean 115.7s, sd 214.7s) that the
+    exam CSVs the ±15s benchmark was measured on do not have.
+
+    With `dedupe`, only the LAST start before a shared terminator survives.
+    That matches `csv_pipeline/02_exam_preprocessing.py:220`, which emits one
+    row per finish event dated from the *most recent* MSR_100, and it is what
+    03c section C scored: held-out serial+protocol MAE 24.0s → 15.4s.
+
+    `dedupe=False` reproduces the old overlapping behaviour, so the rows this
+    drops stay measurable instead of being taken on faith.
+    """
+    bounds = []
+    for index, start_row in enumerate(start_rows):
+        cut = bisect.bisect_right(end_rows, start_row)
+        if cut < len(end_rows):
+            end_row = end_rows[cut]
+        elif index + 1 < len(start_rows):
+            # No terminator left in the log — stop before the next measurement
+            # rather than swallowing it. 03c measured 0 segments on this path.
+            end_row = start_rows[index + 1] - 1
+        else:
+            end_row = n_rows - 1
+        bounds.append((start_row, end_row))
+
+    if not dedupe:
+        return bounds
+
+    # start_rows ascends and end_row is non-decreasing in it, so members of a
+    # cluster are adjacent: keep a pair only when the next one ends elsewhere.
+    return [pair for index, pair in enumerate(bounds)
+            if index + 1 == len(bounds) or bounds[index + 1][1] != pair[1]]
+
+
+def _choose_sut_row(sut_rows, start_row, end_row):
+    """The MRI_SUT_1005 row describing THIS measurement. Returns (row, scope).
+
+    The original join took the most recent SUT event strictly *before* the
+    segment. 03c section A scored the sequence that join implies against the
+    sequence actually scanned: 45.7% agreement overall, and near-zero for
+    adjustment sequences — AdjGreSeq 0.0%, tfl_b1map 1.5%, AALScout 6.9%.
+    Those are prep steps that run *before* the real measurement, so their SUT
+    event was being carried forward onto the scan that followed. (The 72.6%
+    on `tse` looks better than it is: `tse` is ~48% of all rows, so chance
+    alone scores near that.)
+
+    So an event INSIDE [start_row, end_row] wins — that is the sequence being
+    loaded for this measurement. The first one wins if several are inside; the
+    later ones are re-reports of the same load.
+
+    The before-join survives as a fallback because coverage matters, but the
+    returned `scope` labels which rule fired, so the next 03c run can score
+    'inside' and 'before' separately instead of assuming this fix worked.
+    """
+    inside = bisect.bisect_left(sut_rows, start_row)
+    if inside < len(sut_rows) and sut_rows[inside] <= end_row:
+        return sut_rows[inside], 'inside'
+    if inside > 0:
+        return sut_rows[inside - 1], 'before'
+    return None, 'none'
+
 # COMMAND ----------
 
 # =============================================================================
@@ -580,6 +648,11 @@ examination_sequences = []
 _sut_parse_hits = 0
 _sut_parse_total = 0
 _sut_binary_hits = 0
+# Which join rule fired, and — where the new rule differs from the old one —
+# whether the two disagree about the sequence. This is the evidence 03c needs
+# to score the fix instead of us assuming it worked.
+_sut_scope_counts = {'inside': 0, 'before': 0, 'none': 0}
+_sut_join_changed = 0
 _protocol_parse_hits = 0
 _protocol_parse_total = 0
 
@@ -664,24 +737,16 @@ for serial in SERIAL_NUMBERS:
     ].tolist())
     coil_rows = df_merged.index[df_merged['MessageIdentification'] == 'MRI_CCS_11'].tolist()
     exam_rows = df_merged.index[df_merged['MessageIdentification'] == 'MRI_EXU_95'].tolist()
-    # NEW — SUT sequence-protocol parameter rows. Join semantics (most-recent
-    # -before, same as coil_rows) confirmed correct via sut_parameter_discovery.py
-    # STEP 2: SUT fires periodically (ratio ~0.25-0.31 vs. MSR_100 events, not
-    # ~1.0), so several consecutive measurement segments legitimately share
-    # the same preceding SUT event.
+    # SUT sequence-protocol parameter rows. The join is `_choose_sut_row`:
+    # in-segment first, most-recent-before as a labelled fallback. The old
+    # unconditional most-recent-before join scored 45.7% in 03c section A.
     sut_rows = df_merged.index[df_merged['MessageIdentification'] == 'MRI_SUT_1005'].tolist()
 
     n_before = len(examination_sequences)
 
-    for idx_in_list, start_row in enumerate(start_rows):
-        _ec = bisect.bisect_right(end_rows, start_row)
-        if _ec < len(end_rows):
-            end_row = end_rows[_ec]
-        elif idx_in_list + 1 < len(start_rows):
-            end_row = start_rows[idx_in_list + 1] - 1
-        else:
-            end_row = len(df_merged) - 1
-
+    for start_row, end_row in _segment_bounds(
+        start_rows, end_rows, len(df_merged), dedupe=DEDUPE_SHARED_TERMINATOR,
+    ):
         segment = df_merged.iloc[start_row: end_row + 1]
         if len(segment) < 2:
             continue
@@ -720,17 +785,41 @@ for serial in SERIAL_NUMBERS:
             if _pc >= 0 else {col: 0 for col in COIL_COLUMNS}
         )
 
-        # NEW — SUT sequence-protocol parameters (most-recent-before start_row)
-        _ps = bisect.bisect_left(sut_rows, start_row) - 1
-        _sut_msg = df_merged.iloc[sut_rows[_ps]]['Message'] if _ps >= 0 else None
+        # SUT sequence-protocol parameters for THIS measurement — see
+        # _choose_sut_row for why in-segment beats most-recent-before.
+        _sut_row, sut_scope = _choose_sut_row(sut_rows, start_row, end_row)
+        _sut_msg = df_merged.iloc[_sut_row]['Message'] if _sut_row is not None else None
         sut_values = _parse_sut_message(_sut_msg)
         sut_raw = _parse_sut_raw(_sut_msg)
         sut_categoricals = _parse_sut_categoricals(_sut_msg)
         _sut_parse_total += 1
+        _sut_scope_counts[sut_scope] += 1
         if sut_values:
             _sut_parse_hits += 1
         if sut_categoricals.get('sequence_binary'):
             _sut_binary_hits += 1
+
+        # Distance from the segment start to the event we joined, in seconds:
+        # negative for the 'before' fallback, >= 0 for an in-segment event. A
+        # 'before' distance of many minutes is a join that should be distrusted,
+        # and 03c can now filter on it rather than guess.
+        sut_offset_s = (
+            float(df_merged.iloc[_sut_row]['timediff']
+                  - df_merged.iloc[start_row]['timediff'])
+            if _sut_row is not None else float('nan')
+        )
+        # Only where the new rule actually moved the join: what the OLD rule
+        # would have said. One extra regex on the rows that changed, and it
+        # turns "did the fix help?" into a measurable question.
+        sut_binary_before = ''
+        if sut_scope == 'inside':
+            _old = bisect.bisect_left(sut_rows, start_row) - 1
+            if _old >= 0:
+                sut_binary_before = _parse_sut_categoricals(
+                    df_merged.iloc[sut_rows[_old]]['Message']
+                ).get('sequence_binary', '')
+            if sut_binary_before != sut_categoricals.get('sequence_binary', ''):
+                _sut_join_changed += 1
 
         # Only the features in EXAMINATION_SEQPARAM_FEATURES ever reach the
         # model — never the raw unfiltered sut_values (which may include
@@ -786,6 +875,13 @@ for serial in SERIAL_NUMBERS:
             # parameter can be evaluated offline instead of costing another
             # Spark rebuild. Same rule: never merged into 'conditioning'.
             'sut_raw': sut_raw,
+            # Audit-only join evidence. 'inside' means the SUT event was
+            # emitted during this measurement; 'before' is the old fallback,
+            # which 03c section A scored at 45.7% agreement. sut_binary_before
+            # is filled only where the two rules disagree.
+            'sut_scope': sut_scope,
+            'sut_offset_s': sut_offset_s,
+            'sut_binary_before': sut_binary_before,
             'total_duration': total_duration,
             'start_datetime': start_dt,
         })
@@ -794,8 +890,25 @@ for serial in SERIAL_NUMBERS:
 
 print(f"\nTotal examination sequences: {len(examination_sequences)}")
 print(f"SUT parse hit rate: {_sut_parse_hits}/{_sut_parse_total} segments had a "
-      f"preceding MRI_SUT_1005 event with at least one recognized slot "
+      f"joined MRI_SUT_1005 event with at least one recognized slot "
       f"({100 * _sut_parse_hits / max(1, _sut_parse_total):.1f}%)")
+
+# The join fix, stated as a number. 'inside' is the trustworthy scope; every
+# 'before' row is still carrying the old 45.7%-agreement risk, so if this is
+# mostly 'before' the fix has NOT landed and 03c will say so.
+_scope_total = max(1, sum(_sut_scope_counts.values()))
+print("SUT join scope: " + "  ".join(
+    f"{name}={count} ({100 * count / _scope_total:.1f}%)"
+    for name, count in _sut_scope_counts.items()
+))
+print(f"  → {_sut_join_changed} of the {_sut_scope_counts['inside']} in-segment "
+      f"joins name a DIFFERENT sequence than the old most-recent-before rule "
+      f"({100 * _sut_join_changed / max(1, _sut_scope_counts['inside']):.1f}%) "
+      f"— that share is what the old join was getting wrong.")
+if _sut_scope_counts['inside'] < 0.5 * _scope_total:
+    print("  !! Fewer than half the segments contain their own SUT event. The "
+          "in-segment join cannot be the main path; re-read 03c section A "
+          "before trusting any per-parameter importance.")
 
 # The general duration model is being rebuilt on sequence + sequence parameters
 # (Görtler, 2026-07-31), so the breadth of the raw capture is now a first-class

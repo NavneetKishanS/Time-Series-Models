@@ -184,6 +184,86 @@ print("""
 # COMMAND ----------
 
 # =============================================================================
+# A2 — DID THE JOIN FIX WORK?
+#
+# The 2026-08-03 run of section A returned 45.7%, so step 03 was changed to
+# prefer the MRI_SUT_1005 event emitted INSIDE the segment over the most recent
+# one before it (`_choose_sut_row`). Each row now records which rule fired
+# ('sut_scope'), how far the event sat from the segment start ('sut_offset_s'),
+# and — where the two rules disagree — what the old rule would have said
+# ('sut_binary_before').
+#
+# So section A can be split by scope. 'inside' is the fix; 'before' is the old
+# behaviour still running as a fallback. If 'inside' does not score materially
+# higher than 'before', the fix is wrong and the in-segment event is not the
+# one describing the measurement either.
+# =============================================================================
+
+rule()
+print(" A2. DID THE JOIN FIX WORK?")
+rule()
+
+scopes = np.array([s.get('sut_scope', '') for s in sequences])
+
+if not scopes.any():
+    print("\n  This pkl predates the join fix — no 'sut_scope' field. Re-run "
+          "step 03, then this section reports itself.")
+else:
+    print(f"\n  {'scope':<10} {'rows':>8} {'share':>7} {'testable':>9} {'agree':>7}")
+    rule('-')
+    for scope in ('inside', 'before', 'none'):
+        member = scopes == scope
+        if not member.any():
+            continue
+        scored = member & testable
+        agree_str = f"{100.0 * agrees[scored].mean():>6.1f}%" if scored.any() else "     --"
+        print(f"  {scope:<10} {member.sum():>8,} {100.0 * member.mean():>6.1f}% "
+              f"{scored.sum():>9,} {agree_str}")
+    rule('-')
+
+    offsets = np.array([float(s.get('sut_offset_s', np.nan)) for s in sequences])
+    for scope in ('inside', 'before'):
+        member = (scopes == scope) & np.isfinite(offsets)
+        if member.any():
+            values = np.abs(offsets[member])
+            print(f"  {scope:<10} distance from segment start: "
+                  f"p50 {np.percentile(values, 50):>6.1f}s   "
+                  f"p90 {np.percentile(values, 90):>7.1f}s   "
+                  f"max {values.max():>8.1f}s")
+
+    # The direct before/after comparison, on the rows where the rules disagree.
+    changed = np.array([bool(s.get('sut_binary_before'))
+                        and s.get('sut_binary_before') != s.get('sequence_binary')
+                        for s in sequences])
+    moved = changed & testable
+    if moved.any():
+        old_ids = np.array([classify_sequence_type(s.get('sut_binary_before') or '')
+                            for s in sequences])
+        print(f"\n  On the {moved.sum():,} testable rows where the new rule picked a "
+              f"DIFFERENT sequence than the old one:")
+        print(f"    old most-recent-before rule agreed  "
+              f"{100.0 * (old_ids[moved] == seq_types[moved]).mean():>6.1f}%")
+        print(f"    new in-segment rule agrees          "
+              f"{100.0 * agrees[moved].mean():>6.1f}%")
+        print("    ^ this is the fix, isolated. If the second number is not "
+              "clearly higher,\n      the in-segment event is not the right one "
+              "either and section A stands.")
+
+print("""
+  WHAT TO DO WITH THIS
+
+    inside is the large majority AND scores >90%
+        The join is fixed. 03b's SUT sections can be re-run and believed.
+    inside scores high but covers a minority of rows
+        Fix landed, coverage did not. Either train on 'inside' rows only, or
+        treat 'before' rows as missing parameters rather than wrong ones.
+    inside and before score the same
+        The fix is wrong. Neither event describes the measurement; the SUT
+        message is periodic and the parameter route needs a different source.""")
+
+# COMMAND ----------
+
+# =============================================================================
 # B — WHAT IS IN THE TARGET THAT WAS NOT IN THE BENCHMARK?
 #
 # Step 02's `duration` is endTime - startTime with its own outlier filter.
@@ -274,6 +354,10 @@ print(f"\n  segments                          {len(sequences):>8,}")
 print(f"  distinct terminator events        {int(is_primary.sum()):>8,}")
 print(f"  segments sharing a terminator     {int(shared.sum()):>8,}   "
       f"({100.0 * shared.mean():.1f}% of rows)")
+if shared.mean() < 0.01:
+    print("\n  ~0% — this pkl was built with DEDUPE_SHARED_TERMINATOR on, so the "
+          "\n  overlap is already gone at build time and the comparison below is "
+          "\n  a no-op. That is the confirmation, not a missing result.")
 
 print(f"\n  {'segments per terminator':<26} {'clusters':>9} {'rows':>9} "
       f"{'mean dur':>10} {'median':>9}")

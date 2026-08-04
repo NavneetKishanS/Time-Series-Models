@@ -51,6 +51,23 @@ class LeakageGuardTests(unittest.TestCase):
             module.assert_no_leakage(conditioning.keys())
 
 
+class SegmentDedupeFlagTests(unittest.TestCase):
+    """03's segment loop reads DEDUPE_SHARED_TERMINATOR out of the %run'd
+    config namespace, and nothing else would catch its removal until a Spark
+    job fails an hour in."""
+
+    def test_dedupe_flag_exists_and_defaults_on(self):
+        module = _load_seqparams_config()
+        self.assertIs(module.DEDUPE_SHARED_TERMINATOR, True)
+
+    def test_step_03_reads_the_flag_by_name(self):
+        step03 = os.path.join(
+            os.path.dirname(_CONFIG_PATH), '03_build_preprocessed_pkl.py',
+        )
+        with open(step03) as f:
+            self.assertIn('dedupe=DEDUPE_SHARED_TERMINATOR', f.read())
+
+
 class ModelConfigAssemblyTests(unittest.TestCase):
     """build_seqparams_model_config — the single source of truth for
     combining AlternatingPipeline.config.EXAMINATION_MODEL_CONFIG with this
