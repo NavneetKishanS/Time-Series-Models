@@ -165,7 +165,25 @@ MAX_PER_TOKEN_DURATION   = 600
 #
 # Set False to rebuild the old overlapping population for comparison. It drops
 # ~17% of rows, so it is a population decision, not a bug fix — hence a flag.
+# Measured 2026-08-04: 56,873 -> 51,321 rows (9.8%), and the pkl's sd landed at
+# 91.4s against step 02's 91.0s — the heavy tail was a segmentation artefact.
 DEDUPE_SHARED_TERMINATOR = True
+
+# How stale a most-recent-before MRI_SUT_1005 event may be before we call the
+# parameters MISSING instead of wrong.
+#
+# 03c A2 (2026-08-04) measured the 'before' fallback at p50 106s, p90 312s and
+# max 320,227s — 3.7 DAYS. Those extremes are segments with no SUT event
+# anywhere earlier in the serial's log window, so the join reaches back to
+# whatever ran last. 'before' rows agree with the actual sequence only 28.1% of
+# the time (against 94.8% for in-segment), so a stale one carries no
+# information; recording it as 'none' lets training mask the row instead of
+# learning from another day's scan.
+#
+# 600s is deliberately generous — it keeps everything inside p90 and removes
+# only the absurd tail. It does NOT fix the 'before' rows, which are wrong for
+# a different reason (no SUT event was emitted inside the measurement at all).
+SUT_MAX_BEFORE_DISTANCE_S = 600.0
 
 COIL_COLUMNS = [
     'BC', 'SP1', 'SP2', 'SP3', 'SP4', 'SP5', 'SP6', 'SP7', 'SP8', '15K',

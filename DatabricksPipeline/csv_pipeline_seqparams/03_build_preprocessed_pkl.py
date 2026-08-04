@@ -476,7 +476,27 @@ def _segment_bounds(start_rows, end_rows, n_rows, dedupe=True):
             if index + 1 == len(bounds) or bounds[index + 1][1] != pair[1]]
 
 
-def _choose_sut_row(sut_rows, start_row, end_row):
+def _is_adjustment_binary(binary):
+    """True for scanner ADJUSTMENT sequences, whose parameters are never the
+    measurement's.
+
+    Evidence (03c section A2, 2026-08-04): with the in-segment join at 94.8%
+    agreement overall, `AdjGreSeq` sits at 0.0% across 2,061 rows and every one
+    of them reports the actual scan as `tse`. That is ~100% of the remaining
+    in-segment error from a single DLL. The mechanism is visible in the offset
+    distribution: in-segment events sit at p50 0.0s from the segment start, so
+    a gradient adjustment firing at the top of a real measurement emits its
+    MRI_SUT_1005 first and wins the 'first event inside' rule.
+
+    Deliberately narrow — only the `Adj` prefix. `tfl_b1map` (98.5%) and
+    `AALScout` (70.2%) are real measurements in their own right and must NOT be
+    skipped; both scored near-zero under the OLD join and were fixed by the
+    in-segment rule alone.
+    """
+    return str(binary or '').startswith('Adj')
+
+
+def _choose_sut_row(sut_rows, start_row, end_row, skip=None):
     """The MRI_SUT_1005 row describing THIS measurement. Returns (row, scope).
 
     The original join took the most recent SUT event strictly *before* the
@@ -495,12 +515,26 @@ def _choose_sut_row(sut_rows, start_row, end_row):
     The before-join survives as a fallback because coverage matters, but the
     returned `scope` labels which rule fired, so the next 03c run can score
     'inside' and 'before' separately instead of assuming this fix worked.
+
+    `skip` is a set of rows carrying an ADJUSTMENT sequence (see
+    `_is_adjustment_binary`). Those are passed over in BOTH branches: an
+    adjustment's parameters belong to no measurement, so falling through to
+    'before' — a scope we already know to distrust — beats handing the model
+    the adjustment's values as if they were the scan's.
     """
-    inside = bisect.bisect_left(sut_rows, start_row)
-    if inside < len(sut_rows) and sut_rows[inside] <= end_row:
-        return sut_rows[inside], 'inside'
-    if inside > 0:
-        return sut_rows[inside - 1], 'before'
+    skip = skip or ()
+    cursor = bisect.bisect_left(sut_rows, start_row)
+
+    for index in range(cursor, len(sut_rows)):
+        if sut_rows[index] > end_row:
+            break
+        if sut_rows[index] not in skip:
+            return sut_rows[index], 'inside'
+
+    for index in range(cursor - 1, -1, -1):
+        if sut_rows[index] not in skip:
+            return sut_rows[index], 'before'
+
     return None, 'none'
 
 # COMMAND ----------
@@ -741,6 +775,14 @@ for serial in SERIAL_NUMBERS:
     # in-segment first, most-recent-before as a labelled fallback. The old
     # unconditional most-recent-before join scored 45.7% in 03c section A.
     sut_rows = df_merged.index[df_merged['MessageIdentification'] == 'MRI_SUT_1005'].tolist()
+    # Adjustment events, resolved ONCE per serial rather than per segment —
+    # one regex per SUT row instead of one per (segment x candidate).
+    adjustment_rows = {
+        row for row in sut_rows
+        if _is_adjustment_binary(
+            _parse_sut_categoricals(df_merged.iloc[row]['Message']).get('sequence_binary')
+        )
+    }
 
     n_before = len(examination_sequences)
 
@@ -787,7 +829,16 @@ for serial in SERIAL_NUMBERS:
 
         # SUT sequence-protocol parameters for THIS measurement — see
         # _choose_sut_row for why in-segment beats most-recent-before.
-        _sut_row, sut_scope = _choose_sut_row(sut_rows, start_row, end_row)
+        _sut_row, sut_scope = _choose_sut_row(
+            sut_rows, start_row, end_row, skip=adjustment_rows,
+        )
+        # A fallback event from hours or days ago carries no information about
+        # this scan — record it as missing rather than wrong.
+        if _sut_row is not None and sut_scope == 'before':
+            _distance = abs(float(df_merged.iloc[_sut_row]['timediff']
+                                  - df_merged.iloc[start_row]['timediff']))
+            if _distance > SUT_MAX_BEFORE_DISTANCE_S:
+                _sut_row, sut_scope = None, 'none'
         _sut_msg = df_merged.iloc[_sut_row]['Message'] if _sut_row is not None else None
         sut_values = _parse_sut_message(_sut_msg)
         sut_raw = _parse_sut_raw(_sut_msg)

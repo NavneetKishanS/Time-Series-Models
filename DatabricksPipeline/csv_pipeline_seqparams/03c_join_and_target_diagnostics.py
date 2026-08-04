@@ -75,6 +75,7 @@ import os
 import pickle
 import sys
 from collections import Counter
+from datetime import datetime
 
 import numpy as np
 
@@ -90,7 +91,7 @@ from AlternatingPipeline.data.protocol_vocab import (
     protocol_id,
 )
 from AlternatingPipeline.data.parameter_analysis import (
-    heldout_regressor_score, numeric_field_inventory, numeric_matrix,
+    _to_float, heldout_regressor_score, numeric_field_inventory, numeric_matrix,
     terminator_clusters,
 )
 
@@ -483,6 +484,118 @@ print("""
   A large gap between the join-valid and join-invalid rows is direct confirmation
   that the join is the problem: the same parameters, the same model, the same
   target, differing only in whether the SUT message belongs to the scan.""")
+
+# COMMAND ----------
+
+# =============================================================================
+# E — WHY IS ST LONGER THAN THE MEASUREMENT CONTAINING IT?
+#
+# 03b section 7 (2026-08-04) has ST correlating 0.764 with duration — up from
+# 0.205 under the old join, so the join fix clearly reached ST too. But ST
+# still EXCEEDS the measured duration on 12.7% of rows, and its median (77s)
+# is above the duration median (57s). A planned acquisition time cannot be
+# longer than the span containing it, so one of two things is true:
+#
+#   (a) a units or per-family scaling problem in ST, or
+#   (b) ST describes MORE than one of our segments.
+#
+# (b) has a concrete mechanism. `CONC` (concatenations) reaches 36 at p99 and
+# `REP` (repetitions) reaches 89, so one protocol can run as several
+# back-to-back measurements, each with its own MSR_100 -> MSR_104 pair, all
+# carrying the SAME SUT message and therefore the SAME whole-protocol ST.
+#
+# `MUID` is 100% present with 3,188 distinct values against 3,051 distinct
+# protocol names — so it identifies the protocol, not the individual run. A
+# maximal run of consecutive segments on one scanner sharing a MUID is
+# therefore exactly one protocol's worth of measurement. If ST fits that RUN
+# rather than the single segment, (b) is the answer and ST is usable once
+# summed to the right unit.
+# =============================================================================
+
+rule()
+print(" E. ST vs THE SEGMENT, AND ST vs THE PROTOCOL RUN")
+rule()
+
+st_values = np.array([_to_float((s.get('sut_raw') or {}).get('ST')) for s in sequences])
+muids = np.array([str((s.get('sut_raw') or {}).get('MUID', '')) for s in sequences])
+starts = [s.get('start_datetime') for s in sequences]
+has_st = np.isfinite(st_values) & (st_values > 0) & (durations > 0)
+
+if not has_st.any():
+    print("\n  No usable ST in this pkl — nothing to reconcile.")
+else:
+    print(f"\n  ST usable on {100.0 * has_st.mean():.1f}% of rows\n")
+    print(f"  {'row subset':<28} {'n':>8} {'ST>dur':>8} {'median ST/dur':>14}")
+    rule('-')
+    for label, mask in (
+        ('all rows', has_st),
+        ('in-segment join only', has_st & (scopes == 'inside')),
+        ('before-join only', has_st & (scopes == 'before')),
+    ):
+        if not mask.any():
+            continue
+        ratio = st_values[mask] / durations[mask]
+        print(f"  {label:<28} {mask.sum():>8,} "
+              f"{100.0 * (ratio > 1.0).mean():>7.1f}% {np.median(ratio):>14.2f}")
+    rule('-')
+    print("  If 'before' is much worse than 'in-segment', the residual ST "
+          "problem is\n  just the rows we already know carry the wrong "
+          "message.")
+
+    # Maximal runs of consecutive segments on one scanner sharing a MUID.
+    order = sorted(range(len(sequences)),
+                   key=lambda i: (serials[i], starts[i] is None,
+                                  starts[i] or datetime.min))
+    run_id = np.full(len(sequences), -1, dtype=int)
+    runs, current = [], []
+    previous = None
+    for position in order:
+        key = (serials[position], muids[position])
+        if previous is not None and key != previous:
+            runs.append(current)
+            current = []
+        current.append(position)
+        previous = key
+    if current:
+        runs.append(current)
+    for index, members in enumerate(runs):
+        run_id[members] = index
+
+    run_duration = np.zeros(len(sequences))
+    run_size = np.zeros(len(sequences), dtype=int)
+    for members in runs:
+        run_duration[members] = durations[members].sum()
+        run_size[members] = len(members)
+
+    multi = has_st & (run_size > 1)
+    print(f"\n  Consecutive same-MUID runs: {len(runs):,} runs over "
+          f"{len(sequences):,} segments "
+          f"({100.0 * (run_size > 1).mean():.1f}% of rows sit in a run of 2+)")
+
+    if multi.any():
+        print(f"\n  {'comparison':<34} {'n':>8} {'ST>span':>9} {'median ST/span':>15}")
+        rule('-')
+        single = st_values[multi] / durations[multi]
+        summed = st_values[multi] / run_duration[multi]
+        print(f"  {'ST vs its own segment':<34} {multi.sum():>8,} "
+              f"{100.0 * (single > 1.0).mean():>8.1f}% {np.median(single):>15.2f}")
+        print(f"  {'ST vs the whole MUID run':<34} {multi.sum():>8,} "
+              f"{100.0 * (summed > 1.0).mean():>8.1f}% {np.median(summed):>15.2f}")
+        rule('-')
+        print("""
+  READ IT LIKE THIS
+
+    'ST vs the whole MUID run' lands near 1.0 and its ST>span share collapses
+        ST is the PROTOCOL's acquisition time, not the segment's. It is usable
+        — but as a per-run feature, and the model's unit of prediction should
+        arguably be the run too. This also explains 03b section 7 completely.
+    Both rows look the same
+        The run grouping is not the explanation. Suspect units or a per-family
+        scaling in ST, and keep ST out of the feature set until it is settled.""")
+    else:
+        print("\n  No multi-segment MUID runs — (b) is ruled out, so ST's "
+              "excess is a units\n  or per-family scaling problem. Keep it out "
+              "of the feature set for now.")
 
 # COMMAND ----------
 

@@ -152,5 +152,50 @@ class ChooseSutRowTests(unittest.TestCase):
         )
 
 
+class SkipAdjustmentSequenceTests(unittest.TestCase):
+    """A gradient adjustment's parameters are never the measurement's.
+
+    The 2026-08-04 run of 03c section A2 put in-segment agreement at 94.8%,
+    and `AdjGreSeq` accounts for essentially ALL of the remaining error: 2,061
+    rows at 0.0% agreement against ~2,019 disagreeing in-segment rows in total.
+    Every one of them says the actual scan was `tse`. So the adjustment runs at
+    the very start of a real measurement (in-segment offset is p50 0.0s), emits
+    its own MRI_SUT_1005 first, and wins the 'first event inside' rule.
+    """
+
+    def setUp(self):
+        self.choose = _load_segment_helpers()['_choose_sut_row']
+
+    def test_skips_an_adjustment_event_and_takes_the_next_one_inside(self):
+        # Row 6 is the adjustment, row 8 is the measurement's own event.
+        self.assertEqual(
+            self.choose(sut_rows=[6, 8], start_row=5, end_row=9, skip={6}),
+            (8, 'inside'),
+        )
+
+    def test_falls_back_to_before_when_only_adjustments_are_inside(self):
+        # No usable in-segment event, so the old rule applies. Better to label
+        # the row 'before' — a scope we already know to distrust — than to hand
+        # the model an adjustment's parameters as if they were the scan's.
+        self.assertEqual(
+            self.choose(sut_rows=[2, 6], start_row=5, end_row=9, skip={6}),
+            (2, 'before'),
+        )
+
+    def test_the_before_fallback_also_skips_adjustments(self):
+        # Row 4 is the most recent before the segment but is an adjustment, so
+        # the search continues backwards to row 2.
+        self.assertEqual(
+            self.choose(sut_rows=[2, 4], start_row=5, end_row=9, skip={4}),
+            (2, 'before'),
+        )
+
+    def test_reports_none_when_every_candidate_is_an_adjustment(self):
+        self.assertEqual(
+            self.choose(sut_rows=[2, 6], start_row=5, end_row=9, skip={2, 6}),
+            (None, 'none'),
+        )
+
+
 if __name__ == '__main__':
     unittest.main()
