@@ -210,17 +210,33 @@ def _print_unknown_body_audit():
             print(f"  {row['display_body_label']:<40} {int(row['row_count']):>6,}  ->  {row['normalized_body_label']}")
 
 
-def _record_body_group_sanity(serial, raw_label, mapped_group, source):
-    serial_key = str(serial)
-    raw_text = str(raw_label).strip()
+# Where a body group came from, worst-evidence last. The ORDER is the point:
+# printed in this sequence, a mapping that has quietly degraded to guesswork
+# reads as such at a glance.
+BODY_GROUP_SOURCES = ('bodypart', 'protocol', 'exu95', 'none')
+
+BODY_GROUP_SOURCE_NOTES = {
+    'bodypart': 'BodyPartExamined from examination_workflow — the real thing',
+    'protocol': 'guessed from a token in ProtocolName',
+    'exu95':    'carried from an MRI_EXU_95 message elsewhere in the exam',
+    'none':     'unresolved',
+}
+
+
+def _record_body_group_sanity(serial, mapped_group, source, count=1):
+    """Count one exam's body group BY PROVENANCE.
+
+    The previous version bucketed on whether the final group was UNKNOWN, which
+    made the 2026-08-05 run print "No UNKNOWN body labels recorded" while every
+    scanner had collapsed to a single group — because a value invented by
+    forward-filling one MRI_EXU_95 message across a whole serial is not UNKNOWN,
+    it is just wrong. A resolved group is not evidence of anything on its own;
+    where it came from is.
+    """
+    serial_bucket = _BODY_GROUP_SANITY.setdefault(str(serial), {})
     group_text = str(mapped_group).strip().upper() if mapped_group is not None else 'UNKNOWN'
-    if not raw_text:
-        return
-    serial_bucket = _BODY_GROUP_SANITY.setdefault(serial_key, {'known': {}, 'unknown': {}})
-    target_bucket = serial_bucket['unknown'] if group_text == 'UNKNOWN' else serial_bucket['known']
-    entry = target_bucket.setdefault(raw_text, {'group': group_text, 'count': 0, 'sources': set()})
-    entry['count'] += 1
-    entry['sources'].add(source)
+    key = (source if source in BODY_GROUP_SOURCES else 'none', group_text)
+    serial_bucket[key] = serial_bucket.get(key, 0) + int(count)
 
 
 def _print_body_group_sanity():
@@ -228,24 +244,86 @@ def _print_body_group_sanity():
         print("\nNo body-group sanity data recorded.")
         return
     print("\n" + "=" * 60)
-    print("BODY GROUP SANITY SUMMARY")
+    print("BODY GROUP SANITY SUMMARY  (by provenance)")
     print("=" * 60)
+
+    collapsed = []
     for serial in sorted(_BODY_GROUP_SANITY.keys()):
-        print(f"\n[serial {serial}]")
         bucket = _BODY_GROUP_SANITY[serial]
-        known_total = sum(item['count'] for item in bucket['known'].values())
-        unknown_total = sum(item['count'] for item in bucket['unknown'].values())
-        total = known_total + unknown_total
-        unknown_pct = (unknown_total / total * 100.0) if total else 0.0
-        print(f"  total_labels={total:,}  known={known_total:,}  unknown={unknown_total:,}  unknown_pct={unknown_pct:.1f}%")
-        for status in ('known', 'unknown'):
-            entries = bucket[status]
-            if not entries:
-                continue
-            print(f"  {status.upper()}:")
-            for raw_label, info in sorted(entries.items(), key=lambda kv: (-kv[1]['count'], kv[0])):
-                sources = ",".join(sorted(info['sources']))
-                print(f"    {raw_label:<35} {info['count']:>6,}  ->  {info['group']}  ({sources})")
+        total = sum(bucket.values())
+        by_source = {name: 0 for name in BODY_GROUP_SOURCES}
+        for (source, _), count in bucket.items():
+            by_source[source] += count
+        groups = {group for (_, group), count in bucket.items()
+                  if group != 'UNKNOWN' and count}
+
+        print(f"\n[serial {serial}]  exams={total:,}  distinct groups={len(groups)}")
+        print("  " + "  ".join(
+            f"{name}={by_source[name]:,} ({100.0 * by_source[name] / total:.1f}%)"
+            for name in BODY_GROUP_SOURCES if by_source[name]
+        ))
+        for (source, group), count in sorted(bucket.items(), key=lambda kv: -kv[1])[:8]:
+            print(f"    {group:<12} {count:>7,}  ({source})")
+        if len(groups) <= 1 and total > 50:
+            collapsed.append(serial)
+
+    print("\n" + "-" * 60)
+    for name in BODY_GROUP_SOURCES:
+        print(f"  {name:<10} {BODY_GROUP_SOURCE_NOTES[name]}")
+    if collapsed:
+        print(f"\n  ⚠ COLLAPSED: serial(s) {', '.join(collapsed)} resolved every "
+              f"exam to ONE body group.\n"
+              f"    No scanner images a single body part all month. Check the "
+              f"'bodypart' share\n"
+              f"    above: if it is ~0%, examination_workflow is not giving us "
+              f"BodyPartExamined\n"
+              f"    at all and everything downstream of it is a guess.")
+
+
+def _bg_from_evu95(msg, body_part_to_group):
+    """The body group named in an MRI_EXU_95 message, or None.
+
+    Takes the mapping as an argument rather than closing over the module global
+    so it can be tested against the real message text without a Spark session.
+    """
+    if not isinstance(msg, str):
+        return None
+    try:
+        body = re.search(r'with body part < (.*) >', msg).group(1)
+        if ' ' in body:
+            try:
+                body = re.search(r'with body part < (.*) > <', msg).group(1)
+            except AttributeError:
+                pass
+        return body_part_to_group.get(_canonical_body_label(body))
+    except AttributeError:
+        return None
+
+
+def _fill_body_group_within_exam(frame, value_col='_bg_msg',
+                                 exam_col='WorkflowStartRefDateTime'):
+    """Carry an MRI_EXU_95 body group forward, BOUNDED to its own exam.
+
+    This used to be a bare `.ffill()` over the whole serial's event frame. With
+    `BodyPartExamined` null on essentially every exam row (the WorkflowValues
+    map does not carry any of the three key names step 03 coalesces), almost
+    every row needed this fallback — so one successful regex match painted a
+    whole month. The 2026-08-05 run resolved all 11,823 of serial 175670's
+    exams to LEG and all 26,932 of 176227's to HEAD, and reported no UNKNOWNs
+    while doing it.
+
+    The exam is the only scope over which "the body part is still the same one"
+    holds. Rows preceding the first exam have a null key and are left
+    unresolved rather than inheriting whatever happened to come first —
+    `groupby` drops null keys, which is the behaviour wanted here.
+
+    NOT FIXED: `csv_pipeline/03_build_preprocessed_pkl.py:743` has the identical
+    unbounded ffill and the same null-BodyPartExamined root cause upstream of
+    it. Left alone deliberately — that pipeline owns the old checkpoint and the
+    Qlik real-data CSVs, and changing its body groups would move numbers this
+    fork's results are compared against.
+    """
+    return frame.groupby(exam_col)[value_col].ffill()
 
 
 def _seq_type_from_msg(msg):
@@ -500,7 +578,9 @@ def _is_adjustment_binary(binary):
 
 
 def _choose_sut_row(sut_rows, start_row, end_row, skip=None):
-    """The MRI_SUT_1005 row describing THIS measurement. Returns (row, scope).
+    """The MRI_SUT_1005 row describing THIS measurement.
+
+    Returns (row, scope, skipped_inside).
 
     The original join took the most recent SUT event strictly *before* the
     segment. 03c section A scored the sequence that join implies against the
@@ -524,21 +604,43 @@ def _choose_sut_row(sut_rows, start_row, end_row, skip=None):
     adjustment's parameters belong to no measurement, so falling through to
     'before' — a scope we already know to distrust — beats handing the model
     the adjustment's values as if they were the scan's.
+
+    `skipped_inside` records whether that pass-over actually happened inside
+    this segment. It only means something on a row that did NOT get an
+    in-segment join, and there it separates two populations with opposite
+    remedies:
+
+        scope != 'inside' AND skipped_inside
+            The segment's only SUT event was an adjustment, so the segment is
+            very likely the ADJUSTMENT ITSELF rather than a measurement that
+            lost its message. Those belong in the population filter next to
+            aborts, not in the coverage deficit.
+        scope != 'inside' AND NOT skipped_inside
+            No SUT event fired during this segment at all — genuine missing
+            coverage, and the only case a wider join rule could help.
+
+    03c reports 80.3/18.7/1.0 across the three scopes without being able to
+    tell those apart; the arithmetic across the 2026-08-04 and 08-05 runs
+    (inside −2,012 against +2,073 into before/none, versus 2,061 AdjGreSeq
+    rows) says most of the difference is the first case, but that is inference
+    from two totals rather than a measurement. This makes it one.
     """
     skip = skip or ()
     cursor = bisect.bisect_left(sut_rows, start_row)
+    skipped_inside = False
 
     for index in range(cursor, len(sut_rows)):
         if sut_rows[index] > end_row:
             break
         if sut_rows[index] not in skip:
-            return sut_rows[index], 'inside'
+            return sut_rows[index], 'inside', skipped_inside
+        skipped_inside = True
 
     for index in range(cursor - 1, -1, -1):
         if sut_rows[index] not in skip:
-            return sut_rows[index], 'before'
+            return sut_rows[index], 'before', skipped_inside
 
-    return None, 'none'
+    return None, 'none', skipped_inside
 
 # COMMAND ----------
 
@@ -642,6 +744,40 @@ df_exams_pd['BodyGroup'] = df_exams_pd['BodyPartExamined'].apply(
     lambda x: body_part_to_group.get(_canonical_body_label(x), 'UNKNOWN')
               if pd.notna(x) else 'UNKNOWN'
 )
+# Provenance travels with the value from here on. Without it a group guessed
+# from a protocol string, or carried in from another exam's message, is
+# indistinguishable from one the scanner actually reported — which is how the
+# 2026-08-05 run managed to print a clean sanity summary over a mapping in which
+# every scanner had collapsed to one body group.
+df_exams_pd['BodyGroupSource'] = np.where(
+    df_exams_pd['BodyGroup'] == 'UNKNOWN', 'none', 'bodypart')
+
+# The upstream failure, made loud. BodyPartExamined is read out of the
+# WorkflowValues MAP by three guessed key names; if none of them is the real
+# one the column is silently all-null and every body group below is a fallback.
+# Printing the keys that ARE in the map turns "add another guess to the
+# coalesce" into a one-line fix next run.
+_bp_missing = float(df_exams_pd['BodyPartExamined'].isna().mean())
+if _bp_missing > 0.5:
+    print(f"\n  ⚠ BodyPartExamined is NULL on {100 * _bp_missing:.1f}% of exam "
+          f"rows.\n    None of the coalesced keys "
+          f"(BodyPartExamined / BodyPart / RequestedBodyPart) is in "
+          f"WorkflowValues.\n    Keys actually present, most common first:")
+    try:
+        _key_counts = (
+            spark.table(EXAMINATION_TABLE)
+            .filter(F.col("SerialNumber").isin([int(s) for s in SERIAL_NUMBERS]))
+            .filter(F.col("WorkflowStartRefDateTime") >= DATE_START)
+            .filter(F.col("WorkflowStartRefDateTime") <= DATE_END)
+            .filter(F.col("WorkflowValues").isNotNull())
+            .select(F.explode(F.map_keys(F.col("WorkflowValues"))).alias("k"))
+            .groupBy("k").count().orderBy(F.col("count").desc()).limit(40)
+            .toPandas()
+        )
+        for _, _kr in _key_counts.iterrows():
+            print(f"      {_kr['k']:<40} {int(_kr['count']):>9,}")
+    except Exception as exc:                       # noqa: BLE001 — diagnostic only
+        print(f"      (could not enumerate map keys: {exc})")
 
 def _body_group_from_protocol(protocol_name):
     if pd.isna(protocol_name) or not str(protocol_name).strip():
@@ -658,9 +794,12 @@ if _mask_unknown.any():
         df_exams_pd.loc[_mask_unknown, 'ProtocolName']
         .apply(lambda p: _body_group_from_protocol(p) or 'UNKNOWN')
     )
-    _n_proto = int(_mask_unknown.sum() - (df_exams_pd['BodyGroup'] == 'UNKNOWN').sum())
+    _resolved = _mask_unknown & (df_exams_pd['BodyGroup'] != 'UNKNOWN')
+    df_exams_pd.loc[_resolved, 'BodyGroupSource'] = 'protocol'
+    _n_proto = int(_resolved.sum())
     if _n_proto > 0:
-        print(f"  ProtocolName fallback resolved {_n_proto:,} exam body groups")
+        print(f"  ProtocolName fallback resolved {_n_proto:,} of "
+              f"{int(_mask_unknown.sum()):,} unresolved exam body groups")
 
 df_exams_pd['BodyGroup'] = df_exams_pd['BodyGroup'].apply(_normalize_bodygroup)
 print(f"Examination rows: {len(df_exams_pd):,}")
@@ -689,6 +828,12 @@ _sut_binary_hits = 0
 # whether the two disagree about the sequence. This is the evidence 03c needs
 # to score the fix instead of us assuming it worked.
 _sut_scope_counts = {'inside': 0, 'before': 0, 'none': 0}
+# Of the rows that did NOT get an in-segment join, how many had an in-segment
+# event that was passed over as an adjustment. Those segments are most likely
+# the adjustment itself, not a measurement missing its message — see
+# _choose_sut_row. Splitting them apart is what tells a coverage DEFICIT from a
+# population that never belonged in the coverage denominator.
+_sut_adjustment_only = 0
 _sut_join_changed = 0
 _protocol_parse_hits = 0
 _protocol_parse_total = 0
@@ -709,7 +854,8 @@ for serial in SERIAL_NUMBERS:
     df_merged = pd.merge_asof(
         df_sc,
         df_ex[['WorkflowStartRefDateTime', 'PatientId',
-               'Age', 'Weight', 'Height', 'Direction_encoded', 'BodyGroup']],
+               'Age', 'Weight', 'Height', 'Direction_encoded', 'BodyGroup',
+               'BodyGroupSource']],
         left_on='AdjustedEventDateTime',
         right_on='WorkflowStartRefDateTime',
         direction='backward',
@@ -717,42 +863,33 @@ for serial in SERIAL_NUMBERS:
 
     df_merged['PatientId'] = df_merged['PatientId'].fillna('__no_patient__')
     df_merged['BodyGroup_to'] = df_merged['BodyGroup'].fillna('UNKNOWN').str.upper()
+    df_merged['BodyGroupSource'] = df_merged['BodyGroupSource'].fillna('none')
 
     _mask_evu = df_merged['MessageIdentification'] == 'MRI_EXU_95'
-    def _bg_from_evu95(msg):
-        if not isinstance(msg, str):
-            return None
-        try:
-            body = re.search(r'with body part < (.*) >', msg).group(1)
-            if ' ' in body:
-                try:
-                    body = re.search(r'with body part < (.*) > <', msg).group(1)
-                except AttributeError:
-                    pass
-            return body_part_to_group.get(_canonical_body_label(body))
-        except AttributeError:
-            return None
     df_merged['_bg_msg'] = None
-    df_merged.loc[_mask_evu, '_bg_msg'] = df_merged.loc[_mask_evu, 'Message'].apply(_bg_from_evu95)
-    df_merged['_bg_msg'] = df_merged['_bg_msg'].ffill()
+    df_merged.loc[_mask_evu, '_bg_msg'] = df_merged.loc[_mask_evu, 'Message'].apply(
+        lambda m: _bg_from_evu95(m, body_part_to_group))
+    df_merged['_bg_msg'] = _fill_body_group_within_exam(df_merged)
     _needs_bg = df_merged['BodyGroup_to'] == 'UNKNOWN'
+    _filled = _needs_bg & df_merged['_bg_msg'].notna()
     df_merged.loc[_needs_bg, 'BodyGroup_to'] = (
         df_merged.loc[_needs_bg, '_bg_msg'].fillna('UNKNOWN').apply(_normalize_bodygroup)
     )
+    df_merged.loc[_filled, 'BodyGroupSource'] = 'exu95'
     df_merged.drop(columns=['_bg_msg'], inplace=True)
 
-    _exam_final = pd.merge(
+    # One row per exam, counted by where its group came from. Reading this off
+    # df_merged directly replaces a re-merge against df_ex that was re-reading
+    # BodyPartExamined purely to label the row — and reporting `None` for every
+    # exam once that column turned out to be null, which told nobody anything.
+    _per_exam = (
         df_merged.dropna(subset=['WorkflowStartRefDateTime'])
                  .drop_duplicates(subset=['WorkflowStartRefDateTime'])
-                 [['WorkflowStartRefDateTime', 'BodyGroup_to']],
-        df_ex[['WorkflowStartRefDateTime', 'BodyPartExamined']],
-        on='WorkflowStartRefDateTime', how='left',
     )
-    for _, _r in _exam_final.iterrows():
-        _record_body_group_sanity(
-            serial, _r.get('BodyPartExamined'),
-            str(_r.get('BodyGroup_to', 'UNKNOWN')).upper(), 'exam_workflow',
-        )
+    for (_group, _source), _count in (
+        _per_exam.groupby(['BodyGroup_to', 'BodyGroupSource']).size().items()
+    ):
+        _record_body_group_sanity(serial, _group, _source, _count)
 
     df_merged['Age'] = df_merged['Age'].fillna(0.0)
     df_merged['Weight'] = df_merged['Weight'].fillna(0.0)
@@ -832,7 +969,7 @@ for serial in SERIAL_NUMBERS:
 
         # SUT sequence-protocol parameters for THIS measurement — see
         # _choose_sut_row for why in-segment beats most-recent-before.
-        _sut_row, sut_scope = _choose_sut_row(
+        _sut_row, sut_scope, sut_inside_skipped = _choose_sut_row(
             sut_rows, start_row, end_row, skip=adjustment_rows,
         )
         # A fallback event from hours or days ago carries no information about
@@ -848,6 +985,8 @@ for serial in SERIAL_NUMBERS:
         sut_categoricals = _parse_sut_categoricals(_sut_msg)
         _sut_parse_total += 1
         _sut_scope_counts[sut_scope] += 1
+        if sut_scope != 'inside' and sut_inside_skipped:
+            _sut_adjustment_only += 1
         if sut_values:
             _sut_parse_hits += 1
         if sut_categoricals.get('sequence_binary'):
@@ -948,6 +1087,11 @@ for serial in SERIAL_NUMBERS:
             'sut_scope': sut_scope,
             'sut_offset_s': sut_offset_s,
             'sut_binary_before': sut_binary_before,
+            # True where an in-segment event existed but was passed over as an
+            # adjustment. Read together with sut_scope: on a non-'inside' row it
+            # says the segment is probably the adjustment itself rather than a
+            # measurement missing its message. 03f section A splits on it.
+            'sut_inside_skipped': bool(sut_inside_skipped),
             'total_duration': total_duration,
             'start_datetime': start_dt,
         })
@@ -967,6 +1111,15 @@ print("SUT join scope: " + "  ".join(
     f"{name}={count} ({100 * count / _scope_total:.1f}%)"
     for name, count in _sut_scope_counts.items()
 ))
+# Not every non-'inside' row is missing coverage. A segment whose only SUT event
+# was an adjustment is most likely the adjustment itself, and belongs in the
+# population filter rather than counted against the join.
+_not_inside = _sut_scope_counts['before'] + _sut_scope_counts['none']
+print(f"  → of the {_not_inside} rows without an in-segment join, "
+      f"{_sut_adjustment_only} ({100 * _sut_adjustment_only / max(1, _not_inside):.1f}%) "
+      f"had one that was an ADJUSTMENT;\n"
+      f"    the remaining {_not_inside - _sut_adjustment_only} had no "
+      f"MRI_SUT_1005 event during the segment at all.")
 print(f"  → {_sut_join_changed} of the {_sut_scope_counts['inside']} in-segment "
       f"joins name a DIFFERENT sequence than the old most-recent-before rule "
       f"({100 * _sut_join_changed / max(1, _sut_scope_counts['inside']):.1f}%) "

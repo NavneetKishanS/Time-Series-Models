@@ -203,6 +203,79 @@ def heldout_regressor_score(features, values, holdout_frac=0.2, seed=0,
     return float(np.mean(r2s)), float(np.mean(maes))
 
 
+def permutation_importance_mae(features, values, field_names=None,
+                               holdout_frac=0.2, seed=0, shuffles=3,
+                               max_iter=200):
+    """Per-column MAE cost of destroying one feature. ONE fit, N shuffles.
+
+    `heldout_regressor_score` refits for every question asked of it, which is
+    the right shape for comparing feature SETS and the wrong shape for ranking
+    89 columns — that would be 89 fits. Here the model is fitted once and each
+    column is shuffled in the held-out matrix, so the cost is one fit plus
+    `len(field_names) * shuffles` predictions.
+
+    This is also the leak audit. `MUID` was caught by suspecting one field and
+    testing it by hand (03d); a ranking over the whole vector catches the ones
+    nobody thought to suspect. A parameter that is really a duration in disguise
+    does not sit mid-table — it sits at the top, well clear of the physics.
+
+    Importance is reported in SECONDS of MAE, not a normalised score, so it
+    reads on the same axis as every other number in these reports.
+
+    Correlated columns share credit and each looks individually cheap — TR and
+    PEL move together, so neither scores its full worth. That is a property of
+    permutation importance, not a defect; use the nested-prefix curve to decide
+    how many fields to keep, and this to decide the ORDER.
+
+    Returns a list of dicts sorted by descending `importance_s`:
+        {'name', 'index', 'importance_s', 'baseline_mae'}
+    """
+    from sklearn.ensemble import HistGradientBoostingRegressor
+
+    features = np.asarray(features, dtype=float)
+    values = np.asarray(values, dtype=float)
+    if features.shape[0] != values.shape[0]:
+        raise ValueError("features and values must be the same length")
+    if features.shape[0] < 2:
+        raise ValueError("need at least 2 rows to hold any out")
+    if field_names is None:
+        field_names = [str(i) for i in range(features.shape[1])]
+    if len(field_names) != features.shape[1]:
+        raise ValueError("field_names must name every column")
+
+    rng = np.random.default_rng(seed)
+    is_train = rng.random(features.shape[0]) >= holdout_frac
+    if not is_train.any() or is_train.all():
+        raise ValueError("no usable train/test split was produced")
+
+    model = HistGradientBoostingRegressor(max_iter=max_iter, random_state=seed)
+    model.fit(features[is_train], values[is_train])
+
+    held_x, held_y = features[~is_train].copy(), values[~is_train]
+    baseline_mae = float(np.abs(held_y - model.predict(held_x)).mean())
+
+    rows = []
+    for index, name in enumerate(field_names):
+        original = held_x[:, index].copy()
+        costs = []
+        for shuffle in range(shuffles):
+            # A fresh generator per shuffle keeps the result reproducible
+            # regardless of how many columns were scored before this one.
+            order = np.random.default_rng(seed + 1 + shuffle).permutation(
+                held_x.shape[0])
+            held_x[:, index] = original[order]
+            costs.append(float(np.abs(held_y - model.predict(held_x)).mean()))
+        held_x[:, index] = original
+        rows.append({
+            'name': name,
+            'index': index,
+            'importance_s': float(np.mean(costs)) - baseline_mae,
+            'baseline_mae': baseline_mae,
+        })
+
+    return sorted(rows, key=lambda r: -r['importance_s'])
+
+
 def terminator_clusters(sequences):
     """Find segments that end on the SAME terminator event.
 

@@ -13,6 +13,7 @@ from AlternatingPipeline.data.parameter_analysis import (  # noqa: E402
     heldout_regressor_score,
     numeric_field_inventory,
     numeric_matrix,
+    permutation_importance_mae,
     terminator_clusters,
     weighting_bucket,
     within_group_variation,
@@ -207,6 +208,81 @@ class HeldoutRegressorScoreTests(unittest.TestCase):
     def test_length_mismatch_raises(self):
         with self.assertRaises(ValueError):
             heldout_regressor_score(np.zeros((5, 2)), np.zeros(4))
+
+
+class PermutationImportanceTests(unittest.TestCase):
+    """The leak audit. MUID was caught by suspecting one field by hand; this
+    ranks the whole vector so the ones nobody suspected surface too."""
+
+    def _signal_and_noise(self, n=600, seed=0):
+        """Column 0 drives the target, columns 1-2 are pure noise."""
+        rng = np.random.default_rng(seed)
+        features = rng.normal(size=(n, 3))
+        values = 100 + 40 * features[:, 0] + rng.normal(scale=2.0, size=n)
+        return features, values
+
+    def test_ranks_the_driving_feature_first(self):
+        features, values = self._signal_and_noise()
+        rows = permutation_importance_mae(features, values,
+                                          field_names=['signal', 'noise_a', 'noise_b'])
+        self.assertEqual(rows[0]['name'], 'signal')
+
+    def test_noise_columns_score_near_zero(self):
+        """A field that carries nothing must be visibly separated from one that
+        does, or the ranking cannot be used to cut a set down."""
+        features, values = self._signal_and_noise()
+        rows = {r['name']: r['importance_s'] for r in
+                permutation_importance_mae(
+                    features, values,
+                    field_names=['signal', 'noise_a', 'noise_b'])}
+        self.assertGreater(rows['signal'], 10.0)
+        self.assertLess(abs(rows['noise_a']), 2.0)
+        self.assertLess(abs(rows['noise_b']), 2.0)
+
+    def test_a_near_copy_of_the_target_dominates(self):
+        """The shape a leak actually has. ST was inside the 93-field vector for
+        three reports; a field that is ~the target must sit clear of the
+        physics, not mid-table, or this audit would not have caught it."""
+        rng = np.random.default_rng(3)
+        physics = rng.normal(size=(600, 2))
+        values = 100 + 20 * physics[:, 0] + rng.normal(scale=5.0, size=600)
+        leak = values - 3.0                       # a planned time, off by a hair
+        features = np.column_stack([physics, leak])
+        rows = permutation_importance_mae(
+            features, values, field_names=['phys_a', 'phys_b', 'leak'])
+        self.assertEqual(rows[0]['name'], 'leak')
+        self.assertGreater(rows[0]['importance_s'], 2 * rows[1]['importance_s'])
+
+    def test_columns_are_restored_between_shuffles(self):
+        """Each column is scored against the SAME model and the SAME held-out
+        matrix. Leaving a shuffled column in place would corrupt every score
+        after it and quietly reorder the ranking."""
+        features, values = self._signal_and_noise()
+        before = features.copy()
+        permutation_importance_mae(features, values)
+        np.testing.assert_array_equal(features, before)
+
+    def test_is_reproducible_for_a_given_seed(self):
+        features, values = self._signal_and_noise()
+        first = permutation_importance_mae(features, values, seed=7)
+        second = permutation_importance_mae(features, values, seed=7)
+        self.assertEqual([r['name'] for r in first], [r['name'] for r in second])
+        for a, b in zip(first, second):
+            self.assertAlmostEqual(a['importance_s'], b['importance_s'])
+
+    def test_nan_columns_are_scored_not_rejected(self):
+        """Sequence-scoped parameters are NaN wherever they do not apply, and
+        03f masks whole rows to NaN on purpose. Neither may crash the audit."""
+        features, values = self._signal_and_noise()
+        features[::3, 1] = float('nan')
+        rows = permutation_importance_mae(features, values,
+                                          field_names=['signal', 'scoped', 'noise'])
+        self.assertTrue(all(math.isfinite(r['importance_s']) for r in rows))
+
+    def test_field_names_must_cover_every_column(self):
+        features, values = self._signal_and_noise()
+        with self.assertRaises(ValueError):
+            permutation_importance_mae(features, values, field_names=['only_one'])
 
 
 def _segment(serial, start, duration):

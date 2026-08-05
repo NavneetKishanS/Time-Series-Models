@@ -117,7 +117,7 @@ class ChooseSutRowTests(unittest.TestCase):
         # the measurement and is the one describing it.
         self.assertEqual(
             self.choose(sut_rows=[2, 6], start_row=5, end_row=9),
-            (6, 'inside'),
+            (6, 'inside', False),
         )
 
     def test_takes_the_first_sut_event_when_several_are_inside(self):
@@ -125,7 +125,7 @@ class ChooseSutRowTests(unittest.TestCase):
         # events in the same segment are re-reports.
         self.assertEqual(
             self.choose(sut_rows=[6, 7, 8], start_row=5, end_row=9),
-            (6, 'inside'),
+            (6, 'inside', False),
         )
 
     def test_falls_back_to_the_most_recent_event_before_the_segment(self):
@@ -134,13 +134,13 @@ class ChooseSutRowTests(unittest.TestCase):
         # diagnostic can score the two scopes separately.
         self.assertEqual(
             self.choose(sut_rows=[1, 2], start_row=5, end_row=9),
-            (2, 'before'),
+            (2, 'before', False),
         )
 
     def test_reports_none_when_no_sut_event_precedes_the_segment(self):
         self.assertEqual(
             self.choose(sut_rows=[20], start_row=5, end_row=9),
-            (None, 'none'),
+            (None, 'none', False),
         )
 
     def test_an_event_on_the_segment_start_row_counts_as_inside(self):
@@ -148,7 +148,7 @@ class ChooseSutRowTests(unittest.TestCase):
         # not push the segment's own event into the 'before' bucket.
         self.assertEqual(
             self.choose(sut_rows=[5], start_row=5, end_row=9),
-            (5, 'inside'),
+            (5, 'inside', False),
         )
 
 
@@ -170,7 +170,7 @@ class SkipAdjustmentSequenceTests(unittest.TestCase):
         # Row 6 is the adjustment, row 8 is the measurement's own event.
         self.assertEqual(
             self.choose(sut_rows=[6, 8], start_row=5, end_row=9, skip={6}),
-            (8, 'inside'),
+            (8, 'inside', True),
         )
 
     def test_falls_back_to_before_when_only_adjustments_are_inside(self):
@@ -179,7 +179,7 @@ class SkipAdjustmentSequenceTests(unittest.TestCase):
         # the model an adjustment's parameters as if they were the scan's.
         self.assertEqual(
             self.choose(sut_rows=[2, 6], start_row=5, end_row=9, skip={6}),
-            (2, 'before'),
+            (2, 'before', True),
         )
 
     def test_the_before_fallback_also_skips_adjustments(self):
@@ -187,14 +187,68 @@ class SkipAdjustmentSequenceTests(unittest.TestCase):
         # the search continues backwards to row 2.
         self.assertEqual(
             self.choose(sut_rows=[2, 4], start_row=5, end_row=9, skip={4}),
-            (2, 'before'),
+            (2, 'before', False),
         )
 
     def test_reports_none_when_every_candidate_is_an_adjustment(self):
         self.assertEqual(
             self.choose(sut_rows=[2, 6], start_row=5, end_row=9, skip={2, 6}),
-            (None, 'none'),
+            (None, 'none', True),
         )
+
+
+class InsideSkippedFlagTests(unittest.TestCase):
+    """`skipped_inside` separates two populations that look identical in the
+    scope counts and need opposite handling.
+
+    Step 03 reports 80.3% 'inside' / 18.7% 'before' / 1.0% 'none'. A segment in
+    the last two either lost its message (a coverage deficit a wider join rule
+    could fix) or never had one because the segment IS the adjustment (a
+    population that does not belong in the coverage denominator at all). The
+    scope alone cannot tell them apart; this flag can.
+    """
+
+    def setUp(self):
+        self.choose = _load_segment_helpers()['_choose_sut_row']
+
+    def test_false_when_nothing_was_passed_over(self):
+        """The plain missing-coverage case: no in-segment event existed."""
+        _, scope, skipped = self.choose(
+            sut_rows=[2], start_row=5, end_row=9, skip=set())
+        self.assertEqual(scope, 'before')
+        self.assertFalse(skipped)
+
+    def test_true_when_the_only_in_segment_event_was_an_adjustment(self):
+        """The segment is very likely the adjustment itself."""
+        _, scope, skipped = self.choose(
+            sut_rows=[2, 6], start_row=5, end_row=9, skip={6})
+        self.assertEqual(scope, 'before')
+        self.assertTrue(skipped)
+
+    def test_true_even_when_a_later_in_segment_event_wins(self):
+        """Recorded regardless of scope. It is only READ on non-'inside' rows —
+        making it conditional on the outcome would hide the mechanism from
+        anyone reading the flag on a row that joined successfully."""
+        _, scope, skipped = self.choose(
+            sut_rows=[6, 8], start_row=5, end_row=9, skip={6})
+        self.assertEqual(scope, 'inside')
+        self.assertTrue(skipped)
+
+    def test_an_adjustment_before_the_segment_does_not_set_it(self):
+        """Only events INSIDE the segment count. An adjustment that ran before
+        the measurement says nothing about whether this segment is one."""
+        _, scope, skipped = self.choose(
+            sut_rows=[2, 4], start_row=5, end_row=9, skip={4})
+        self.assertEqual(scope, 'before')
+        self.assertFalse(skipped)
+
+    def test_an_adjustment_after_the_segment_does_not_set_it(self):
+        """The in-segment scan stops at end_row, so a later adjustment is never
+        examined and must not be counted as passed over."""
+        _, scope, skipped = self.choose(
+            sut_rows=[2, 12], start_row=5, end_row=9, skip={12})
+        self.assertEqual(scope, 'before')
+        self.assertFalse(skipped)
 
 
 if __name__ == '__main__':
