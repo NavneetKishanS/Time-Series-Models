@@ -43,8 +43,11 @@
 import os
 import re
 import bisect
+import hashlib
+import json
 import pickle
 import time
+from datetime import datetime
 import numpy as np
 import pandas as pd
 from pyspark.sql import functions as F
@@ -1014,27 +1017,12 @@ for serial in SERIAL_NUMBERS:
             if sut_binary_before != sut_categoricals.get('sequence_binary', ''):
                 _sut_join_changed += 1
 
-        # Write the WHOLE candidate union, not just the selected PARAM_SET.
-        # build_conditioning_tensor reads only the names in
-        # extra_conditioning_features, so the surplus keys are inert at
-        # training time — and one Spark rebuild then serves every parameter
-        # set, instead of costing another one per switch.
-        #
-        # Each name carries its OWN missing default. 0.0 is right for a
-        # measurement (absent means "not recorded") and wrong for a
-        # multiplicative factor like turbo_factor, which is absent on
-        # ep2d_diff and means "does not apply", not "zero" — see
-        # SEQPARAM_CANDIDATES in config.py.
-        #
-        # Still never the raw unfiltered sut_values (which may include
-        # scanning_time/ST). Leakage gate #2: re-check the runtime dict keys,
-        # not just the static config list, right before they get merged.
-        numeric_seqparams = {
-            name: _safe_float(sut_values.get(name),
-                              default=SEQPARAM_MISSING_DEFAULTS[name])
-            for name in SEQPARAM_ALL_CANDIDATES
-        }
-        assert_no_leakage(numeric_seqparams.keys())
+        # NOTE: the numeric parameter columns are NOT written here. They are
+        # filled in one pass after this loop (see "SEQUENCE PARAMETERS" below),
+        # because deciding WHICH fields to write requires the whole corpus —
+        # a field's presence rate and p99 divisor are corpus-level facts, and
+        # PARAM_SET='all' is defined by them. Each row carries `sut_raw` and
+        # `sut_scope`, which is everything that pass needs.
         trigger_mode_id = _trigger_mode_id(sut_values)
 
         row = segment.iloc[0]
@@ -1048,7 +1036,7 @@ for serial in SERIAL_NUMBERS:
             'Direction_encoded': _safe_float(row.get('Direction_encoded', 0)),
             **temp,
         }
-        conditioning.update(numeric_seqparams)
+        # Parameter columns are merged in after the loop — see above.
 
         start_dt = dt.to_pydatetime() if hasattr(dt, 'to_pydatetime') else dt
 
@@ -1128,6 +1116,193 @@ if _sut_scope_counts['inside'] < 0.5 * _scope_total:
     print("  !! Fewer than half the segments contain their own SUT event. The "
           "in-segment join cannot be the main path; re-read 03c section A "
           "before trusting any per-parameter importance.")
+
+# COMMAND ----------
+
+# =============================================================================
+# SEQUENCE PARAMETERS — the one place parameter columns are written.
+#
+# Görtler, 2026-08-07: pass every parameter and let the model work out which
+# matter, because a digital twin aiming at the extraordinary 1% cannot hide
+# fields from itself. Rare cases are rare BECAUSE they turn on fields that are
+# constant on the other 99%, so hand-picking on aggregate MAE deletes exactly
+# the signal they need.
+#
+# Executing that instruction takes three things, and this block does all three
+# so that they cannot drift apart:
+#
+#   1. DISCOVER the fields. Which parameters exist, how often, and how numeric
+#      is a corpus-level fact — it cannot be decided inside the segment loop,
+#      which is why the loop now only stores `sut_raw` and this runs after it.
+#
+#   2. SCALE them. An unscaled large-magnitude numeric silently erases the
+#      categorical conditioning through LayerNorm, which has cost this project
+#      three separate multi-week flat-duration incidents. Every field needs a
+#      divisor, and hand-writing ~89 of them was the bottleneck that kept the
+#      selected set at 7. p99 through config.suggest_divisor's 1/2/5 ladder
+#      replaces the hand-writing; the eleven hand-calibrated entries still win
+#      where they exist, because they encode judgement a percentile cannot (the
+#      PPF/SPF enum pair must share ONE scale, which per-field p99 would split).
+#
+#   3. FLAG them. This is the part that makes (1) actually work. Every number
+#      03b-03f produced came from HistGradientBoostingRegressor, which has a
+#      native third state for a missing value. The model path has none:
+#      build_conditioning_tensor runs every value through safe_float, so an
+#      absent field becomes a real number that means something false. At 7
+#      fields that is tolerable; at ~89, most of them sequence-family-scoped and
+#      absent on most rows, the majority of the vector would be fabricated
+#      measurements. A `<name>__present` flag restores the distinction.
+#
+# Plus one row-level flag, `sut_in_segment`, which matters more than any single
+# parameter: the in-segment join fires on ~80% of segments, and on the rest the
+# fallback carries a NEIGHBOUR's parameters — 71.5% of which name a different
+# sequence than the one that ran. Those rows are not noisy, they are wrong. The
+# flag lets the model learn that instead of forcing a choice between dropping a
+# fifth of the corpus and poisoning it.
+# =============================================================================
+
+print("\n" + "=" * 78)
+print("SEQUENCE PARAMETERS")
+print("=" * 78)
+
+# --- 1. discover -----------------------------------------------------------
+# Under their STABLE names, so a field is never carried twice under both its
+# raw mnemonic and its mapped name (SLC vs num_slices) — see
+# config.seqparam_stable_name.
+_param_values = {}
+for _s in examination_sequences:
+    for _raw_key, _raw_val in (_s.get('sut_raw') or {}).items():
+        _param_values.setdefault(seqparam_stable_name(_raw_key), []).append(_raw_val)
+
+_n_rows = max(1, len(examination_sequences))
+_field_stats = {}
+for _name, _raws in _param_values.items():
+    _numeric = np.array([_safe_float(r, default=float('nan')) for r in _raws],
+                        dtype=float)
+    _finite = _numeric[np.isfinite(_numeric)]
+    _field_stats[_name] = {
+        'presence_pct': 100.0 * len(_raws) / _n_rows,
+        'numeric_pct': 100.0 * _finite.size / max(1, len(_raws)),
+        'p50': float(np.percentile(_finite, 50)) if _finite.size else 0.0,
+        'p99': float(np.percentile(_finite, 99)) if _finite.size else 0.0,
+        'max': float(_finite.max()) if _finite.size else 0.0,
+        'distinct': len(set(map(str, _raws))),
+    }
+
+# --- 2. decide + scale -----------------------------------------------------
+# classify_seqparam_field is the ONE rule, and it lives in config.py so the
+# report prints its reasons rather than a comment that can drift from it.
+_admitted, _excluded = [], []
+for _name in sorted(_field_stats):
+    _ok, _why = classify_seqparam_field(_name, _field_stats[_name])
+    (_admitted if _ok else _excluded).append((_name, _why))
+
+_divisor_table = {}
+for _name, _why in _admitted:
+    _stats = _field_stats[_name]
+    _curated = _name in SEQPARAM_CANDIDATES
+    _divisor_table[_name] = {
+        'divisor': (SEQPARAM_CANDIDATES[_name][0] if _curated
+                    else suggest_divisor(_stats['p99'])),
+        'missing_default': (SEQPARAM_CANDIDATES[_name][1] if _curated else 0.0),
+        'presence_pct': _stats['presence_pct'],
+        'numeric_pct': _stats['numeric_pct'],
+        'p50': _stats['p50'],
+        'p99': _stats['p99'],
+        'distinct': _stats['distinct'],
+        'source': 'curated' if _curated else 'discovered',
+        'reason': _why,
+    }
+
+print(f"\n  {len(_field_stats)} distinct parameter fields in the messages")
+print(f"  {len(_admitted)} admissible, {len(_excluded)} excluded")
+if _excluded:
+    print("\n  EXCLUDED — every one with its reason, because 'why are we not "
+          "using\n  this parameter' is the question this pipeline keeps being "
+          "asked:")
+    for _name, _why in _excluded:
+        print(f"    {_name:<16} {_why}")
+
+# --- 3. write --------------------------------------------------------------
+# Every admissible field gets a value column and a presence column. Writing the
+# whole admissible set rather than only the selected PARAM_SET is what lets a
+# set switch cost a training run instead of another Spark job — and it is what
+# lets PARAM_SET='all' resolve against THIS build rather than needing a second
+# one after the divisor table appears.
+_written_names = [n for n, _ in _admitted]
+_defaults = {n: _divisor_table[n]['missing_default'] for n in _written_names}
+
+for _s in examination_sequences:
+    _stable = {seqparam_stable_name(k): v
+               for k, v in (_s.get('sut_raw') or {}).items()}
+    _cond = _s['conditioning']
+    for _name in _written_names:
+        _present = _name in _stable
+        _cond[_name] = (_safe_float(_stable[_name], default=_defaults[_name])
+                        if _present else _defaults[_name])
+        _cond[presence_name(_name)] = 1.0 if _present else 0.0
+    # Row-level: are these parameters this scan's, or a neighbour's?
+    _cond['sut_in_segment'] = 1.0 if _s.get('sut_scope') == 'inside' else 0.0
+
+    # Leakage gate #2 — the ACTUAL runtime dict keys, not just the static config
+    # list, right after they are merged. Catches a filtering-logic bug here even
+    # when config's own gate #1 is clean.
+    assert_no_leakage(_cond.keys())
+
+print(f"\n  wrote {len(_written_names)} value columns + "
+      f"{len(_written_names)} presence flags + 1 join-scope flag "
+      f"to {len(examination_sequences):,} rows")
+
+# --- 4. emit the divisor table ---------------------------------------------
+# config.py reads this back at import time, which is how PARAM_SET='all' gets a
+# calibrated divisor per field without anybody hand-writing ~89 of them. The
+# fingerprint goes into the model manifest: `conditioning_scale` travels inside
+# the checkpoint so serving can never desync, but two training runs against
+# different tables are not comparable, and that has to be detectable.
+_fingerprint = hashlib.sha256(
+    json.dumps({n: _divisor_table[n]['divisor'] for n in _written_names},
+               sort_keys=True).encode()
+).hexdigest()[:16]
+
+_divisor_payload = {
+    'fingerprint': _fingerprint,
+    'generated': datetime.now().isoformat(timespec='seconds'),
+    'source_pkl': PKL_OUTPUT,
+    'source_rows': len(examination_sequences),
+    'min_presence_pct': SEQPARAM_MIN_PRESENCE_PCT,
+    'min_numeric_pct': SEQPARAM_MIN_NUMERIC_PCT,
+    'excluded': {n: why for n, why in _excluded},
+    'fields': _divisor_table,
+}
+with open(SEQPARAM_DIVISOR_TABLE, 'w') as _f:
+    json.dump(_divisor_payload, _f, indent=2, sort_keys=True)
+print(f"  divisor table -> {SEQPARAM_DIVISOR_TABLE}  (fingerprint {_fingerprint})")
+
+# A divisor that leaves a field far from O(1) is the LayerNorm-erasure failure
+# mode, invisible in a trained model and obvious here.
+_scale_warnings = [
+    (n, _divisor_table[n]['divisor'], _divisor_table[n]['p99'])
+    for n in _written_names
+    if not (0.05 <= _divisor_table[n]['p99'] / _divisor_table[n]['divisor'] <= 20.0)
+    and _divisor_table[n]['p99'] > 0
+]
+if _scale_warnings:
+    print("\n  !! SCALE WARNING — these land far from O(1) after scaling:")
+    for _n, _d, _p in _scale_warnings:
+        print(f"       {_n}: p99 {_p:.2f} / {_d:.1f} = {_p / _d:.3f}")
+    print("     A feature scaled far above O(1) erases the categorical "
+          "conditioning\n     through LayerNorm; one far below it is invisible. "
+          "Neither is an error.")
+
+if PARAM_SET == 'all' and set(_written_names) != set(EXAMINATION_SEQPARAM_FEATURES) - {
+        presence_name(n) for n in _written_names} - set(SEQPARAM_DERIVED):
+    print(f"\n  NOTE: config resolved PARAM_SET='all' from a divisor table that "
+          f"predates this run\n  ({len(EXAMINATION_SEQPARAM_FEATURES)} features "
+          f"selected, {len(_written_names)} written). The pkl carries both sets, "
+          f"so\n  training is safe; re-run 04 after a config reload to pick up "
+          f"the new fields.")
+
+# COMMAND ----------
 
 # The general duration model is being rebuilt on sequence + sequence parameters
 # (Görtler, 2026-07-31), so the breadth of the raw capture is now a first-class
@@ -1232,45 +1407,26 @@ if examination_sequences:
           f"(all-zero => SUT parsing found nothing yet — expected until "
           f"sut_parameter_discovery.py confirms the real slot map)")
 
-    # Every candidate is written to every row, so report every candidate — not
-    # just the selected PARAM_SET. The 'p99/div' column is the important one:
-    # an unscaled large-magnitude numeric silently erases the categorical
-    # conditioning through LayerNorm, which has cost this project three
-    # separate multi-week flat-duration incidents. It is invisible in the
-    # trained model and obvious here, so it gets checked here.
-    if SEQPARAM_ALL_CANDIDATES:
-        print(f"\n  {'candidate':<24} {'present':>8} {'p50':>10} {'p99':>10} "
-              f"{'divisor':>9} {'p99/div':>9}")
-        _scale_warnings = []
-        for name in SEQPARAM_ALL_CANDIDATES:
-            _divisor, _default = SEQPARAM_CANDIDATES[name]
-            vals = np.array([s['conditioning'].get(name, _default)
-                             for s in examination_sequences], dtype=float)
-            # "present" = not sitting at the default. A field at its default on
-            # every row is either unparsed or does not apply to this corpus.
-            _present = float(np.mean(vals != _default)) * 100.0
-            _p50, _p99 = np.percentile(vals, 50), np.percentile(vals, 99)
-            _scaled = _p99 / _divisor if _divisor else float('inf')
-            _flag = '' if 0.05 <= _scaled <= 20.0 else '  <-- CHECK DIVISOR'
-            if _flag:
-                _scale_warnings.append((name, _divisor, _p99, _scaled))
+    # Every ADMITTED field, with the divisor it was given and what that divisor
+    # does to its p99. The scale check itself already ran in the SEQUENCE
+    # PARAMETERS block above; this is the per-field table to read when it fires.
+    # Presence flags are omitted — they are 0/1 with divisor 1.0 by construction
+    # and would triple the length of the table for no information.
+    if _divisor_table:
+        print(f"\n  {'field':<24} {'src':>10} {'present':>8} {'p50':>10} "
+              f"{'p99':>10} {'divisor':>10} {'p99/div':>9}")
+        for name in _written_names:
+            _spec = _divisor_table[name]
+            _scaled = (_spec['p99'] / _spec['divisor']) if _spec['divisor'] else float('inf')
+            _flag = '' if 0.05 <= _scaled <= 20.0 or _spec['p99'] == 0 else '  <-- CHECK'
             _sel = '*' if name in EXAMINATION_SEQPARAM_FEATURES else ' '
-            print(f" {_sel}{name:<24} {_present:>7.1f}% {_p50:>10.2f} "
-                  f"{_p99:>10.2f} {_divisor:>9.1f} {_scaled:>9.3f}{_flag}")
-        print(f"  (* = in the selected PARAM_SET={PARAM_SET!r}; "
-              f"'present' is the share of rows NOT at the missing default)")
-
-        if _scale_warnings:
-            print("\n  !! SCALE WARNING — these divisors put the feature far "
-                  "from O(1) after scaling:")
-            for name, _divisor, _p99, _scaled in _scale_warnings:
-                print(f"       {name}: p99 {_p99:.2f} / {_divisor:.1f} = "
-                      f"{_scaled:.3f}")
-            print("     Fix SEQPARAM_CANDIDATES in config.py before training on "
-                  "any set that\n     includes one of these. A feature scaled "
-                  "far above O(1) erases the\n     categorical conditioning "
-                  "through LayerNorm; one scaled far below it\n     is simply "
-                  "invisible to the model. Neither shows up as an error.")
+            print(f" {_sel}{name:<24} {_spec['source']:>10} "
+                  f"{_spec['presence_pct']:>7.1f}% {_spec['p50']:>10.2f} "
+                  f"{_spec['p99']:>10.2f} {_spec['divisor']:>10.1f} "
+                  f"{_scaled:>9.3f}{_flag}")
+        print(f"  (* = in the selected PARAM_SET={PARAM_SET!r}; 'src' curated = "
+              f"a hand-calibrated\n   divisor from SEQPARAM_CANDIDATES, "
+              f"discovered = suggest_divisor(p99))")
 
     _msr34 = SOURCEID_VOCAB.get('MRI_MSR_34', 15)
     n_abort = sum(1 for s in examination_sequences if _msr34 in s['sequence'])

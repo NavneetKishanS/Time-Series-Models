@@ -31,6 +31,8 @@ from datetime import timedelta
 
 import numpy as np
 
+from .holdout import holdout_mask
+
 # Missing numeric parameters are NaN, never 0.0. Field sets differ by sequence
 # family — `TF` (turbo factor) is on the TSE-family messages and absent from
 # ep2d_diff, which uses an echo factor instead — and a turbo factor of 0 is not
@@ -156,15 +158,22 @@ def generated_protocol_name(seq, source='sut_raw'):
 
 
 def heldout_regressor_score(features, values, holdout_frac=0.2, seed=0,
-                            repeats=3, max_iter=200):
+                            repeats=3, max_iter=200, groups=None):
     """Gradient-boosted MAE on held-out rows, comparable to heldout_group_r2.
 
     Group means are not a valid estimator for continuous features, so the
     categorical baselines and the parameter model need different estimators —
     but the same split convention, or the report compares numbers that were
-    never measured the same way. Same holdout_frac/seed semantics as
+    never measured the same way. Same holdout_frac/seed/groups semantics as
     `protocol_vocab.heldout_group_r2`; fewer repeats because a GBM fit is
     orders of magnitude more expensive than a group mean.
+
+    `groups` (optional, one label per row) holds whole groups out together
+    instead of sampling rows. Pass it whenever the number is meant to support a
+    claim about transfer — to a new customer, a new session, an unseen protocol.
+    Without it the split is the historical random-row one, which lets a row's
+    siblings sit in the training set and reads high for a reason that will not
+    exist at serve time. See `data.holdout` for the full argument.
 
     NaN is passed through to the model on purpose: HistGradientBoostingRegressor
     learns a split direction for missing values, which is the correct treatment
@@ -184,7 +193,7 @@ def heldout_regressor_score(features, values, holdout_frac=0.2, seed=0,
     rng = np.random.default_rng(seed)
     r2s, maes = [], []
     for repeat in range(repeats):
-        is_train = rng.random(features.shape[0]) >= holdout_frac
+        is_train = holdout_mask(features.shape[0], holdout_frac, rng, groups)
         if not is_train.any() or is_train.all():
             continue
         model = HistGradientBoostingRegressor(
@@ -199,13 +208,17 @@ def heldout_regressor_score(features, values, holdout_frac=0.2, seed=0,
         maes.append(float(np.abs(held - predictions).mean()))
 
     if not r2s:
-        raise ValueError("no usable train/test split was produced")
+        raise ValueError(
+            "no usable train/test split was produced"
+            + (" — with `groups`, this means one group holds nearly every row, "
+               "so there is nothing to transfer to" if groups is not None else "")
+        )
     return float(np.mean(r2s)), float(np.mean(maes))
 
 
 def permutation_importance_mae(features, values, field_names=None,
                                holdout_frac=0.2, seed=0, shuffles=3,
-                               max_iter=200):
+                               max_iter=200, groups=None):
     """Per-column MAE cost of destroying one feature. ONE fit, N shuffles.
 
     `heldout_regressor_score` refits for every question asked of it, which is
@@ -227,6 +240,14 @@ def permutation_importance_mae(features, values, field_names=None,
     permutation importance, not a defect; use the nested-prefix curve to decide
     how many fields to keep, and this to decide the ORDER.
 
+    `groups` holds whole groups out together, same semantics as
+    `heldout_regressor_score`. It matters MORE here than there: an identifier
+    that memorises a scanner scores a large importance on a random split (its
+    training rows tell it the answer) and near zero on a serial-grouped one,
+    because the held-out scanner's id was never seen. That difference is the
+    cleanest leak signal this project has, which is why the report runs the
+    ranking both ways rather than picking one.
+
     Returns a list of dicts sorted by descending `importance_s`:
         {'name', 'index', 'importance_s', 'baseline_mae'}
     """
@@ -244,9 +265,13 @@ def permutation_importance_mae(features, values, field_names=None,
         raise ValueError("field_names must name every column")
 
     rng = np.random.default_rng(seed)
-    is_train = rng.random(features.shape[0]) >= holdout_frac
+    is_train = holdout_mask(features.shape[0], holdout_frac, rng, groups)
     if not is_train.any() or is_train.all():
-        raise ValueError("no usable train/test split was produced")
+        raise ValueError(
+            "no usable train/test split was produced"
+            + (" — with `groups`, this means one group holds nearly every row, "
+               "so there is nothing to transfer to" if groups is not None else "")
+        )
 
     model = HistGradientBoostingRegressor(max_iter=max_iter, random_state=seed)
     model.fit(features[is_train], values[is_train])
@@ -274,6 +299,63 @@ def permutation_importance_mae(features, values, field_names=None,
         })
 
     return sorted(rows, key=lambda r: -r['importance_s'])
+
+
+def exam_group_labels(sequences, by='serial_day'):
+    """One group label per sequence, for `holdout_mask`'s `groups` argument.
+
+    THE PKL CARRIES NO EXAM OR PATIENT ID. `03_build_preprocessed_pkl.py` writes
+    `serial_idx`, `start_datetime` and `protocol_name` per measurement and
+    nothing that binds sibling measurements of one examination together. So the
+    exam-level split we actually want is not directly available, and the honest
+    options are:
+
+        'serial'      the scanner (and therefore the customer). The strictest
+                      and the one that matches the real question — Görtler's
+                      objection to protocol-keyed models was that they "learn
+                      one site and transfer to none", and this is the split that
+                      detects exactly that.
+        'serial_day'  scanner + calendar date. A stand-in for the exam: sibling
+                      measurements of one examination always share it, along
+                      with the operator, the patient population and the day's
+                      calibration. Coarser than an exam, never finer, so it
+                      cannot leak a sibling into training.
+        'protocol'    the raw protocol name — "does this hold on a protocol we
+                      have never seen?"
+
+    'serial_day' is the default because it is the tightest grouping that is
+    guaranteed to contain whole exams. Use 'serial' for anything reported as a
+    transfer-to-a-new-customer number; with only 10 serials that split is coarse
+    and noisy, which is a fact about the corpus rather than about the method.
+
+    Returns a numpy array of string labels, aligned to `sequences`.
+    """
+    if by not in ('serial', 'serial_day', 'protocol'):
+        raise ValueError(
+            f"by={by!r} is not a known grouping — choose 'serial', "
+            f"'serial_day' or 'protocol'"
+        )
+
+    labels = []
+    for seq in sequences:
+        if by == 'protocol':
+            labels.append(str(seq.get('protocol_name', '')))
+            continue
+
+        serial = str(seq.get('serial_idx', ''))
+        if by == 'serial':
+            labels.append(serial)
+            continue
+
+        # 'serial_day'. A sequence without a start_datetime cannot be dated, and
+        # bucketing those together would silently merge unrelated scans into one
+        # giant group. Give each its own instead: standing alone is the correct
+        # reading of "we do not know which session this belongs to".
+        start = seq.get('start_datetime')
+        day = start.date().isoformat() if hasattr(start, 'date') else None
+        labels.append(f"{serial}|{day}" if day else f"{serial}|undated|{len(labels)}")
+
+    return np.array(labels, dtype=object)
 
 
 def terminator_clusters(sequences):

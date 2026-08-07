@@ -32,6 +32,8 @@ samples), so TRIGGER_MODE_VOCAB is unused for now and every row defaults to
 'none' (safe, non-leaking default — see _trigger_mode_id below).
 """
 
+import json
+import math
 import os
 
 # ============================================================================
@@ -54,9 +56,17 @@ import os
 #
 # Models and analysis output are namespaced by this value — see MODELS_DIR /
 # ANALYSIS_DIR below — so two runs never overwrite each other's checkpoint.
+#
+# THE DEFAULT IS 'all' as of the 2026-08-07 Görtler meeting. His position is
+# that a digital twin aiming at the extraordinary 1% cannot hide fields from
+# itself: rare cases are rare BECAUSE they turn on fields that are constant on
+# the other 99%, so hand-picking on aggregate MAE deletes the tail signal. 03f
+# had already found the same thing — its ranked top-12 beat both hand-picked
+# sets. `luke` and `navneet` are kept as the control group, because "more is
+# better" is a claim to be measured rather than assumed.
 # ============================================================================
 
-PARAM_SET = os.environ.get('PARAM_SET', 'luke').strip().lower()
+PARAM_SET = os.environ.get('PARAM_SET', 'all').strip().lower()
 
 # ============================================================================
 # TARGET SCANNERS & DATE RANGE — identical to csv_pipeline/, for a like-for-
@@ -86,13 +96,55 @@ BODY_GROUP_MAPPING_PATH = "/dbfs/FileStore/tables/bodyupdated.xlsx"
 # training run, not another Spark rebuild.
 PKL_OUTPUT   = "/dbfs/FileStore/csv_pipeline_seqparams/preprocessed_data.pkl"
 
+# Written by step 03 alongside the pkl: one p99-derived scale divisor per SUT
+# field it actually observed, so PARAM_SET='all' does not require somebody to
+# hand-write ~89 divisors. Read back by this file at import time (see
+# _load_divisor_table below). Absent on a fresh clone and in the test suite,
+# which is why the fallback is the hand-curated SEQPARAM_CANDIDATES table.
+SEQPARAM_DIVISOR_TABLE = os.environ.get(
+    'SEQPARAM_DIVISOR_TABLE',
+    "/dbfs/FileStore/csv_pipeline_seqparams/seqparam_divisors.json",
+)
+
+# ----------------------------------------------------------------------------
+# THE OTHER PIPELINE — what this one still borrows, and why it is a constant.
+#
+# This pipeline's pkl holds ONLY 'examination' (see 03_build_preprocessed_pkl.py),
+# so 07_generate_synthetic_data.py reads 'exchange' and 'customer_schedules'
+# from csv_pipeline's pkl and its exchange/orchestration checkpoints from
+# csv_pipeline's models directory. That is the reason onboarding a new customer
+# currently means running BOTH pipelines and keeping them in sync.
+#
+# The fix is for step 03 to produce all four keys, which absorbs
+# 01_exchange_preprocessing.py and 02_exam_preprocessing.py. That is deliberately
+# NOT done yet: Navneet is reworking csv_pipeline for a GPU cluster, and forking
+# those two now means forking code that is being rewritten and then re-forking it
+# after his PR lands.
+#
+# What IS done now is making the dependency a NAMED CONSTANT instead of two
+# string literals buried at 07:181-183, so the day the merge happens it is a
+# config change rather than a code change — and so `grep BASE_` finds every
+# place this pipeline still leans on the other one.
+# ----------------------------------------------------------------------------
+BASE_PKL = os.environ.get(
+    'BASE_PKL', "/dbfs/FileStore/csv_pipeline/preprocessed_data.pkl")
+BASE_MODELS_DIR = os.environ.get(
+    'BASE_MODELS_DIR', "/dbfs/FileStore/csv_pipeline/models")
+
 # Models and analysis ARE namespaced by PARAM_SET. Two sets can widen
 # base_conditioning_dim to the same number while meaning different things per
 # column, so a shared directory would silently overwrite one checkpoint with
 # the other and leave the comparison unreadable — with nothing in the manifest
 # to say which set produced it.
-MODELS_DIR   = f"/dbfs/FileStore/csv_pipeline_seqparams/models/{PARAM_SET}"
-ANALYSIS_DIR = f"/dbfs/FileStore/csv_pipeline_seqparams/analysis/{PARAM_SET}"
+#
+# Env-overridable so the report can be produced somewhere other than /dbfs. That
+# is not a convenience: 03b_parameter_report.py is the notebook whose OUTPUT has
+# to be readable by someone who cannot start a cluster, and being able to run it
+# against a downloaded pkl is what makes that true.
+MODELS_DIR   = os.environ.get(
+    'MODELS_DIR', f"/dbfs/FileStore/csv_pipeline_seqparams/models/{PARAM_SET}")
+ANALYSIS_DIR = os.environ.get(
+    'ANALYSIS_DIR', f"/dbfs/FileStore/csv_pipeline_seqparams/analysis/{PARAM_SET}")
 
 # Note: no EXAM_OUTPUT_DIR / step-02 CSV export in this pipeline. Unlike
 # csv_pipeline/, this fork has no 02_exam_preprocessing.py — the examination-
@@ -341,6 +393,122 @@ SUT_CATEGORICAL_FIELD_MAP = {
     'OR':  'orientation',       # e.g. 'CT' / 'SCT' / 'T'
 }
 
+# ============================================================================
+# WHAT MAY NEVER BE A FEATURE — three denylists, three distinct objections.
+#
+#   SUT_LEAKAGE_DENYLIST          ~equal to the TARGET.
+#   SUT_IDENTIFIER_DENYLIST       an IDENTITY that cannot transfer to another
+#                                 customer or another day — the objection that
+#                                 ruled the protocol name out in the first place.
+#   SUT_PLANNER_DERIVED_DENYLIST  a quantity the scanner COMPUTED FROM the
+#                                 timing it was about to run.
+#
+# These sit ABOVE the candidate table on purpose: what is admissible has to be
+# decided before what is available is enumerated, because PARAM_SET='all'
+# filters the discovered field table through them (SEQPARAM_ADMISSIBLE_
+# DISCOVERED below). The three GATES that enforce them, and assert_no_leakage
+# itself, stay further down next to the resolved feature list they check.
+# ============================================================================
+
+# ST/TST join scanning_time here as of the 2026-08-04 call — see the long note
+# above SUT_FIELD_MAP. 03c section E measured ST as exact on ~86-87% of rows.
+SUT_LEAKAGE_DENYLIST = {'scanning_time', 'ST', 'TST'}
+
+# 03d_identifier_leakage_check.py, run 2026-08-04, ACQUITTED MUID as a protocol
+# proxy: purity MUID -> protocol 29.8% (the leak threshold was ~90%), 11,409
+# MUIDs against 3,357 protocols — finer than the protocol, not a coarser
+# Siemens family id — and dropping MUID+VER moved the parameter model by -0.0s
+# (19.6s either way). As a predictor in its own right it scored R2 -19.6% /
+# 72.5s MAE, WORSE than the serial-alone baseline (5.8% / 66.9s): the signature
+# of a high-cardinality nuisance id, not a hidden protocol.
+#
+# Görtler described the mechanism unprompted in the same week's call, and it
+# matches the measurement exactly: MUID is a per-day measurement counter that
+# resets nightly and skips the ids consumed by adjustment scans, so it carries
+# ordering information and nothing else.
+#
+# Denylisted anyway, per 03d's own verdict: a field that CAN leak should not be
+# one retrain away from leaking. VER (scanner software version) is not a scan
+# property at all — it splits the corpus by install, which lets a tree memorise
+# per-site behaviour.
+SUT_IDENTIFIER_DENYLIST = {'MUID', 'VER'}
+
+# ----------------------------------------------------------------------------
+# THE THIRD OBJECTION, added 2026-08-07 after the Görtler meeting.
+#
+# His position is to pass every parameter and let the model work out which
+# matter, because a model that hides fields from itself cannot reach the
+# extraordinary 1%. That is right, and 03f agreed with it before he said it: the
+# ranked top-12 beat both hand-picked sets. The reason a denylist survives that
+# position is that "don't hide things from the model" is a claim about SCAN
+# PHYSICS, and these fields are not physics.
+#
+#   SUT_LEAKAGE_DENYLIST        ~equal to the TARGET.
+#   SUT_IDENTIFIER_DENYLIST     an IDENTITY that cannot transfer.
+#   SUT_PLANNER_DERIVED_DENYLIST  a quantity the scanner COMPUTED FROM the
+#                               timing it was about to run. Not the answer, and
+#                               not an id — a re-expression of the answer.
+#
+# SNR is the seed and currently the only entry. The three real messages pinned
+# in tests/test_sut_parser.py move it monotonically AGAINST scan time:
+#
+#     haste       SNR 87   ST   8
+#     haste       SNR 69   ST  15
+#     ep2d_diff   SNR 39   ST 400
+#
+# which is what MR physics predicts, since predicted SNR carries an acquisition-
+# time term. n=3 is not proof, and there is a real counter-argument: if SNR is a
+# deterministic function of parameters we already supply, it is REDUNDANT rather
+# than leaky and costs nothing to include. The distinction turns on whether the
+# console computes it before or after the operator's adjustments, which nobody
+# in the 08-07 meeting could answer.
+#
+# So it is denied by DEFAULT and its exclusion carries a PRICE TAG: gate 4 of
+# the parameter report scores the vector with and without this denylist on the
+# grouped split and prints the difference. A denylist entry that cannot show
+# what it costs is an assertion; one that can is a decision. If the measured
+# cost is large and the grouped split shows no divergence, this entry should be
+# removed — and the report is what tells us that.
+SUT_PLANNER_DERIVED_DENYLIST = {'SNR'}
+
+# NOT a denylist — a reading aid, migrated out of 03f_coverage_and_masking.py so
+# it survives that notebook's archiving. These fields are ADMISSIBLE and stay in
+# the vector; the report flags them wherever they rank high, so a suspect is
+# noticed rather than admired.
+#
+# The test to apply, the same one that convicted ST: is this a re-expression of
+# the answer, or a cause of it? A cause stays in, however strongly it correlates.
+#
+#   BHD/ACQW/TGD are absent from all three pinned messages (they ride gated and
+#   breath-hold sequences), so nothing here has been measured on our corpus yet.
+#   BHD is the closest call — a breath-hold duration on a breath-hold sequence is
+#   very nearly the measurement duration — and it is left admissible rather than
+#   denied on a guess, because gate 5 can settle it with numbers.
+SUT_SUSPECT_WATCHLIST = {
+    'BHD':  'breath-hold duration — a time in seconds, and on a breath-hold '
+            'sequence it is close to the measurement itself. Strongest denial '
+            'candidate; unverified because no sampled message carries it.',
+    'ACQW': 'acquisition window — a time, but per cardiac cycle. Reads as a '
+            'cause rather than a re-expression.',
+    'TGD':  'trigger delay — a time, but it precedes the acquisition rather '
+            'than measuring it.',
+    'TEU':  'TE in microseconds — an exact duplicate of TE (TE:101/TEU:101000). '
+            'Redundant, not leaky; harmless under "use all".',
+    'TP':   'table position — geometry, but it fingerprints an exam. An '
+            'IDENTITY concern, not a planner-derived one: gate 5 catches it by '
+            'the random-vs-grouped importance gap, not by this note.',
+    'ES':   'echo spacing — a time, but a per-echo one, and a genuine driver '
+            'of how long a turbo train takes.',
+    'UT':   'unidentified, 3-digit, varies between messages on one scanner '
+            '(655/683). Named here so it is not mistaken for something known.',
+}
+
+# The union every consumer wants. 03f built this by hand at its line 400; having
+# it here means adding a fourth objection later reaches every caller at once.
+SUT_ALL_DENYLISTS = (
+    SUT_LEAKAGE_DENYLIST | SUT_IDENTIFIER_DENYLIST | SUT_PLANNER_DERIVED_DENYLIST
+)
+
 TRIGGER_MODE_VOCAB = {
     'none': 0, 'ecg': 1, 'peripheral_pulse': 2, 'respiratory': 3,
     'external': 4, 'unknown': 5,
@@ -413,7 +581,241 @@ SEQPARAM_CANDIDATES = {
 }
 
 # ============================================================================
-# THE TWO NAMED SETS. Select with PARAM_SET at the top of this file.
+# PRESENCE FLAGS — what makes "pass every parameter" actually work.
+#
+# Görtler (2026-08-07): pass everything and let the model sort it out, because a
+# model that hides fields from itself cannot reach the extraordinary 1%. He is
+# right, and the pipeline could not execute it, for a reason that is invisible
+# from outside the code:
+#
+#   Every number in 03b-03f came from HistGradientBoostingRegressor, which has a
+#   NATIVE THIRD STATE for a missing value and learns a split direction for it.
+#   The model path has no such state. build_conditioning_tensor runs every value
+#   through safe_float (AlternatingPipeline/training/utils.py:107), which turns
+#   NaN into a real number. With 7 fields that is tolerable. With ~89 — most of
+#   them sequence-family-scoped and therefore absent on most rows — the majority
+#   of the vector becomes fabricated measurements, and LayerNorm then makes the
+#   near-constant columns compete with the categorical embeddings for amplitude.
+#   That is the exact mechanism behind this project's three multi-week
+#   flat-duration incidents.
+#
+# A presence flag restores the third state in the one place it was missing. It
+# also removes the hardest manual bottleneck: with a flag saying "this field was
+# not in the message", the VALUE written for an absent field stops carrying
+# meaning, so a newly discovered field needs a divisor but not a hand-classified
+# missing default. Hand-classifying ~89 fields as multiplicative-or-measurement
+# was the thing that made "use all" a week of guessing.
+#
+# The hand-curated defaults in SEQPARAM_CANDIDATES stay: they are correct, and
+# they keep the vector sane if flags are ever switched off for an ablation.
+# ============================================================================
+
+SEQPARAM_PRESENCE_SUFFIX = '__present'
+
+# Env-overridable so the flags themselves can be ablated. Gate 4 of the
+# parameter report scores with and without, which is the only way to show the
+# masking result (03f section B: 9.0s masked vs 24.6s as-is) survives the move
+# from the GBM to the conditioning tensor.
+SEQPARAM_USE_PRESENCE_FLAGS = os.environ.get(
+    'SEQPARAM_USE_PRESENCE_FLAGS', '1').strip().lower() not in ('0', 'false', 'no')
+
+
+def presence_name(name):
+    """The flag key that accompanies a parameter: 1.0 present, 0.0 absent."""
+    return f"{name}{SEQPARAM_PRESENCE_SUFFIX}"
+
+
+def is_presence_name(name):
+    return name.endswith(SEQPARAM_PRESENCE_SUFFIX)
+
+
+# ============================================================================
+# DERIVED conditioning features — computed by step 03 rather than parsed out of
+# the message, and therefore exempt from the SUT_FIELD_MAP check below.
+#
+# `sut_in_segment` is the row-level counterpart to the per-field flags, and it
+# matters more than any single parameter. 03f section B: the in-segment join
+# fires on 80.3% of segments; on the rest, step 03 falls back to the most recent
+# SUT event BEFORE the segment, and 71.5% of those name a DIFFERENT sequence
+# than the one that actually ran. Those rows are not noisy, they are wrong, and
+# no additional field fixes them. Masking them scored 9.0s MAE against 24.6s for
+# using them as-is.
+#
+# One flag lets the model learn that distinction instead of us having to choose
+# between dropping a fifth of the corpus and poisoning it.
+# ============================================================================
+
+SEQPARAM_DERIVED = {
+    # name: (divisor, value when the information is unavailable)
+    'sut_in_segment': (1.0, 0.0),
+}
+
+# ============================================================================
+# THE DISCOVERED FIELD TABLE — how PARAM_SET='all' gets ~89 fields without
+# anybody hand-writing ~89 divisors.
+#
+# THE DIVISOR IS NOT COSMETIC (see the long note above SEQPARAM_CANDIDATES): an
+# unscaled large-magnitude numeric erases the categorical conditioning through
+# LayerNorm. So every field needs one, and picking them by hand was the
+# bottleneck that kept the selected set at 7. Step 03 already computes p99 per
+# field for its own divisor sanity check; it now WRITES that out, and this reads
+# it back.
+#
+# Safe against desync by construction: `conditioning_scale` is a persistent
+# buffer registered on the model (sequence_generator.py:172-178) and travels
+# INSIDE the checkpoint, so a served model always receives the divisors it was
+# trained with even if this table has moved on since. What a changed table CAN
+# do is make two training runs incomparable, which is why
+# SEQPARAM_DIVISOR_FINGERPRINT below goes into the model manifest.
+# ============================================================================
+
+# A field on 1% of rows is on ~500 rows of the current corpus — thin, but thin is
+# exactly where the extraordinary 1% lives, and a presence flag means a mostly-
+# absent field costs the model nothing to ignore. This floor is the single knob
+# that trades tail coverage against vector width; the report prints what it
+# excludes so the trade is visible rather than assumed.
+SEQPARAM_MIN_PRESENCE_PCT = float(os.environ.get('SEQPARAM_MIN_PRESENCE_PCT', '1.0'))
+# Below this, a "numeric" field is mostly strings and belongs in an embedding,
+# not in a scaled numeric column. Same threshold 03b-03f used.
+SEQPARAM_MIN_NUMERIC_PCT = float(os.environ.get('SEQPARAM_MIN_NUMERIC_PCT', '90.0'))
+
+
+def seqparam_stable_name(raw_key):
+    """The one name a SUT field is known by everywhere downstream.
+
+    A field has two names: the raw message mnemonic (`SLC`) and the mapped
+    stable name (`num_slices`). Mixing them is not cosmetic — `SLC` and
+    `num_slices` would both survive into PARAM_SET='all' as separate columns
+    holding identical values, doubling a field's weight in the conditioning
+    vector for no reason and making its permutation importance read half its
+    real worth in the report.
+
+    So there is exactly one rule, here, and both step 03 and the divisor loader
+    apply it: mapped name where SUT_FIELD_MAP has one, raw key otherwise.
+    """
+    return SUT_FIELD_MAP.get(raw_key, raw_key)
+
+
+def _load_divisor_table(path):
+    """Read step 03's emitted divisor table, or return ({}, None) if absent.
+
+    Fails SOFT on purpose. This module is %run by every notebook and imported by
+    the test suite, neither of which can require a /dbfs artefact to exist — a
+    fresh clone must still be able to load the config and run the guards. When
+    the table is missing, PARAM_SET='all' falls back to the hand-curated
+    candidates and says so loudly at import time.
+
+    Keys are normalised through seqparam_stable_name on the way in, so a table
+    written under either convention (or an older one written before the rule
+    existed) resolves to the same field set.
+    """
+    try:
+        with open(path, 'r') as handle:
+            payload = json.load(handle)
+    except (OSError, ValueError):
+        return {}, None
+
+    fields = payload.get('fields') or {}
+    table = {}
+    for raw_name, spec in fields.items():
+        try:
+            divisor = float(spec['divisor'])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not divisor or divisor != divisor:      # 0.0 or NaN
+            continue
+
+        name = seqparam_stable_name(raw_name)
+        entry = {
+            'divisor': divisor,
+            # Absent fields are carried by the presence flag, so 0.0 is a safe
+            # default for anything not hand-classified. A curated entry still
+            # wins — see _missing_default_for below.
+            'missing_default': float(spec.get('missing_default', 0.0)),
+            'presence_pct': float(spec.get('presence_pct', 0.0)),
+            'numeric_pct': float(spec.get('numeric_pct', 100.0)),
+            'raw_key': raw_name,
+        }
+        # A table carrying BOTH `SLC` and `num_slices` collapses to one entry.
+        # Keep whichever is present on more rows rather than whichever the dict
+        # happened to yield last, so the choice does not depend on JSON order.
+        if name in table and table[name]['presence_pct'] >= entry['presence_pct']:
+            continue
+        table[name] = entry
+
+    return table, payload.get('fingerprint')
+
+
+SEQPARAM_DISCOVERED, SEQPARAM_DIVISOR_FINGERPRINT = _load_divisor_table(
+    SEQPARAM_DIVISOR_TABLE)
+
+
+def suggest_divisor(p99):
+    """A scale divisor putting a field's p99 at O(1), snapped to a 1/2/5 ladder.
+
+    SNAPPED, not exact, and that is the whole point. An exact p99 divisor moves
+    a little on every rebuild, which would change every column's scale, change
+    the fingerprint, and make two training runs incomparable for no reason. The
+    1/2/5 x 10^k ladder is coarse enough that ordinary month-to-month drift in
+    the corpus leaves it untouched, and fine enough to keep every field inside
+    the [0.05, 20] band step 03's divisor check enforces.
+
+    Returns 1.0 for a non-finite or non-positive p99 — a field that is all
+    zeros or all NaN needs no rescaling, and dividing by it would be worse.
+    """
+    try:
+        p99 = float(p99)
+    except (TypeError, ValueError):
+        return 1.0
+    if not (p99 > 0) or p99 != p99 or p99 in (float('inf'), float('-inf')):
+        return 1.0
+
+    exponent = math.floor(math.log10(p99))
+    mantissa = p99 / (10.0 ** exponent)
+    for step in (1.0, 2.0, 5.0):
+        if mantissa <= step:
+            return step * (10.0 ** exponent)
+    return 10.0 ** (exponent + 1)
+
+
+def classify_seqparam_field(name, stats):
+    """Why a discovered field is or is not admissible. One rule, one place.
+
+    `stats` is {'presence_pct', 'numeric_pct'} for the field, under its STABLE
+    name (see seqparam_stable_name).
+
+    Returns (admissible: bool, reason: str). The reason is not decoration — it
+    is what the human-readable half of the parameter report prints, so "how many
+    parameters are we using and why" is answered from the same code that made
+    the decision rather than from a comment that can drift away from it.
+    """
+    if name in SUT_LEAKAGE_DENYLIST:
+        return False, 'denied: ~equal to the duration target'
+    if name in SUT_IDENTIFIER_DENYLIST:
+        return False, 'denied: an identity that cannot transfer to a new customer'
+    if name in SUT_PLANNER_DERIVED_DENYLIST:
+        return False, 'denied: derived by the scanner from the timing it was about to run'
+    if stats.get('numeric_pct', 100.0) < SEQPARAM_MIN_NUMERIC_PCT:
+        return False, (f"not numeric on {stats.get('numeric_pct', 0.0):.0f}% of rows "
+                       f"— belongs in an embedding, not a scaled column")
+    if stats.get('presence_pct', 0.0) < SEQPARAM_MIN_PRESENCE_PCT:
+        return False, (f"present on only {stats.get('presence_pct', 0.0):.2f}% of rows "
+                       f"(floor {SEQPARAM_MIN_PRESENCE_PCT:.1f}%)")
+    if name in SEQPARAM_CANDIDATES:
+        return True, 'admissible: hand-calibrated candidate'
+    return True, 'admissible: discovered, divisor from p99'
+
+# Everything the discovered table offers that is admissible under all three
+# objections and clears both floors. Sorted for a stable column order — the
+# order IS the meaning of a trained checkpoint's conditioning columns, so it
+# must not depend on dict iteration or on which run wrote the table.
+SEQPARAM_ADMISSIBLE_DISCOVERED = sorted(
+    name for name, spec in SEQPARAM_DISCOVERED.items()
+    if classify_seqparam_field(name, spec)[0]
+)
+
+# ============================================================================
+# THE NAMED SETS. Select with PARAM_SET at the top of this file.
 # ============================================================================
 
 PARAM_SETS = {
@@ -442,7 +844,36 @@ PARAM_SETS = {
         'TR', 'num_slices', 'averages', 'repetitions',
         'base_resolution', 'phase_partial_fourier', 'slice_partial_fourier',
     ],
+    # Görtler, 2026-08-07, and now the DEFAULT. Every admissible field the
+    # corpus actually contains — no hand-picking at all.
+    #
+    # His argument, which the data had already made: rare cases are rare
+    # BECAUSE they are characterised by unusual values of fields that are
+    # constant on the other 99%. Aggregate MAE cannot see those fields, so
+    # selecting features on aggregate MAE systematically deletes exactly the
+    # signal the extraordinary 1% needs. 03f agreed before he said it — its
+    # ranked top-12 beat both hand-picked sets below.
+    #
+    # `luke` and `navneet` are KEPT, as the control group. They cost two lines
+    # each and they are the only way to later PROVE that more was better rather
+    # than assert it. Run 03b's gate 4 to score all three on one split.
+    #
+    # This resolves from the discovered table when step 03 has written one, and
+    # falls back to the hand-curated candidates otherwise (with a warning at
+    # import). Sorted for a stable column order — the order IS the meaning of a
+    # trained checkpoint's conditioning columns.
+    'all': (SEQPARAM_ADMISSIBLE_DISCOVERED
+            or sorted(SEQPARAM_CANDIDATES)),
 }
+
+if PARAM_SET == 'all' and not SEQPARAM_ADMISSIBLE_DISCOVERED:
+    print(
+        f"[config] PARAM_SET='all' but no divisor table at "
+        f"{SEQPARAM_DIVISOR_TABLE} — falling back to the "
+        f"{len(SEQPARAM_CANDIDATES)} hand-curated candidates instead of every "
+        f"discovered field. Run 03_build_preprocessed_pkl.py to emit the table, "
+        f"or point SEQPARAM_DIVISOR_TABLE at an existing one."
+    )
 
 if PARAM_SET not in PARAM_SETS:
     raise ValueError(
@@ -451,24 +882,111 @@ if PARAM_SET not in PARAM_SETS:
         f"csv_pipeline_seqparams/config.py."
     )
 
+# ============================================================================
+# RESOLUTION — PARAM_SET to the actual feature list, in three blocks.
+#
+#   [ values ][ presence flags ][ derived ]
+#
+# Appended as BLOCKS rather than interleaved so an analysis can slice the
+# conditioning vector by meaning: vec[:n] is what the scanner reported, vec[n:]
+# is what we know about whether it reported it. The order is fixed and sorted
+# within each block, because the order IS the meaning of a trained checkpoint's
+# columns — a reordering silently repoints every learned weight.
+#
+# WHY NOTHING ELSE NEEDS TO CHANGE: build_seqparams_model_config() at the bottom
+# of this file derives BOTH base_conditioning_dim AND conditioning_scale from
+# these two lists, and build_conditioning_tensor reads names from a list. So
+# widening the vector here propagates to 04/05/06/07 and into the model with no
+# change to any of them, and no change to the model code at all.
+# ============================================================================
+
+_selected_values = list(PARAM_SETS[PARAM_SET])
+
+
+def _divisor_for(name):
+    """Scale divisor for a value feature: hand-curated first, discovered next.
+
+    The curated entry wins wherever one exists. Those eleven divisors were
+    calibrated against the real sampled messages pinned in tests/test_sut_parser.py
+    and carry judgement a p99 cannot — PPF/SPF are Siemens enum codes scaled by
+    their shared ceiling so they stay on ONE scale, which a per-field p99 would
+    quietly separate.
+    """
+    if name in SEQPARAM_CANDIDATES:
+        return SEQPARAM_CANDIDATES[name][0]
+    if name in SEQPARAM_DERIVED:
+        return SEQPARAM_DERIVED[name][0]
+    if name in SEQPARAM_DISCOVERED:
+        return SEQPARAM_DISCOVERED[name]['divisor']
+    raise ValueError(
+        f"{name!r} has no scale divisor. Every feature needs one before it can "
+        f"reach the model — an unscaled large-magnitude numeric erases the "
+        f"categorical conditioning through LayerNorm (see the note above "
+        f"SEQPARAM_CANDIDATES). Add it to SEQPARAM_CANDIDATES, or rebuild the "
+        f"divisor table with 03_build_preprocessed_pkl.py."
+    )
+
+
+def _missing_default_for(name):
+    """Value written when a field is absent from the message.
+
+    Curated defaults win: 1.0 for the 1-based multiplicands of the TA formula
+    ("does not apply to this sequence"), 0.0 for a measurement ("not recorded").
+    Anything discovered gets 0.0, which is safe precisely BECAUSE the presence
+    flag carries the meaning — that is what removes the need to hand-classify
+    every newly discovered field.
+    """
+    if name in SEQPARAM_CANDIDATES:
+        return SEQPARAM_CANDIDATES[name][1]
+    if name in SEQPARAM_DERIVED:
+        return SEQPARAM_DERIVED[name][1]
+    return 0.0
+
+
+if SEQPARAM_USE_PRESENCE_FLAGS:
+    _selected_flags = [presence_name(n) for n in _selected_values]
+    _selected_derived = sorted(SEQPARAM_DERIVED)
+else:
+    # The ablation arm. Without flags the vector is exactly what it was before
+    # 2026-08-07, so `luke` reproduces the historical 7-feature checkpoint and
+    # gate 4 can price the flags rather than assume them.
+    _selected_flags = []
+    _selected_derived = []
+
 # Numeric SUT parameter feature names that ride the flat conditioning tensor
 # (see AlternatingPipeline/training/utils.py::build_conditioning_tensor
 # extra_feature_names). Resolved from PARAM_SET — this is the name every
 # downstream notebook already reads, which is why the switch reaches all of
 # them without touching any.
-EXAMINATION_SEQPARAM_FEATURES = list(PARAM_SETS[PARAM_SET])
+EXAMINATION_SEQPARAM_FEATURES = (
+    _selected_values + _selected_flags + _selected_derived
+)
 EXAMINATION_SEQPARAM_SCALE = [
-    SEQPARAM_CANDIDATES[name][0] for name in EXAMINATION_SEQPARAM_FEATURES
+    # Flags are already 0/1, so their divisor is the identity. Giving them a
+    # p99-derived one would rescale a boolean and make "absent" a nonzero value.
+    1.0 if is_presence_name(name) else _divisor_for(name)
+    for name in EXAMINATION_SEQPARAM_FEATURES
 ]
 
 # What step 03 writes into every row's 'conditioning' — the union of every set,
-# not just the selected one. build_conditioning_tensor reads only the names in
-# extra_feature_names, so the surplus keys are inert at training time, and one
-# Spark rebuild then serves every parameter set.
-SEQPARAM_ALL_CANDIDATES = list(SEQPARAM_CANDIDATES)
+# not just the selected one, plus a flag per value and the derived features.
+# build_conditioning_tensor reads only the names in extra_feature_names, so the
+# surplus keys are inert at training time, and one Spark rebuild then serves
+# every parameter set.
+#
+# NOTE this is the union of what CONFIG knows about. Step 03 additionally writes
+# every admissible field it discovers in the messages, which is how PARAM_SET=
+# 'all' has values to read on the run AFTER the one that emitted the table.
+_all_values = sorted(set(SEQPARAM_CANDIDATES) | set(SEQPARAM_ADMISSIBLE_DISCOVERED))
+SEQPARAM_ALL_CANDIDATES = (
+    _all_values
+    + [presence_name(n) for n in _all_values]
+    + sorted(SEQPARAM_DERIVED)
+)
 
 SEQPARAM_MISSING_DEFAULTS = {
-    name: default for name, (_, default) in SEQPARAM_CANDIDATES.items()
+    name: (0.0 if is_presence_name(name) else _missing_default_for(name))
+    for name in SEQPARAM_ALL_CANDIDATES
 }
 
 # ============================================================================
@@ -480,52 +998,26 @@ SEQPARAM_MISSING_DEFAULTS = {
 #   gate #3 (AlternatingPipeline/training/utils.py::build_conditioning_tensor,
 #            training-tensor-build-time — enforced at the actual point of
 #            tensor construction via its optional `denylist` parameter, which
-#            04_train_models.py sets to SUT_LEAKAGE_DENYLIST. This is
-#            independent of gates #1/#2: it fires regardless of how a caller
-#            assembled extra_conditioning_features, not just the one path
-#            gate #1 already validates.)
+#            04/05/06 set to SUT_ALL_DENYLISTS. This is independent of gates
+#            #1/#2: it fires regardless of how a caller assembled
+#            extra_conditioning_features, not just the one path gate #1 already
+#            validates.)
+#
 # Görtler's transcript: "scanning time" is ~equal to the duration target and
 # must never be an input feature. The originally-named "SD58" slot doesn't
 # correspond to any literal field in the confirmed KEY:VALUE message format
-# (no "SD" label exists in it at all) — kept here as defense-in-depth in case
-# a future field is found to be duration-equivalent.
+# (no "SD" label exists in it at all) — kept as defense-in-depth in case a
+# future field is found to be duration-equivalent.
 #
-# TWO denylists, because there are two distinct objections and only the first
-# was ever guarded:
-#
-#   SUT_LEAKAGE_DENYLIST     bans a field for being ~equal to the TARGET.
-#   SUT_IDENTIFIER_DENYLIST  bans a field for being an IDENTITY — an id that
-#                            cannot transfer to another customer or another
-#                            day, which is the objection that ruled the
-#                            protocol name out as a feature in the first place.
+# The three denylists these gates enforce are defined ABOVE the candidate table,
+# because PARAM_SET='all' has to filter the discovered fields through them
+# before it can enumerate anything.
 # ============================================================================
-
-# ST/TST join scanning_time here as of the 2026-08-04 call — see the long note
-# above SUT_FIELD_MAP. 03c section E measured ST as exact on ~86-87% of rows.
-SUT_LEAKAGE_DENYLIST = {'scanning_time', 'ST', 'TST'}
-
-# 03d_identifier_leakage_check.py, run 2026-08-04, ACQUITTED MUID as a protocol
-# proxy: purity MUID -> protocol 29.8% (the leak threshold was ~90%), 11,409
-# MUIDs against 3,357 protocols — finer than the protocol, not a coarser
-# Siemens family id — and dropping MUID+VER moved the parameter model by -0.0s
-# (19.6s either way). As a predictor in its own right it scored R2 -19.6% /
-# 72.5s MAE, WORSE than the serial-alone baseline (5.8% / 66.9s): the signature
-# of a high-cardinality nuisance id, not a hidden protocol.
-#
-# Görtler described the mechanism unprompted in the same week's call, and it
-# matches the measurement exactly: MUID is a per-day measurement counter that
-# resets nightly and skips the ids consumed by adjustment scans, so it carries
-# ordering information and nothing else.
-#
-# Denylisted anyway, per 03d's own verdict: a field that CAN leak should not be
-# one retrain away from leaking. VER (scanner software version) is not a scan
-# property at all — it splits the corpus by install, which lets a tree memorise
-# per-site behaviour.
-SUT_IDENTIFIER_DENYLIST = {'MUID', 'VER'}
 
 
 def assert_no_leakage(feature_names, denylist=SUT_LEAKAGE_DENYLIST,
-                      identifier_denylist=SUT_IDENTIFIER_DENYLIST):
+                      identifier_denylist=SUT_IDENTIFIER_DENYLIST,
+                      planner_denylist=SUT_PLANNER_DERIVED_DENYLIST):
     """Raise if any banned name is present, naming which objection applies.
 
     feature_names: any iterable of feature-name strings (a static config
@@ -549,25 +1041,47 @@ def assert_no_leakage(feature_names, denylist=SUT_LEAKAGE_DENYLIST,
             f"to another customer."
         )
 
+    derived = (planner_denylist or set()).intersection(feature_names)
+    if derived:
+        raise ValueError(
+            f"Planner-derived guard tripped: {sorted(derived)} must never be "
+            f"used as an input feature — the scanner computed it FROM the "
+            f"timing it was about to run, so it is a re-expression of the "
+            f"target rather than a cause of it. If the parameter report's "
+            f"price tag says this exclusion is too expensive, remove it from "
+            f"SUT_PLANNER_DERIVED_DENYLIST deliberately — do not route around "
+            f"the guard."
+        )
+
 
 # Gate #1 — fires the moment this config module is loaded, for EVERY named set
 # rather than only the selected one. A typo in a set nobody has run yet is a
 # bug you want to hear about now, not on the day you switch to it.
+_KNOWN_FEATURE_SOURCES = (
+    set(SEQPARAM_CANDIDATES) | set(SEQPARAM_DERIVED) | set(SEQPARAM_DISCOVERED)
+)
+
 for _set_name, _set_features in PARAM_SETS.items():
     assert_no_leakage(_set_features)
 
-    _unknown = [n for n in _set_features if n not in SEQPARAM_CANDIDATES]
+    _unknown = [n for n in _set_features if n not in _KNOWN_FEATURE_SOURCES]
     if _unknown:
         raise ValueError(
-            f"PARAM_SETS[{_set_name!r}] names {_unknown}, which have no entry "
-            f"in SEQPARAM_CANDIDATES. Every feature needs an explicit scale "
-            f"divisor and missing-value default before it can reach the model "
-            f"(see the LayerNorm-erasure warning above)."
+            f"PARAM_SETS[{_set_name!r}] names {_unknown}, which have no scale "
+            f"divisor — not in SEQPARAM_CANDIDATES, not in SEQPARAM_DERIVED, "
+            f"and not in the discovered table at {SEQPARAM_DIVISOR_TABLE}. "
+            f"Every feature needs an explicit divisor before it can reach the "
+            f"model (see the LayerNorm-erasure warning above)."
         )
 
-# Every candidate must be something the SUT parser actually produces, or step
-# 03 would write its default into every row forever and the feature would look
-# dead rather than misspelled.
+# Every CURATED candidate must be something the SUT parser actually produces, or
+# step 03 would write its default into every row forever and the feature would
+# look dead rather than misspelled.
+#
+# Scoped to SEQPARAM_CANDIDATES on purpose. Discovered fields come FROM the
+# parsed messages, so they cannot fail this check by construction, and derived
+# features are computed rather than parsed — requiring either to appear in
+# SUT_FIELD_MAP would make the map a second place to maintain the field list.
 _unmapped = [n for n in SEQPARAM_CANDIDATES if n not in set(SUT_FIELD_MAP.values())]
 if _unmapped:
     raise ValueError(
@@ -581,6 +1095,21 @@ assert len(EXAMINATION_SEQPARAM_FEATURES) == len(EXAMINATION_SEQPARAM_SCALE), (
     "the same length — every new numeric feature needs an explicit scale "
     "divisor (see the LayerNorm-erasure warning above)."
 )
+
+# Every selected feature must be something step 03 actually writes, or it reads
+# as 0.0 on every row: build_conditioning_tensor falls back to 0.0 for a key
+# that is not in the conditioning dict, which is silent and looks exactly like a
+# dead feature. This is the check that catches a PARAM_SET='all' resolved from a
+# divisor table NEWER than the pkl beside it.
+_unwritten = [n for n in EXAMINATION_SEQPARAM_FEATURES
+              if n not in set(SEQPARAM_ALL_CANDIDATES)]
+if _unwritten:
+    raise ValueError(
+        f"PARAM_SET={PARAM_SET!r} selects {_unwritten}, which step 03 does not "
+        f"write into 'conditioning'. Those would read as 0.0 on every row "
+        f"rather than raising. Rebuild the pkl with 03_build_preprocessed_pkl.py "
+        f"so the divisor table and the pkl come from the same run."
+    )
 
 # ============================================================================
 # STALE-SOURCE GUARD for the notebooks that IMPORT AlternatingPipeline from a

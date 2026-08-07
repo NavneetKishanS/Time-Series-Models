@@ -300,11 +300,10 @@ class ConditioningUnionTests(unittest.TestCase):
         # in what step 03 merges into 'conditioning', whatever the message said.
         values = self._numeric_seqparams(_HASTE_MSG_1)
         self.config.assert_no_leakage(values.keys())  # must not raise
-        banned = (self.config.SUT_LEAKAGE_DENYLIST
-                  | self.config.SUT_IDENTIFIER_DENYLIST)
+        banned = self.config.SUT_ALL_DENYLISTS
         self.assertEqual(banned.intersection(values), set())
         # ...even though the message plainly carries them.
-        for token in ('ST:8', 'TST:9', 'MUID:17', 'VER:'):
+        for token in ('ST:8', 'TST:9', 'MUID:17', 'VER:', 'SNR:87'):
             self.assertIn(token, _HASTE_MSG_1)
 
     def test_an_empty_message_yields_every_default(self):

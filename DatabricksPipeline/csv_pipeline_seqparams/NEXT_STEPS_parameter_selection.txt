@@ -1,0 +1,218 @@
+================================================================================
+ NEXT STEPS — PARAMETER SELECTION
+ rewritten 2026-08-07 after the Görtler meeting. The version this replaces was
+ a list of parameter-selection experiments; the meeting made most of them moot.
+
+ Companion documents:
+   GUIDE_running_param_sets.txt         how to run any of this
+   FINDINGS_parameter_investigation.md  what 03b-03f concluded (settled)
+================================================================================
+
+
+--------------------------------------------------------------------------------
+ 0. WHAT THE MEETING CHANGED
+--------------------------------------------------------------------------------
+
+Görtler's position: pass every parameter and let the model work out which
+matter. A digital twin aiming at the extraordinary 1% cannot hide fields from
+itself, because rare cases are rare BECAUSE they turn on fields that are
+constant on the other 99% — so selecting features on an average-case score
+deletes exactly the signal those cases need. A model that is 85% right on the
+common case is not the goal; 99% including the unusual body groups is.
+
+The data had already agreed with him: 03f's ranked top-12 beat both hand-picked
+sets. So the previous document's central activity — deciding which seven
+parameters were the right seven — was the wrong question.
+
+WHAT WAS DONE ABOUT IT (all landed 2026-08-07):
+
+  * PARAM_SET='all' is the default. Every admissible field, ~74 on the current
+    corpus, up from 7. `luke` and `navneet` kept as the control group.
+  * Presence flags. Every parameter carries a <name>__present column, plus one
+    row-level sut_in_segment flag. Without these, "pass everything" makes the
+    model WORSE, for a reason that was invisible from outside the code — see
+    section 1.
+  * A third denylist, for planner-derived quantities (SNR).
+  * Data-derived scale divisors, emitted by step 03, so ~74 fields do not need
+    ~74 hand-written divisors.
+  * Grouped held-out splits. Every number this project has quoted came from a
+    random row split — see section 2.
+  * 03b-03f consolidated into one 03b_parameter_report.py with two outputs.
+
+
+--------------------------------------------------------------------------------
+ 1. WHY "PASS EVERYTHING" NEEDED WORK RATHER THAN A LONGER LIST
+--------------------------------------------------------------------------------
+
+This is the thing worth carrying into the next conversation with Görtler,
+because it is not visible from the outside and it changes what "just pass them
+all" costs.
+
+Every number in 03b-03f came from HistGradientBoostingRegressor. That estimator
+has a NATIVE THIRD STATE for a missing value and learns a split direction for
+it. The model does not:
+
+    build_conditioning_tensor  (AlternatingPipeline/training/utils.py:120)
+      -> safe_float            (:107)      NaN / missing -> a real number
+      -> / conditioning_scale
+      -> Linear -> LayerNorm
+
+safe_float destroys the distinction. An absent field becomes a number the model
+reads as a measurement. Field sets differ by sequence family — turbo factor is
+on the TSE messages and absent from ep2d_diff, which uses an echo factor — so at
+~74 fields the MAJORITY of the vector would have been fabricated. And LayerNorm
+normalises across the whole projection, so ~70 near-constant columns do not add
+information; they add variance the body-region, sequence-type and serial
+embeddings have to compete with. That is the exact mechanism behind this
+project's three multi-week flat-duration incidents.
+
+Simply extending the feature list from 7 names to 74 would therefore have
+produced a WORSE model, and the natural conclusion would have been that Görtler
+was wrong. He was not. The pipeline could not execute the instruction.
+
+The presence flag is the fix, and it has a second benefit worth stating: with a
+flag carrying "the scanner did not report this", the VALUE written for an absent
+field stops carrying meaning. That removed the need to hand-classify each new
+field as a multiplicative factor (default 1.0) or a measurement (default 0.0),
+which was the actual bottleneck keeping the set at seven.
+
+
+--------------------------------------------------------------------------------
+ 2. THE BIGGEST REMAINING LEVER IS NOT PARAMETERS
+--------------------------------------------------------------------------------
+
+Two things stand between the current state and 99%, and neither is a feature.
+
+(a) COVERAGE — 80.3%
+
+    The in-segment join fires on 80.3% of segments. On the other fifth every
+    parameter is a default no matter how many parameters are allowed, so no
+    amount of feature work reaches those rows. Across ALL clean rows the
+    parameter vector scores 24.6s against an oracle of 11.0s; on in-segment rows
+    only, 9.7s against 13.2s. The entire difference between "we beat the
+    protocol name" and "we lose to it by 13.6s" is which rows have a message.
+
+    About 29% of the missing rows had an in-segment SUT event that was an
+    ADJUSTMENT. Those segments are probably the adjustment itself and belong in
+    the population filter rather than counted against the join — which would
+    move the real coverage number up without changing the rule. Gate 1 of the
+    report prints this split every run.
+
+    NEXT: decide whether adjustment-only segments are a population to exclude or
+    a scan to model. That is a domain question for Navneet, and it is worth more
+    than any parameter decision on the table.
+
+(b) THE SPLIT
+
+    heldout_regressor_score and heldout_group_r2 both used a RANDOM 80/20 row
+    split. Sequences from one exam landed on both sides, and every scanner in
+    test was also in train. A model scored that way is being asked "can you
+    predict a scan whose siblings you have already seen" — which is not the
+    question. The question is a new customer, and a rare body group.
+
+    Fixed: data/holdout.py, and a `groups=` argument on both estimators. The
+    report scores everything grouped by scanner-day and reports the
+    held-out-by-scanner number alongside.
+
+    CAVEAT WORTH KNOWING: the corpus has 10 serials. A serial-grouped split is
+    therefore coarse and noisy, and that is a fact about the data rather than
+    about the method. It is another argument for onboarding more customers
+    sooner.
+
+
+--------------------------------------------------------------------------------
+ 3. WHAT IS STILL OPEN
+--------------------------------------------------------------------------------
+
+STEP 1 — RUN IT. [blocking everything else]
+
+    Run 03, reload the config, run 03b, read parameter_report.md. Every number
+    quoted above predates the presence flags and the grouped split, so the first
+    honest measurement of the new design does not exist yet.
+
+    Specifically worth looking at in that first report:
+      * gate 4's random-vs-grouped gap — how much of the old score was memory;
+      * the planner-derived price tag — what excluding SNR actually costs;
+      * gate 4b per body group — whether the rare groups are anywhere near the
+        bar, which is the whole point;
+      * gate 5's divergence column — whether anything else is memorising a site.
+
+STEP 2 — THE DECISIVE TRAINING EXPERIMENT
+
+    Train 'all' vs 'luke' vs 'navneet' from the same pkl and compare on the
+    grouped split, per body group. If 'all' does not win there, Görtler's thesis
+    is wrong on our data and we say so with numbers rather than opinion. This is
+    what keeping the two small sets is FOR.
+
+    Also worth an arm: SEQPARAM_USE_PRESENCE_FLAGS=0 against 'all'. That prices
+    the flags rather than assuming them, and it is the only way to show the
+    masking result (9.0s vs 24.6s, section 7 of FINDINGS) survived the move from
+    the GBM to the conditioning tensor.
+
+STEP 3 — THE UNIDENTIFIED FIELDS
+
+    ~63 admitted fields have no entry in SUT_FIELD_MAP. We use them and cannot
+    say what they mean.
+
+    For TRAINING that is fine — the model does not need to know.
+    For STEP 07 it is not: synthetic generation must produce a value for every
+    field the model conditions on. SUTParameterSampler draws a JOINT tuple per
+    (body_region, sequence_type) from real rows, so vector width is free —
+    a whole real row is copied and the correlations survive. The real risk is a
+    THIN cell: the empty-pool fallback returns 0.0, which puts a fabricated
+    parameter into synthetic output. Gate 1 reports the thinnest cells.
+
+    NEXT: ask Navneet or Siemens documentation for the meaning of the highest-
+    ranked unidentified fields (gate 5's top-12 names them), and verify step 07
+    end to end at the widened vector before trusting any synthetic output.
+
+STEP 4 — BHD
+
+    Breath-hold duration is the strongest remaining denial candidate: on a
+    breath-hold sequence it is very nearly the measurement duration. It is
+    absent from all three pinned sample messages, so nothing about it has been
+    measured on our corpus. It sits on the watchlist, admitted, and gate 5 will
+    settle it the first time a corpus containing it is scored.
+
+STEP 5 — ONE PIPELINE
+
+    07_generate_synthetic_data.py still reads 'exchange' and 'customer_schedules'
+    from csv_pipeline's pkl, because this pipeline's step 03 produces only
+    'examination'. That is why onboarding a customer currently means running both
+    pipelines and keeping them in sync.
+
+    The fix is for step 03 to produce all four keys, absorbing
+    01_exchange_preprocessing.py and 02_exam_preprocessing.py. It is DEFERRED
+    until Navneet's GPU rework of csv_pipeline lands, because doing it now means
+    forking code that is being rewritten and then re-forking it.
+
+    Prepared for: the two cross-pipeline paths are now config constants
+    (BASE_PKL, BASE_MODELS_DIR) rather than string literals, so the merge is a
+    config change rather than a code change. `grep BASE_` finds every remaining
+    dependency.
+
+    The directory should also be renamed at that point. "seqparams" describes an
+    experiment, not a pipeline — but renaming twice is worse than renaming once.
+
+
+--------------------------------------------------------------------------------
+ 4. WHAT NOT TO DO
+--------------------------------------------------------------------------------
+
+DO NOT remove a denylist entry to make a guard stop firing. Each of the three
+answers a different objection, and all three are the difference between a real
+number and a fake one. The planner-derived list is the only one whose removal is
+even a legitimate conversation, and only with the report's price tag in hand.
+
+DO NOT prune a field because gate 5 shows it moves the held-out MAE by less than
+0.05s. Under "pass everything" a field the model ignores costs two columns, and
+one of those fields may be the one that carries a rare body group. That is the
+whole argument. They are reported, not removed.
+
+DO NOT compare a number from before 2026-08-07 with one from after. The split
+convention changed. FINDINGS_parameter_investigation.md flags this on every
+figure it quotes.
+
+DO NOT quote a headline number from a configuration that is not shipped. The
+report deliberately measures 'all + SNR' so that it can be refused; the summary
+quotes the shipped configuration for exactly this reason.

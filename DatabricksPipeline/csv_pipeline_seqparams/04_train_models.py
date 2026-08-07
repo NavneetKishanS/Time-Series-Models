@@ -382,7 +382,13 @@ examination_model, examination_history = train_examination_model(
     # and gate #2 (preprocessing-write-time, step 03). This catches a bad
     # feature list regardless of how extra_conditioning_features was
     # assembled, not just the one path gate #1 already validated.
-    leakage_denylist=seqparams_config.SUT_LEAKAGE_DENYLIST,
+    # The UNION of all three objections, not just the target one: a field can
+    # be inadmissible for being ~the target, for being an identity that cannot
+    # transfer, or for being a quantity the scanner derived from the timing it
+    # was about to run. Passing only the first left the other two enforced at
+    # config-import time and unenforced here, which is precisely the gap gate #3
+    # exists to close.
+    leakage_denylist=seqparams_config.SUT_ALL_DENYLISTS,
     protocol_vocab=PROTOCOL_VOCAB,
     verbose=True,
 )
@@ -435,6 +441,16 @@ _manifest = {
     "num_trigger_modes": EXAMINATION_MODEL_CONFIG_SEQPARAMS['num_trigger_modes'],
     "base_conditioning_dim": EXAMINATION_MODEL_CONFIG_SEQPARAMS['base_conditioning_dim'],
     "extra_conditioning_features": seqparams_config.EXAMINATION_SEQPARAM_FEATURES,
+    # WHICH named set produced this checkpoint. The feature list alone does not
+    # say — two sets can resolve to the same width — and the directory name is
+    # not inside the file.
+    "param_set": seqparams_config.PARAM_SET,
+    "presence_flags": seqparams_config.SEQPARAM_USE_PRESENCE_FLAGS,
+    # Which divisor table the conditioning_scale came from. Serving can never
+    # desync (the scale is a persistent buffer that travels in the checkpoint),
+    # but two runs trained against different tables are NOT comparable, and
+    # that has to be detectable after the fact rather than guessed at.
+    "divisor_fingerprint": seqparams_config.SEQPARAM_DIVISOR_FINGERPRINT,
     "num_protocols": NUM_PROTOCOLS,
     "protocol_min_count": PROTOCOL_MIN_COUNT,
     "protocol_heldout_r2_pct": round(_p_r2, 2),

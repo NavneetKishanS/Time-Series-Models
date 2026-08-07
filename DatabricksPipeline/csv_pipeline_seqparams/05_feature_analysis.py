@@ -186,7 +186,7 @@ else:
                 continue
             conds.append(build_conditioning_tensor(
                 s['conditioning'], extra_feature_names=EXAMINATION_SEQPARAM_FEATURES,
-                denylist=SUT_LEAKAGE_DENYLIST,
+                denylist=SUT_ALL_DENYLISTS,
             ))
             regions.append(s['body_region'])
             seq_types.append(int(s.get('sequence_type', 0)))

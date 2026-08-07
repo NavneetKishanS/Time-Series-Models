@@ -62,7 +62,7 @@ from AlternatingPipeline.validation.metrics import compare_real_vs_predicted, pr
 # the SUT features alone.
 OLD_CHECKPOINT = os.environ.get(
     "BASELINE_CHECKPOINT",
-    "/dbfs/FileStore/csv_pipeline/models/examination/examination_model_best.pt",
+    f"{BASE_MODELS_DIR}/examination/examination_model_best.pt",
 )
 NEW_CHECKPOINT = f"{MODELS_DIR}/examination/examination_model_best.pt"
 DURATION_SCALE = EXAMINATION_TRAINING_CONFIG['duration_scale']
@@ -148,7 +148,7 @@ def _predict_one(model, seq, extra_features):
     inp = torch.tensor([[START_TOKEN_ID] + toks], dtype=torch.long, device=device)
     cond = build_conditioning_tensor(
         seq['conditioning'], extra_feature_names=extra_features,
-        denylist=SUT_LEAKAGE_DENYLIST,
+        denylist=SUT_ALL_DENYLISTS,
     ).unsqueeze(0).to(device)
     info = {
         'body_region': torch.tensor([seq['body_region']], device=device),

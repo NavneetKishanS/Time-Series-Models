@@ -178,9 +178,14 @@ print(f"[bootstrap] AlternatingPipeline.__path__ = {list(_ap.__path__)}")
 # SEQPARAMS FORK: two pkls and two model dirs. `%run ./config` above already
 # defined MODELS_DIR / PKL_OUTPUT for THIS pipeline; both are re-bound to
 # explicit, unambiguous names here so no later line can pick up the wrong one.
-PKL_PATH        = "/dbfs/FileStore/csv_pipeline/preprocessed_data.pkl"   # customer_schedules + exchange
+#
+# The two csv_pipeline paths come from config's BASE_PKL / BASE_MODELS_DIR
+# rather than being literals here. That is the ONLY remaining place this
+# pipeline depends on the other one, and naming it is what makes the coming
+# consolidation with Navneet's GPU rework a config change instead of a code
+# change — see the note above BASE_PKL in config.py.
+PKL_PATH        = BASE_PKL                                              # customer_schedules + exchange
 SEQPARAMS_PKL   = PKL_OUTPUT                                            # examination (SUT-enriched)
-BASE_MODELS_DIR = "/dbfs/FileStore/csv_pipeline/models"                 # exchange + orchestration
 EXAM_MODELS_DIR = f"{MODELS_DIR}/examination"                           # SUT-conditioned examination
 SYNTH_EXCHANGE  = "/dbfs/FileStore/csv_pipeline_seqparams/synthetic/exchange"
 SYNTH_EXAM      = "/dbfs/FileStore/csv_pipeline_seqparams/synthetic/exam"

@@ -1,0 +1,336 @@
+================================================================================
+GUIDE — RUNNING THE SEQUENCE-PARAMETER PIPELINE
+Third person, for a colleague picking this up cold.
+Written 2026-08-07, revised the same day after the Görtler meeting.
+================================================================================
+
+WHAT CHANGED ON 2026-08-07, IN ONE PARAGRAPH
+
+Before that date the pipeline used seven hand-picked parameters, chosen from one
+of two named sets, and answering "which parameters, and why" meant running five
+diagnostic notebooks. It now passes EVERY admissible parameter the scanner
+reports — around 74 on the current corpus — and answers the same question with
+one notebook that writes a report a person can read. The two hand-picked sets
+were kept, not deleted, because "more is better" is a claim worth measuring.
+
+Companion document: FINDINGS_parameter_investigation.md — what the five archived
+diagnostic notebooks concluded. Settled history; read it, do not re-run it.
+
+
+--------------------------------------------------------------------------------
+ 1. THE FILES
+--------------------------------------------------------------------------------
+
+  config.py                       every constant and every rule. All notebooks
+                                  %run this, so it is the only file that has to
+                                  be edited to change what the model sees.
+  03_build_preprocessed_pkl.py    Spark. Reads the event log, builds the pkl,
+                                  discovers the parameter fields, writes the
+                                  divisor table. Hours.
+  03b_parameter_report.py         no Spark, no training. Five gates, two
+                                  outputs, five charts. ~10 minutes.
+  04_train_models.py              GPU. Trains the examination model.
+  05_feature_analysis.py          correlation matrix + permutation importance
+                                  against the TRAINED model.
+  06_compare_models.py            old checkpoint vs new, same held-out rows.
+  07_generate_synthetic_data.py   synthetic CSV output.
+
+The five diagnostic notebooks that used to sit between 03 and 04 are in
+_archive/csv_pipeline_seqparams_diagnostics_v1/. Nothing routine needs them.
+
+
+--------------------------------------------------------------------------------
+ 2. THE SWITCH: PARAM_SET
+--------------------------------------------------------------------------------
+
+One variable decides which parameters reach the model. It is at the top of
+config.py, immediately under the module docstring:
+
+    PARAM_SET = os.environ.get('PARAM_SET', 'all').strip().lower()
+
+Three named sets are defined further down, next to the candidate table they draw
+from:
+
+  'all'      THE DEFAULT. Every admissible field the corpus contains — no hand
+             picking at all. ~74 parameters on the current corpus.
+
+             The reasoning is Görtler's, 2026-08-07: a digital twin aiming at the
+             extraordinary 1% cannot hide fields from itself, because rare cases
+             are rare BECAUSE they turn on fields that are constant on the other
+             99%. Selecting features on an average-case score deletes exactly the
+             signal the rare cases need.
+
+  'luke'     Seven fields: the acquisition-time formula as its own multiplicands,
+             TA ~= TR x PEL x AVG x CONC / (PAT x TF), plus the slice count. The
+             bet was that giving the model the factors it needs to reconstruct
+             the formula beats giving it a shorter list of stronger correlates.
+
+  'navneet'  Seven fields: Görtler's own 2026-08-04 selection, deliberately NOT
+             the formula. He argued that echo spacing, TE and slice thickness are
+             physically real but redundant, because each imposes a constraint
+             that surfaces as a floor on TR, and TR repeats hundreds of times per
+             scan. So the set is TR plus only the things that change HOW MANY TRs
+             run: slices, averages, repetitions, matrix size, and phase/slice
+             partial Fourier.
+
+'luke' and 'navneet' are the CONTROL GROUP. They cost two lines of config each,
+and they are the only way to later demonstrate that passing everything helped
+rather than assert it. Gate 4 of the report scores all three on one split without
+training anything.
+
+
+--------------------------------------------------------------------------------
+ 3. DOES CHANGING PARAM_SET REALLY CHANGE THE MODEL?
+--------------------------------------------------------------------------------
+
+Yes. The chain, verified end to end:
+
+  config.py           PARAM_SET selects PARAM_SETS[PARAM_SET]
+       |
+       v              resolved into EXAMINATION_SEQPARAM_FEATURES and
+                      EXAMINATION_SEQPARAM_SCALE
+       |
+       v              build_seqparams_model_config() derives BOTH
+                      base_conditioning_dim AND conditioning_scale from those
+       |
+  04_train_models.py  passes EXAMINATION_SEQPARAM_FEATURES as
+                      extra_conditioning_features
+       |
+       v
+  train_examination.py -> build_conditioning_tensor(extra_feature_names=...)
+       |
+       v              one tensor column per name, in order, appended to the
+                      fixed 10-dim base
+       |
+       v
+  the model           conditioning / conditioning_scale -> Linear -> LayerNorm
+
+The one condition: the pkl must carry the names being selected. Step 03 writes
+every admissible field it discovers, so this holds automatically for a pkl and a
+config from the same build. Config REFUSES to resolve a set naming something the
+pkl does not have, rather than letting it read as 0.0 on every row.
+
+
+--------------------------------------------------------------------------------
+ 4. WHAT ELSE IS IN THE CONDITIONING VECTOR NOW
+--------------------------------------------------------------------------------
+
+Three blocks, in this order:
+
+    [ parameter values ][ presence flags ][ sut_in_segment ]
+
+PRESENCE FLAGS — one per parameter, named <parameter>__present, 1.0 when the
+scanner reported the field and 0.0 when it did not.
+
+This is what makes "pass everything" work rather than backfire. Field sets differ
+by sequence family: turbo factor is on the TSE-family messages and absent from
+ep2d_diff, which uses an echo factor instead. Without a flag an absent field
+becomes a real number the model reads as a measurement. With seven fields that is
+tolerable; with seventy-four, most of them sequence-scoped, the majority of the
+vector would be fabricated.
+
+SUT_IN_SEGMENT — one flag per row, 1.0 when the parameter message was emitted
+DURING this measurement. The join fires on about 80% of segments; on the rest the
+pipeline falls back to the most recent preceding message, and 71.5% of those name
+a different sequence than the one that actually ran. Those rows carry a
+neighbour's parameters. The flag lets the model discount them instead of forcing
+a choice between dropping a fifth of the corpus and poisoning it.
+
+Both blocks can be switched off for an ablation:
+
+    SEQPARAM_USE_PRESENCE_FLAGS=0
+
+which reproduces the pre-2026-08-07 vector exactly.
+
+
+--------------------------------------------------------------------------------
+ 5. WHAT IS EXCLUDED, AND WHY IT IS NOT FEATURE SELECTION
+--------------------------------------------------------------------------------
+
+Three denylists, three different objections. None is an opinion about which
+parameters matter; each is the difference between a real score and a fake one.
+
+  SUT_LEAKAGE_DENYLIST          {scanning_time, ST, TST}
+      Banned for being ~equal to the TARGET. ST was measured exact on ~86-87% of
+      rows. A model given it learns identity, not physics.
+
+  SUT_IDENTIFIER_DENYLIST       {MUID, VER}
+      Banned for being an IDENTITY that cannot transfer. MUID was empirically
+      ACQUITTED as a protocol proxy (29.8% purity against a ~90% threshold) and
+      is denied anyway, per that investigation's own verdict: a field that CAN
+      leak should not be one retrain away from leaking. VER is the scanner
+      software version, which splits the corpus by install and lets a model
+      memorise a site.
+
+  SUT_PLANNER_DERIVED_DENYLIST  {SNR}
+      Added 2026-08-07. Banned for being a quantity the scanner COMPUTED FROM the
+      timing it was about to run — not the answer, and not an id, but a
+      re-expression of the answer.
+
+      This one carries a PRICE TAG. Gate 4 scores the vector with and without it
+      and prints the difference, because a denylist entry that cannot show what
+      it costs is an assertion rather than a decision.
+
+Two further exclusions are mechanical rather than judgements: a field that is not
+numeric on at least 90% of rows belongs in an embedding rather than a scaled
+column, and a field present on fewer than 1% of rows is below the floor. Both
+thresholds are env-overridable; the presence floor is the one knob that directly
+trades tail coverage against vector width.
+
+There is also a WATCHLIST (SUT_SUSPECT_WATCHLIST) of fields that look suspicious
+but are ADMITTED. It is a reading aid, not a denylist — gate 5 settles each entry
+with a number rather than a guess.
+
+
+--------------------------------------------------------------------------------
+ 6. HOW TO SELECT A SET
+--------------------------------------------------------------------------------
+
+  (a) Environment variable — preferred, nothing to edit, nothing to revert:
+
+          %env PARAM_SET=navneet
+
+      in a Databricks cell BEFORE the `%run ./config` cell, or on the cluster's
+      environment variables. Same convention as the other overrides (PKL_PATH,
+      TARGET_MAE_S, BASE_PKL).
+
+  (b) Edit config.py's default. Only for a lasting change, and it should be
+      committed rather than left dirty in the workspace.
+
+  (c) A new set: add a list to PARAM_SETS. Every name in it must have a scale
+      divisor — either a hand-calibrated entry in SEQPARAM_CANDIDATES or a row in
+      the divisor table step 03 emits. Config refuses to import otherwise, which
+      is deliberate: an unscaled large-magnitude numeric silently erases the
+      categorical conditioning through LayerNorm, a failure that has cost this
+      project three separate multi-week flat-duration incidents and never once
+      raised an error.
+
+
+--------------------------------------------------------------------------------
+ 7. THE RUN ORDER
+--------------------------------------------------------------------------------
+
+  FIRST TIME, or after any change to the message parsing:
+
+      1.  03_build_preprocessed_pkl.py     (Spark, hours)
+              writes preprocessed_data.pkl AND seqparam_divisors.json
+      2.  detach and reattach the notebook, or restart Python
+              config reads the divisor table at import, so PARAM_SET='all' only
+              sees newly discovered fields after a reload
+      3.  03b_parameter_report.py          (~10 min)
+              read parameter_report.md before spending a GPU run
+      4.  04_train_models.py               (GPU)
+      5.  06_compare_models.py             (optional, old vs new)
+      6.  07_generate_synthetic_data.py
+
+  CHANGING PARAM_SET ONLY:
+
+      set PARAM_SET, then run 04 onwards. No rebuild — step 03 writes every
+      admissible field, so the pkl already contains what any set needs.
+
+  LOCALLY, WITHOUT A CLUSTER:
+
+      python -m pytest tests/ -q
+
+      and, against a downloaded pkl, the report itself:
+
+          PKL_PATH=./preprocessed_data.pkl \
+          ANALYSIS_DIR=./analysis \
+          SEQPARAM_DIVISOR_TABLE=./seqparam_divisors.json \
+          python DatabricksPipeline/csv_pipeline_seqparams/03b_parameter_report.py
+
+      The only Databricks-specific things in that notebook are a %run magic
+      (which is a comment in Python) and display/displayHTML, both guarded.
+
+
+--------------------------------------------------------------------------------
+ 8. THE TWO OUTPUTS
+--------------------------------------------------------------------------------
+
+Both land in ANALYSIS_DIR, which is namespaced by PARAM_SET:
+
+  parameter_report.md      The one to read. How many parameters, why, what more
+                           or fewer would buy, whether it works for the rare body
+                           groups, and what is blocking. Numbers with sentences
+                           around them.
+
+  parameter_report.json    Every field, every percentile, every per-group number.
+                           For anyone reasoning about the results between runs
+                           without starting a cluster.
+
+  *.png                    Five charts: coverage waterfall, field admissibility
+                           map, MAE against field count, MAE per body group, and
+                           the error-quantile curve.
+
+Models and analysis are namespaced by PARAM_SET (models/all, models/luke, ...) so
+two runs never overwrite each other. The pkl is NOT namespaced — one build serves
+every set, which is what keeps a set switch to a training run rather than another
+Spark job.
+
+
+--------------------------------------------------------------------------------
+ 9. HOW TO TELL WHICH SET PRODUCED A RESULT
+--------------------------------------------------------------------------------
+
+  - the directory: MODELS_DIR and ANALYSIS_DIR both end in the set name;
+  - MODEL_MANIFEST.json records param_set, extra_conditioning_features,
+    base_conditioning_dim, presence_flags and divisor_fingerprint;
+  - the report's header line repeats PARAM_SET and the fingerprint.
+
+The divisor fingerprint matters for a specific reason. A model's
+conditioning_scale is a persistent buffer that travels inside the checkpoint, so
+serving can never desync. But two models trained against different divisor tables
+are not comparable, and without the fingerprint that would be undetectable after
+the fact.
+
+
+--------------------------------------------------------------------------------
+10. THE GUARDS, AND WHAT THEY MEAN WHEN THEY FIRE
+--------------------------------------------------------------------------------
+
+  "Leakage guard tripped: [...] is ~equal to the duration target"
+      A denylisted target-equivalent reached a feature list. Do not remove it
+      from the denylist to make this go away.
+
+  "Identifier guard tripped: [...] cannot transfer to another customer"
+      An id reached a feature list. Same.
+
+  "Planner-derived guard tripped: [...] computed FROM the timing"
+      Same, with one difference: this denylist has a measured price tag in the
+      report. If the cost is high AND gate 5 shows no random-vs-grouped
+      divergence for the field, the right response is to remove the entry from
+      SUT_PLANNER_DERIVED_DENYLIST deliberately — never to route around the guard.
+
+  "[...] has no scale divisor"
+      A feature was named that nothing has calibrated. Add it to
+      SEQPARAM_CANDIDATES, or re-run step 03 to regenerate the divisor table.
+
+  "PARAM_SET=[...] selects [...], which step 03 does not write"
+      The divisor table and the pkl came from different runs. Re-run step 03.
+
+  "PARAM_SET='all' but no divisor table at [...]"
+      A warning, not an error. 'all' has fallen back to the eleven hand-curated
+      candidates. Run step 03 to emit the table.
+
+  "!! SCALE WARNING — these land far from O(1) after scaling"
+      The LayerNorm-erasure mode. A feature far above O(1) erases the categorical
+      conditioning; one far below it is invisible. Neither raises at train time,
+      which is exactly why it is checked at build time.
+
+
+--------------------------------------------------------------------------------
+11. QUICK REFERENCE — every environment override
+--------------------------------------------------------------------------------
+
+  PARAM_SET=all|luke|navneet     which parameters reach the model  (default all)
+  SEQPARAM_USE_PRESENCE_FLAGS=0  ablate the presence flags
+  SEQPARAM_MIN_PRESENCE_PCT      presence floor for admission       (default 1.0)
+  SEQPARAM_MIN_NUMERIC_PCT       numeric floor for admission       (default 90.0)
+  SEQPARAM_DIVISOR_TABLE         path to the divisor table
+  PKL_PATH                       read a pkl from somewhere else
+  ANALYSIS_DIR / MODELS_DIR      write outputs somewhere else
+  REPORT_GROUP_BY                serial_day | serial | protocol   (default
+                                 serial_day — the held-out split convention)
+  REPORT_REPEATS                 splits averaged per score          (default 2)
+  TARGET_MAE_S                   the bar                          (default 15.0)
+  BASE_PKL / BASE_MODELS_DIR     what step 07 still borrows from csv_pipeline

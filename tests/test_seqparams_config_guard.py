@@ -75,6 +75,57 @@ class LeakageGuardTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'Identifier guard'):
                     module.assert_no_leakage(['TR', field])
 
+    def test_assert_no_leakage_rejects_planner_derived_with_its_own_message(self):
+        # The third objection, added after the 2026-08-07 Görtler meeting. His
+        # instruction was to pass everything and let the model sort it out, and
+        # the reason a denylist survives that is that these fields are not scan
+        # physics — the scanner computed them FROM the timing it was about to
+        # run. Distinct message because the remedy is distinct: this one carries
+        # a measured price tag and can be removed if the report says so.
+        module = _load_seqparams_config()
+        for field in sorted(module.SUT_PLANNER_DERIVED_DENYLIST):
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(ValueError, 'Planner-derived guard'):
+                    module.assert_no_leakage(['TR', field])
+
+    def test_the_three_objections_do_not_overlap(self):
+        # Each denylist answers a different question, and a field appearing in
+        # two of them would report whichever guard happens to run first — which
+        # is how a field ends up removed for the wrong stated reason.
+        module = _load_seqparams_config()
+        lists = {
+            'target': module.SUT_LEAKAGE_DENYLIST,
+            'identity': module.SUT_IDENTIFIER_DENYLIST,
+            'planner': module.SUT_PLANNER_DERIVED_DENYLIST,
+        }
+        for a, b in (('target', 'identity'), ('target', 'planner'),
+                     ('identity', 'planner')):
+            with self.subTest(pair=f"{a}/{b}"):
+                self.assertEqual(lists[a] & lists[b], set())
+
+    def test_the_union_covers_every_objection(self):
+        # SUT_ALL_DENYLISTS is what gate #3 enforces at tensor-construction
+        # time. If a fourth objection is added and not folded in here, it would
+        # be enforced at config import and silently unenforced at the point that
+        # actually builds the model's input.
+        module = _load_seqparams_config()
+        self.assertEqual(
+            module.SUT_ALL_DENYLISTS,
+            module.SUT_LEAKAGE_DENYLIST | module.SUT_IDENTIFIER_DENYLIST
+            | module.SUT_PLANNER_DERIVED_DENYLIST,
+        )
+
+    def test_watchlist_fields_stay_admissible(self):
+        # The watchlist is a reading aid, not a denylist. A field that drifts
+        # into both is being both flagged for review and silently blocked, which
+        # is the worst of the two — the review never happens because nothing
+        # measures it.
+        module = _load_seqparams_config()
+        self.assertEqual(
+            module.SUT_ALL_DENYLISTS.intersection(module.SUT_SUSPECT_WATCHLIST),
+            set(),
+        )
+
     def test_assert_no_leakage_checks_runtime_dict_keys_too(self):
         # Gate #2's actual use pattern: check the real conditioning dict's
         # keys after SUT parsing + filtering, not just the static config list.
@@ -90,41 +141,104 @@ class ParamSetSwitchTests(unittest.TestCase):
     contents, so adding or re-tuning a set does not break the suite — but
     breaking the switch does."""
 
-    def test_defaults_to_luke(self):
-        with _param_set('luke') as module:
-            self.assertEqual(module.PARAM_SET, 'luke')
-            self.assertEqual(module.EXAMINATION_SEQPARAM_FEATURES,
-                             module.PARAM_SETS['luke'])
+    def test_defaults_to_all(self):
+        # Görtler, 2026-08-07: pass everything and let the model sort it out.
+        # `luke`/`navneet` survive as the control group, not as the default.
+        previous = os.environ.pop('PARAM_SET', None)
+        try:
+            module = _load_seqparams_config()
+            self.assertEqual(module.PARAM_SET, 'all')
+        finally:
+            if previous is not None:
+                os.environ['PARAM_SET'] = previous
 
-    def test_env_var_selects_the_other_set(self):
-        with _param_set('navneet') as module:
-            self.assertEqual(module.PARAM_SET, 'navneet')
-            self.assertEqual(module.EXAMINATION_SEQPARAM_FEATURES,
-                             module.PARAM_SETS['navneet'])
+    def test_env_var_selects_a_named_set(self):
+        for name in ('luke', 'navneet', 'all'):
+            with self.subTest(param_set=name), _param_set(name) as module:
+                self.assertEqual(module.PARAM_SET, name)
+                # The VALUE block leads the feature list; flags and derived
+                # features follow it.
+                values = module.PARAM_SETS[name]
+                self.assertEqual(
+                    module.EXAMINATION_SEQPARAM_FEATURES[:len(values)], values)
 
-    def test_the_two_sets_are_actually_different(self):
-        # A switch between two identical lists would pass every other test
-        # here and answer nothing on Friday.
+    def test_the_named_sets_are_actually_different(self):
+        # A switch between identical lists would pass every other test here and
+        # answer nothing on Friday.
         module = _load_seqparams_config()
         self.assertNotEqual(module.PARAM_SETS['luke'],
                             module.PARAM_SETS['navneet'])
+
+    def test_all_is_a_superset_of_the_hand_picked_sets(self):
+        # The whole claim being tested by keeping the control group is "more is
+        # better". That only means anything if `all` actually contains more.
+        module = _load_seqparams_config()
+        for name in ('luke', 'navneet'):
+            with self.subTest(param_set=name):
+                self.assertLessEqual(set(module.PARAM_SETS[name]),
+                                     set(module.PARAM_SETS['all']))
+
+    def test_every_value_feature_gets_a_presence_flag(self):
+        # The flag is what lets the model tell "this sequence has value X" from
+        # "this concept does not apply to this sequence". Without it, safe_float
+        # turns every absent field into a fabricated measurement.
+        for name in ('luke', 'navneet', 'all'):
+            with self.subTest(param_set=name), _param_set(name) as module:
+                features = module.EXAMINATION_SEQPARAM_FEATURES
+                for value_name in module.PARAM_SETS[name]:
+                    self.assertIn(module.presence_name(value_name), features)
+
+    def test_flags_can_be_ablated_back_to_the_historical_vector(self):
+        # Gate 4 has to PRICE the flags, not assume them, so the pre-08-07
+        # vector must remain reachable.
+        previous = os.environ.get('SEQPARAM_USE_PRESENCE_FLAGS')
+        os.environ['SEQPARAM_USE_PRESENCE_FLAGS'] = '0'
+        try:
+            with _param_set('luke') as module:
+                self.assertEqual(module.EXAMINATION_SEQPARAM_FEATURES,
+                                 module.PARAM_SETS['luke'])
+        finally:
+            if previous is None:
+                os.environ.pop('SEQPARAM_USE_PRESENCE_FLAGS', None)
+            else:
+                os.environ['SEQPARAM_USE_PRESENCE_FLAGS'] = previous
 
     def test_unknown_set_fails_loudly_at_import(self):
         with self.assertRaisesRegex(ValueError, 'not a known parameter set'):
             with _param_set('nuffnet'):
                 pass
 
-    def test_scale_is_derived_from_the_candidate_table(self):
+    def test_scale_is_derived_not_hand_maintained(self):
         # The two used to be hand-maintained parallel lists that could desync.
-        for name in ('luke', 'navneet'):
+        for name in ('luke', 'navneet', 'all'):
             with self.subTest(param_set=name), _param_set(name) as module:
                 self.assertEqual(len(module.EXAMINATION_SEQPARAM_FEATURES),
                                  len(module.EXAMINATION_SEQPARAM_SCALE))
-                self.assertEqual(
-                    module.EXAMINATION_SEQPARAM_SCALE,
-                    [module.SEQPARAM_CANDIDATES[n][0]
-                     for n in module.EXAMINATION_SEQPARAM_FEATURES],
-                )
+                for feature, divisor in zip(module.EXAMINATION_SEQPARAM_FEATURES,
+                                            module.EXAMINATION_SEQPARAM_SCALE):
+                    if module.is_presence_name(feature):
+                        continue
+                    self.assertEqual(divisor, module._divisor_for(feature),
+                                     msg=feature)
+
+    def test_presence_flags_are_never_rescaled(self):
+        # A flag is already 0/1. Handing it a p99-derived divisor would make
+        # "absent" a nonzero value and quietly destroy the distinction the flag
+        # exists to carry.
+        for name in ('luke', 'navneet', 'all'):
+            with self.subTest(param_set=name), _param_set(name) as module:
+                for feature, divisor in zip(module.EXAMINATION_SEQPARAM_FEATURES,
+                                            module.EXAMINATION_SEQPARAM_SCALE):
+                    if module.is_presence_name(feature):
+                        self.assertEqual(divisor, 1.0, msg=feature)
+
+    def test_a_feature_without_a_divisor_is_refused(self):
+        # The LayerNorm-erasure failure mode is invisible in a trained model and
+        # has cost this project three multi-week incidents, so it is refused at
+        # import rather than warned about.
+        module = _load_seqparams_config()
+        with self.assertRaisesRegex(ValueError, 'no scale divisor'):
+            module._divisor_for('a_field_nobody_calibrated')
 
     def test_models_and_analysis_dirs_are_namespaced_by_param_set(self):
         # Both sets widen base_conditioning_dim to the same number while
@@ -163,7 +277,7 @@ class CandidateTableTests(unittest.TestCase):
 
     def test_no_named_set_contains_a_banned_field(self):
         module = _load_seqparams_config()
-        banned = module.SUT_LEAKAGE_DENYLIST | module.SUT_IDENTIFIER_DENYLIST
+        banned = module.SUT_ALL_DENYLISTS
         for name, features in module.PARAM_SETS.items():
             with self.subTest(param_set=name):
                 self.assertEqual(banned.intersection(features), set())
@@ -230,12 +344,34 @@ class CandidateTableTests(unittest.TestCase):
             with self.subTest(candidate=name):
                 self.assertGreater(divisor, 0.0)
 
-    def test_missing_defaults_mirror_the_candidate_table(self):
+    def test_curated_missing_defaults_are_never_overridden(self):
+        # The hand-curated defaults encode physics a p99 cannot: 1.0 for the
+        # 1-based multiplicands of the TA formula ("does not apply to this
+        # sequence"), 0.0 for a measurement ("not recorded"). A discovered field
+        # may only ADD to this table, never rewrite an entry in it.
         module = _load_seqparams_config()
-        self.assertEqual(
-            module.SEQPARAM_MISSING_DEFAULTS,
-            {n: d for n, (_, d) in module.SEQPARAM_CANDIDATES.items()},
-        )
+        for name, (_, default) in module.SEQPARAM_CANDIDATES.items():
+            with self.subTest(candidate=name):
+                self.assertEqual(module.SEQPARAM_MISSING_DEFAULTS[name], default)
+
+    def test_presence_flags_default_to_absent(self):
+        # A flag defaulting to 1.0 would claim every unwritten field was
+        # present, which is worse than having no flag at all.
+        module = _load_seqparams_config()
+        flags = [n for n in module.SEQPARAM_ALL_CANDIDATES
+                 if module.is_presence_name(n)]
+        self.assertTrue(flags)
+        for name in flags:
+            with self.subTest(flag=name):
+                self.assertEqual(module.SEQPARAM_MISSING_DEFAULTS[name], 0.0)
+
+    def test_every_written_key_has_a_missing_default(self):
+        # Step 03 looks the default up by name for every SEQPARAM_ALL_CANDIDATES
+        # entry, so a gap here is a KeyError in the middle of a Spark job.
+        module = _load_seqparams_config()
+        for name in module.SEQPARAM_ALL_CANDIDATES:
+            with self.subTest(candidate=name):
+                self.assertIn(name, module.SEQPARAM_MISSING_DEFAULTS)
 
     def test_all_candidates_covers_every_set(self):
         # Step 03 writes SEQPARAM_ALL_CANDIDATES; anything a set names that is
@@ -259,13 +395,49 @@ class StepDefinitionTests(unittest.TestCase):
         with open(path) as f:
             return f.read()
 
-    def test_step_03_writes_the_union_not_the_selected_set(self):
+    def test_step_03_writes_every_admissible_field_not_the_selected_set(self):
+        # One Spark rebuild has to serve every parameter set, or switching sets
+        # costs hours instead of a training run.
         source = self._step_03_source()
-        self.assertIn('for name in SEQPARAM_ALL_CANDIDATES', source)
+        self.assertIn('_written_names = [n for n, _ in _admitted]', source)
 
     def test_step_03_uses_the_per_name_missing_default(self):
         source = self._step_03_source()
-        self.assertIn('default=SEQPARAM_MISSING_DEFAULTS[name]', source)
+        self.assertIn('_defaults[_name]', source)
+
+    def test_step_03_writes_a_presence_flag_per_value(self):
+        # Without this, safe_float turns every absent field into a fabricated
+        # measurement, and "pass all parameters" makes the model worse.
+        source = self._step_03_source()
+        self.assertIn('_cond[presence_name(_name)]', source)
+
+    def test_step_03_writes_the_join_scope_flag(self):
+        # ~20% of rows carry a NEIGHBOUR's parameters, 71.5% of which name a
+        # different sequence. The flag is how the model can tell.
+        source = self._step_03_source()
+        self.assertIn("_cond['sut_in_segment']", source)
+
+    def test_step_03_uses_the_shared_field_rules(self):
+        # The admissibility rule and the stable-name rule live in config so the
+        # report can print the same reasons the build acted on. A second copy
+        # here is how the two silently diverge.
+        source = self._step_03_source()
+        for symbol in ('classify_seqparam_field', 'seqparam_stable_name',
+                       'suggest_divisor'):
+            with self.subTest(symbol=symbol):
+                self.assertIn(symbol, source)
+
+    def test_step_03_emits_the_divisor_table(self):
+        # This is what lets PARAM_SET='all' resolve ~89 calibrated divisors
+        # without anybody hand-writing them.
+        source = self._step_03_source()
+        self.assertIn('SEQPARAM_DIVISOR_TABLE', source)
+        self.assertIn("json.dump(_divisor_payload", source)
+
+    def test_step_03_still_runs_leakage_gate_2(self):
+        # The runtime dict keys, not just the static config list.
+        source = self._step_03_source()
+        self.assertIn('assert_no_leakage(_cond.keys())', source)
 
 
 class SegmentDedupeFlagTests(unittest.TestCase):

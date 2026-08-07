@@ -30,6 +30,8 @@ from collections import Counter
 
 import numpy as np
 
+from .holdout import holdout_mask
+
 # Reserved for protocols below the frequency floor and for anything unseen at
 # serve time. Never assigned to a real protocol, so an embedding row is always
 # available as the fallback bucket.
@@ -85,7 +87,8 @@ def protocol_id(raw_name, vocab):
     return vocab.get(normalize_protocol_name(raw_name), RARE_PROTOCOL_ID)
 
 
-def heldout_group_r2(labels, values, holdout_frac=0.2, seed=0, repeats=5):
+def heldout_group_r2(labels, values, holdout_frac=0.2, seed=0, repeats=5,
+                     groups=None):
     """Score a per-group-mean predictor on data it was not fitted on.
 
     In-sample variance-explained is meaningless for a grouping this fine: 2,999
@@ -94,6 +97,20 @@ def heldout_group_r2(labels, values, holdout_frac=0.2, seed=0, repeats=5):
     predicting nothing. Group means are therefore fitted on the training split
     only; groups absent from it fall back to the global mean and are counted in
     `coverage`.
+
+    `groups` (optional, one label per row — NOT the same thing as `labels`,
+    which is what the predictor keys on) holds whole groups out together rather
+    than sampling rows. Pass it whenever this is being used as the protocol
+    ORACLE the parameter model is scored against, so both sides of that
+    comparison face the same split. Scoring the oracle on a random split and the
+    parameters on a grouped one would hand the oracle an advantage that is
+    purely an artefact of how the rows were divided. See `data.holdout`.
+
+    Note the oracle is affected differently from a learned model: on a
+    serial-grouped split, protocols unique to a held-out site fall back to the
+    global mean, so `coverage` drops and MAE rises. That drop is the real cost
+    of a site-specific feature, and it is the number Görtler's objection
+    predicts — worth reporting, not worth hiding.
 
     Returns (r2_percent, mae, coverage_percent), averaged over `repeats` splits.
     """
@@ -107,7 +124,7 @@ def heldout_group_r2(labels, values, holdout_frac=0.2, seed=0, repeats=5):
     rng = np.random.default_rng(seed)
     r2s, maes, coverages = [], [], []
     for _ in range(repeats):
-        is_train = rng.random(labels.shape[0]) >= holdout_frac
+        is_train = holdout_mask(labels.shape[0], holdout_frac, rng, groups)
         if not is_train.any() or is_train.all():
             continue
 
@@ -135,5 +152,9 @@ def heldout_group_r2(labels, values, holdout_frac=0.2, seed=0, repeats=5):
         coverages.append(100.0 * seen.mean())
 
     if not r2s:
-        raise ValueError("no usable train/test split was produced")
+        raise ValueError(
+            "no usable train/test split was produced"
+            + (" — with `groups`, this means one group holds nearly every row, "
+               "so there is nothing to transfer to" if groups is not None else "")
+        )
     return float(np.mean(r2s)), float(np.mean(maes)), float(np.mean(coverages))
