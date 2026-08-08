@@ -566,13 +566,29 @@ else:
           f"model is not leaning on\n    within-group memorisation, which is "
           f"the result we want and did not have before.")
 
-# Transfer to a scanner we have never seen — the actual onboarding question.
+# Transfer to a scanner we have never seen — the actual onboarding question,
+# and on the 2026-08-08 run the single worst number in the report.
 _serial_row = score(_all_cols, _gs, 'all admissible (held out by SCANNER)')
 configs.append(_serial_row)
 print(f"  {_serial_row['label']:<44} {_serial_row['r2_pct']:>6.1f}% "
       f"{_serial_row['mae_s']:>7.1f}s")
 
+_transfer_gap = _serial_row['mae_s'] - _grouped_mae
+if _transfer_gap > 2.0:
+    print(f"""
+  !! TRANSFER GAP: {_grouped_mae:.1f}s within known scanners, {_serial_row['mae_s']:.1f}s on a scanner the
+     model has never seen — {_transfer_gap:+.1f}s. This is the number that decides whether
+     the model can be pointed at a new customer, and it is the one a
+     session-grouped split cannot see. Everything the parameters buy on familiar
+     scanners is spent again on an unfamiliar one.
+
+     With {len(set(SERIAL_GROUPS))} serials in the corpus this split is coarse and noisy, which is
+     a fact about the data rather than the method — and an argument for
+     onboarding more customers rather than for discounting the number.""")
+
 gate4 = {
+    'transfer_mae_s_by_scanner': _serial_row['mae_s'],
+    'transfer_gap_s': round(float(_transfer_gap), 1),
     'scored_rows': int(score_rows.sum()),
     'oracle_mae_s_grouped': round(float(oracle_mae_g), 1),
     'oracle_coverage_pct_grouped': round(float(oracle_cov_g), 1),
@@ -732,33 +748,49 @@ ranking_random = permutation_importance_mae(
     _all_cols, _y, field_names=_admitted_names)
 _random_by_name = {r['name']: r['importance_s'] for r in ranking_random}
 
+# RETENTION, NOT DIFFERENCE. The first version of this gate ranked by
+# (random - grouped) in seconds and flagged anything above 1.0s, which put TR at
+# the top of the suspect list on the 2026-08-08 run: 17.24s random, 12.93s
+# grouped. TR is repetition time. It is the most causal parameter in the
+# message, and it was flagged purely for being important — a big number shrinks
+# by a big absolute amount.
+#
+# What an identifier actually looks like is losing nearly ALL of its importance
+# when the group it memorised is held out. So the signal is the FRACTION
+# retained, and it is only meaningful for a field that had something to lose.
+_MEANINGFUL_S = 0.5
+
 sentinel = []
 for r in ranking_grouped:
     _rand = _random_by_name.get(r['name'], 0.0)
     _grouped = r['importance_s']
+    _retained = (_grouped / _rand) if _rand > _MEANINGFUL_S else None
     sentinel.append({
         'name': r['name'],
         'importance_grouped_s': round(float(_grouped), 3),
         'importance_random_s': round(float(_rand), 3),
+        'retained_pct': None if _retained is None else round(100.0 * _retained, 1),
         'divergence_s': round(float(_rand - _grouped), 3),
         'watchlisted': r['name'] in {seqparam_stable_name(k)
                                      for k in SUT_SUSPECT_WATCHLIST},
     })
 
-_suspects = sorted(sentinel, key=lambda s: -s['divergence_s'])[:10]
-print(f"\n  {'field':<16} {'grouped':>10} {'random':>10} {'divergence':>12}  note")
+_scored = [s for s in sentinel if s['retained_pct'] is not None]
+_suspects = sorted(_scored, key=lambda s: s['retained_pct'])[:10]
+print(f"\n  {'field':<16} {'grouped':>10} {'random':>10} {'retained':>10}  note")
 rule('-')
 for s in _suspects:
-    _note = SUT_SUSPECT_WATCHLIST.get(s['name'], '')
-    _flag = '  <-- CHECK' if s['divergence_s'] > 1.0 else ''
+    _flag = '  <-- CHECK' if s['retained_pct'] < 35.0 else ''
     print(f"  {s['name']:<16} {s['importance_grouped_s']:>+9.2f}s "
-          f"{s['importance_random_s']:>+9.2f}s {s['divergence_s']:>+11.2f}s"
+          f"{s['importance_random_s']:>+9.2f}s {s['retained_pct']:>9.1f}%"
           f"{_flag}")
 rule('-')
-print("""
-  A field high in the RANDOM column and near zero in the GROUPED one has been
-  memorising a scanner or a session rather than describing a scan. It will look
-  excellent in training and fail on the first new customer.
+print(f"""
+  RETAINED is the share of a field's importance that SURVIVES holding out whole
+  groups. A physics parameter keeps most of it, because physics transfers. An
+  identifier keeps almost none, because the held-out group's id was never seen.
+  Only fields scoring above {_MEANINGFUL_S}s on the random split appear here — a field with
+  nothing to lose cannot lose it informatively.
 
   The test to apply, the same one that convicted ST: is this a re-expression of
   the answer, or a cause of it? A cause stays in however strongly it correlates.
@@ -843,6 +875,17 @@ _md += [
     f"**±{TARGET_MAE_S:.0f}s** bar. "
     f"{gate4['within_target_pct']:.1f}% of held-out rows land inside the bar.",
     "",
+    (f"**On a scanner the model has never seen, that becomes "
+     f"{gate4['transfer_mae_s_by_scanner']:.1f}s** "
+     f"({gate4['transfer_gap_s']:+.1f}s). Everything the parameters buy on "
+     f"familiar scanners is spent again on an unfamiliar one, and onboarding a "
+     f"new customer is the unfamiliar case. This is the number to fix next."
+     if gate4['transfer_gap_s'] > 2.0 else
+     f"On a scanner the model has never seen it holds at "
+     f"{gate4['transfer_mae_s_by_scanner']:.1f}s "
+     f"({gate4['transfer_gap_s']:+.1f}s), so nothing here depends on having "
+     f"seen the site before — which is what onboarding a new customer needs."),
+    "",
     "## Why not fewer",
     "",
     "| fields | MAE | vs oracle |",
@@ -903,22 +946,32 @@ _md += [
     "",
     "## What is blocking",
     "",
-    f"1. **Coverage — {gate1['coverage_pct_clean']:.1f}%.** On the other "
+    (f"1. **Transfer to a new scanner — "
+     f"{gate4['transfer_mae_s_by_scanner']:.1f}s against {_shipped['mae_s']:.1f}s "
+     f"within known ones.** No parameter closes this, because the gap is not "
+     f"about which parameters we have; it is about the model never having seen "
+     f"the site. It is the number that decides whether the pipeline can be "
+     f"pointed at a new customer."
+     if gate4['transfer_gap_s'] > 2.0 else
+     f"1. **Transfer to a new scanner is holding** "
+     f"({gate4['transfer_mae_s_by_scanner']:.1f}s against "
+     f"{_shipped['mae_s']:.1f}s within known ones). Worth re-checking on every "
+     f"build — with few serials this split is noisy."),
+    f"2. **Coverage — {gate1['coverage_pct_clean']:.1f}%.** On the other "
     f"{100 - gate1['coverage_pct_clean']:.1f}% of clean rows there is no "
     f"in-segment parameter message, so every field is a default no matter how "
-    f"many we allow. No additional parameter closes this; it is the largest "
-    f"single lever in the report.",
-    (f"2. **The honest split costs {gate4['split_optimism_s']:+.1f}s.** Every "
+    f"many we allow. No additional parameter closes this either.",
+    (f"3. **The honest split costs {gate4['split_optimism_s']:+.1f}s.** Every "
      f"MAE reported before 2026-08-07 used a random row split, which let one "
      f"exam's siblings sit in training. That gap was never accuracy."
      if gate4['split_optimism_s'] > 0.5 else
-     f"2. **The split convention is no longer costing anything** "
+     f"3. **The split convention is no longer costing anything** "
      f"({gate4['split_optimism_s']:+.1f}s between the grouped and random "
      f"splits). The model is not leaning on within-group memorisation."),
 ]
 if gate3['unidentified']:
     _md.append(
-        f"3. **{len(gate3['unidentified'])} admitted fields are unidentified.** "
+        f"4. **{len(gate3['unidentified'])} admitted fields are unidentified.** "
         f"Fine for training — the model does not need to know what a field "
         f"means. Not fine for step 07, which must synthesise every field it "
         f"conditions on: "
@@ -926,7 +979,7 @@ if gate3['unidentified']:
         + ".")
 if gate1['sampler_thinnest'] and gate1['sampler_thinnest'][0]['rows'] < 10:
     _md.append(
-        f"4. **Thin sampler cells.** The smallest (body_region, sequence_type) "
+        f"5. **Thin sampler cells.** The smallest (body_region, sequence_type) "
         f"pool has {gate1['sampler_thinnest'][0]['rows']} rows. Step 07's "
         f"empty-pool fallback writes 0.0, which puts a fabricated parameter "
         f"into synthetic output.")

@@ -560,9 +560,18 @@ SEQPARAM_CANDIDATES = {
     'base_resolution':         ( 256.0, 0.0),   # BR;  observed 320 / 130
     # MULTIPLICATIVE FACTORS — 1-based, so 1.0 is the identity element of the
     # TA formula and the correct reading of "does not apply to this sequence".
-    'averages':                (   1.0, 1.0),   # AVG; observed 1
-    'concatenations':          (   1.0, 1.0),   # CONC; observed 1
-    'parallel_imaging_factor': (   1.0, 1.0),   # PAT; observed 2
+    #
+    # NOTE the divisors below are NOT all 1.0 any more, and the reason is worth
+    # keeping. They were, because all three sampled messages carry AVG:1,
+    # CONC:1, PAT:2, REP:0 — a 1.0 divisor is exactly right for those. The
+    # 2026-08-08 build over 51,321 rows measured p99 of CONC 23, PAT 256 and
+    # REP 89, so those three entered the conditioning vector at 23x, 256x and
+    # 89x and would have erased the categorical conditioning through LayerNorm.
+    # Three samples cannot see a p99. The values here now match the corpus; the
+    # band-enforcement pass further down repairs any that drift again.
+    'averages':                (   1.0, 1.0),   # AVG; observed 1, corpus p99 3
+    'concatenations':          (  50.0, 1.0),   # CONC; observed 1, corpus p99 23
+    'parallel_imaging_factor': ( 500.0, 1.0),   # PAT; observed 2, corpus p99 256
     'turbo_factor':            ( 256.0, 1.0),   # TF;  observed 256 on haste,
                                                 #      ABSENT on ep2d_diff (EF)
     # REP is 0-BASED — it counts ADDITIONAL measurements, and all three sampled
@@ -570,7 +579,9 @@ SEQPARAM_CANDIDATES = {
     # here is 0, not 1, and an absent REP means the same thing the common
     # present value does. (Watch this one in 03e's leave-one-out: a field that
     # is 0 on nearly every row cannot carry a set, whatever the physics says.)
-    'repetitions':             (   1.0, 0.0),   # REP; observed 0 on all three
+    # ...and the corpus answered that parenthesis: REP p99 is 89, not 0. It is
+    # a real feature on some sequence families and absent-meaning-zero on most.
+    'repetitions':             ( 100.0, 0.0),   # REP; observed 0, corpus p99 89
     # PPF/SPF are Siemens ENUM CODES, not fractions — observed PPF 1 and 8,
     # SPF 16. Scaled by the apparent ceiling of the shared enum so both land
     # at O(1) and stay on one scale, since they are the same kind of quantity.
@@ -679,6 +690,12 @@ SEQPARAM_MIN_PRESENCE_PCT = float(os.environ.get('SEQPARAM_MIN_PRESENCE_PCT', '1
 # not in a scaled numeric column. Same threshold 03b-03f used.
 SEQPARAM_MIN_NUMERIC_PCT = float(os.environ.get('SEQPARAM_MIN_NUMERIC_PCT', '90.0'))
 
+# The band a scaled feature has to land in. Above it, the feature erases the
+# categorical conditioning through LayerNorm; below it, the feature is invisible
+# to the model. Neither raises anything at training time, which is why it is
+# enforced at config-load time instead.
+SEQPARAM_SCALE_BAND = (0.05, 20.0)
+
 
 def seqparam_stable_name(raw_key):
     """The one name a SUT field is known by everywhere downstream.
@@ -694,6 +711,43 @@ def seqparam_stable_name(raw_key):
     apply it: mapped name where SUT_FIELD_MAP has one, raw key otherwise.
     """
     return SUT_FIELD_MAP.get(raw_key, raw_key)
+
+
+def suggest_divisor(magnitude):
+    """A scale divisor putting a field's typical MAGNITUDE at O(1), snapped to a
+    1/2/5 ladder.
+
+    SNAPPED, not exact, and that is the whole point. An exact divisor moves a
+    little on every rebuild, which would change every column's scale, change the
+    fingerprint, and make two training runs incomparable for no reason. The
+    1/2/5 x 10^k ladder is coarse enough that ordinary month-to-month drift
+    leaves it untouched, and fine enough to keep every field inside
+    SEQPARAM_SCALE_BAND.
+
+    MAGNITUDE, NOT p99. Passing a raw p99 was wrong for a field that is entirely
+    NEGATIVE: `TP` (table position) runs about -1900 to -989, so its p99 is
+    -989, the old `p99 > 0` guard returned an identity divisor, and the field
+    entered the conditioning vector at ~1500x scale — the exact LayerNorm-
+    erasure mode this ladder exists to prevent. Callers pass
+    max(|p01|, |p99|); the abs() here is a second line of defence for a caller
+    that forgets.
+
+    Returns 1.0 for a non-finite or all-zero field: nothing to rescale, and
+    dividing by zero would be worse.
+    """
+    try:
+        magnitude = abs(float(magnitude))
+    except (TypeError, ValueError):
+        return 1.0
+    if not (magnitude > 0) or magnitude != magnitude or magnitude == float('inf'):
+        return 1.0
+
+    exponent = math.floor(math.log10(magnitude))
+    mantissa = magnitude / (10.0 ** exponent)
+    for step in (1.0, 2.0, 5.0):
+        if mantissa <= step:
+            return step * (10.0 ** exponent)
+    return 10.0 ** (exponent + 1)
 
 
 def _load_divisor_table(path):
@@ -726,6 +780,12 @@ def _load_divisor_table(path):
             continue
 
         name = seqparam_stable_name(raw_name)
+        # `magnitude` is max(|p01|, |p99|) and is what the band pass below
+        # checks against. Carrying it through is load-bearing, not bookkeeping:
+        # without it the pass has nothing to compare a divisor to and skips
+        # every field, which is how an out-of-band divisor reaches training.
+        # Older tables predate the key, so fall back to |p99|.
+        _p99 = float(spec.get('p99', 0.0) or 0.0)
         entry = {
             'divisor': divisor,
             # Absent fields are carried by the presence flag, so 0.0 is a safe
@@ -734,6 +794,8 @@ def _load_divisor_table(path):
             'missing_default': float(spec.get('missing_default', 0.0)),
             'presence_pct': float(spec.get('presence_pct', 0.0)),
             'numeric_pct': float(spec.get('numeric_pct', 100.0)),
+            'p99': _p99,
+            'magnitude': float(spec.get('magnitude', 0.0) or 0.0) or abs(_p99),
             'raw_key': raw_name,
         }
         # A table carrying BOTH `SLC` and `num_slices` collapses to one entry.
@@ -749,33 +811,63 @@ def _load_divisor_table(path):
 SEQPARAM_DISCOVERED, SEQPARAM_DIVISOR_FINGERPRINT = _load_divisor_table(
     SEQPARAM_DIVISOR_TABLE)
 
+# ----------------------------------------------------------------------------
+# BAND ENFORCEMENT — the corpus is allowed to overrule a hand-calibration.
+#
+# The 2026-08-08 build caught three CURATED divisors badly out of band:
+#
+#     parallel_imaging_factor   p99 256 / 1.0  = 256x
+#     repetitions               p99  89 / 1.0  =  89x
+#     concatenations            p99  23 / 1.0  =  23x
+#
+# All three were calibrated against the three real messages pinned in
+# tests/test_sut_parser.py, which carry PAT:2, REP:0 and CONC:1. Those readings
+# were correct and the corpus is 51,321 rows wide: PAT reaches 256, REP 89,
+# CONC 23. Three samples cannot see that.
+#
+# "Curated wins" was written to protect a real thing — PPF and SPF are Siemens
+# enum codes that must share ONE scale, which a per-field percentile would
+# split. It was not meant to protect a number the data has since falsified. So
+# the rule now has an exception with a stated test: a curated divisor wins
+# UNLESS the corpus puts the field outside SEQPARAM_SCALE_BAND, in which case
+# the measured magnitude wins and the override is recorded for the report.
+#
+# This also repairs a stale or malformed table without a rebuild, which matters
+# because the alternative is a silently-erased conditioning vector.
+# ----------------------------------------------------------------------------
 
-def suggest_divisor(p99):
-    """A scale divisor putting a field's p99 at O(1), snapped to a 1/2/5 ladder.
+SEQPARAM_DIVISOR_OVERRIDES = []
 
-    SNAPPED, not exact, and that is the whole point. An exact p99 divisor moves
-    a little on every rebuild, which would change every column's scale, change
-    the fingerprint, and make two training runs incomparable for no reason. The
-    1/2/5 x 10^k ladder is coarse enough that ordinary month-to-month drift in
-    the corpus leaves it untouched, and fine enough to keep every field inside
-    the [0.05, 20] band step 03's divisor check enforces.
+for _name, _spec in SEQPARAM_DISCOVERED.items():
+    _magnitude = _spec.get('magnitude') or abs(_spec.get('p99') or 0.0)
+    if _magnitude <= 0:
+        continue
+    _preferred = (SEQPARAM_CANDIDATES[_name][0] if _name in SEQPARAM_CANDIDATES
+                  else _spec['divisor'])
+    _ratio = _magnitude / _preferred if _preferred else float('inf')
+    _low, _high = SEQPARAM_SCALE_BAND
+    if _low <= _ratio <= _high:
+        _spec['divisor'] = _preferred
+        continue
+    _repaired = suggest_divisor(_magnitude)
+    _spec['divisor'] = _repaired
+    SEQPARAM_DIVISOR_OVERRIDES.append({
+        'name': _name,
+        'was': _preferred,
+        'now': _repaired,
+        'magnitude': _magnitude,
+        'was_ratio': _ratio,
+        'source': 'curated' if _name in SEQPARAM_CANDIDATES else 'table',
+    })
 
-    Returns 1.0 for a non-finite or non-positive p99 — a field that is all
-    zeros or all NaN needs no rescaling, and dividing by it would be worse.
-    """
-    try:
-        p99 = float(p99)
-    except (TypeError, ValueError):
-        return 1.0
-    if not (p99 > 0) or p99 != p99 or p99 in (float('inf'), float('-inf')):
-        return 1.0
-
-    exponent = math.floor(math.log10(p99))
-    mantissa = p99 / (10.0 ** exponent)
-    for step in (1.0, 2.0, 5.0):
-        if mantissa <= step:
-            return step * (10.0 ** exponent)
-    return 10.0 ** (exponent + 1)
+if SEQPARAM_DIVISOR_OVERRIDES:
+    print(f"[config] {len(SEQPARAM_DIVISOR_OVERRIDES)} divisor(s) re-derived from "
+          f"the corpus because the configured value put the feature outside "
+          f"{SEQPARAM_SCALE_BAND}:")
+    for _o in SEQPARAM_DIVISOR_OVERRIDES:
+        print(f"           {_o['name']:<24} {_o['source']:>8} {_o['was']:>10.1f} "
+              f"-> {_o['now']:>10.1f}   (|magnitude| {_o['magnitude']:.1f}, "
+              f"was {_o['was_ratio']:.1f}x)")
 
 
 def classify_seqparam_field(name, stats):
@@ -904,20 +996,25 @@ _selected_values = list(PARAM_SETS[PARAM_SET])
 
 
 def _divisor_for(name):
-    """Scale divisor for a value feature: hand-curated first, discovered next.
+    """Scale divisor for a value feature. The resolved table wins.
 
-    The curated entry wins wherever one exists. Those eleven divisors were
-    calibrated against the real sampled messages pinned in tests/test_sut_parser.py
-    and carry judgement a p99 cannot — PPF/SPF are Siemens enum codes scaled by
-    their shared ceiling so they stay on ONE scale, which a per-field p99 would
-    quietly separate.
+    SEQPARAM_DISCOVERED is checked FIRST, and that ordering is the fix for the
+    2026-08-08 finding rather than an accident. The band-enforcement pass above
+    has already written the CURATED divisor into that table wherever the
+    curated value is sound, and a corpus-derived one wherever it is not. So the
+    table is the single resolved answer, and reading SEQPARAM_CANDIDATES first
+    would reinstate exactly the three out-of-band divisors the pass repaired.
+
+    The curated entries still win in the ordinary case — including the one they
+    exist for, PPF/SPF, which are Siemens enum codes sharing one scale that a
+    per-field percentile would split.
     """
+    if name in SEQPARAM_DISCOVERED:
+        return SEQPARAM_DISCOVERED[name]['divisor']
     if name in SEQPARAM_CANDIDATES:
         return SEQPARAM_CANDIDATES[name][0]
     if name in SEQPARAM_DERIVED:
         return SEQPARAM_DERIVED[name][0]
-    if name in SEQPARAM_DISCOVERED:
-        return SEQPARAM_DISCOVERED[name]['divisor']
     raise ValueError(
         f"{name!r} has no scale divisor. Every feature needs one before it can "
         f"reach the model — an unscaled large-magnitude numeric erases the "

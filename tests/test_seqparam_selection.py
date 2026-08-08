@@ -159,20 +159,34 @@ class RealMessageSelectionTests(_RealMessageBase):
 
 
 class RealMessageScalingTests(_RealMessageBase):
-    def test_every_admitted_field_lands_in_the_layernorm_safe_band(self):
+    def test_no_admitted_field_is_left_oversized(self):
         # The guard that has cost this project three multi-week flat-duration
-        # incidents. A field far above O(1) erases the categorical conditioning;
-        # one far below it is invisible. Neither raises anything at train time.
+        # incidents. Checked in ONE direction here: these three messages give a
+        # typical value, not a corpus p99, so a field landing BELOW the band
+        # only means the sampled scan sits near zero for it — true of CONC and
+        # REP, and fine. Landing ABOVE the band is never fine, and that is the
+        # direction that erases the categorical conditioning.
+        #
+        # The two-sided check against measured corpus p99s is in
+        # test_seqparams_config_guard.test_divisors_land_the_measured_corpus_at_order_one.
+        _, high = self.config.SEQPARAM_SCALE_BAND
         for name in self.admitted:
-            spec = self.stats[name]
-            if spec['p99'] <= 0:
+            magnitude = abs(self.stats[name]['p99'])
+            if magnitude <= 0:
                 continue
             divisor = (self.config.SEQPARAM_CANDIDATES[name][0]
                        if name in self.config.SEQPARAM_CANDIDATES
-                       else self.config.suggest_divisor(spec['p99']))
-            with self.subTest(field=name, p99=spec['p99'], divisor=divisor):
-                self.assertGreaterEqual(spec['p99'] / divisor, 0.05)
-                self.assertLessEqual(spec['p99'] / divisor, 20.0)
+                       else self.config.suggest_divisor(magnitude))
+            with self.subTest(field=name, sampled=magnitude, divisor=divisor):
+                self.assertLessEqual(magnitude / divisor, high)
+
+    def test_a_negative_field_is_scaled_not_ignored(self):
+        # TP (table position) is negative on every sampled message. A p99-only
+        # divisor rule left it unscaled at ~1500x.
+        self.assertIn('TP', self.stats)
+        self.assertLess(self.stats['TP']['p99'], 0)
+        divisor = self.config.suggest_divisor(abs(self.stats['TP']['p99']))
+        self.assertGreater(divisor, 100.0)
 
     def test_curated_divisors_win_over_discovered_ones(self):
         # PPF and SPF are Siemens enum codes that must share ONE scale. A

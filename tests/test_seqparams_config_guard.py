@@ -312,29 +312,110 @@ class CandidateTableTests(unittest.TestCase):
             with self.subTest(candidate=name):
                 self.assertEqual(module.SEQPARAM_CANDIDATES[name][1], 0.0)
 
-    def test_divisors_land_the_real_sampled_values_at_order_one(self):
-        # The LayerNorm-erasure guard, pinned to real data rather than to a
-        # comment. Values are the haste / ep2d_diff messages in
-        # test_sut_parser.py; step 03 runs the same check across the full
-        # corpus at write time.
+    # Measured p99 per candidate over the full corpus — 51,321 sequences, 10
+    # serials, 2024-01, from the 2026-08-08 step-03 run.
+    #
+    # THIS REPLACED A THREE-MESSAGE CALIBRATION, and the replacement is the
+    # whole point. The previous version of this test pinned the values in the
+    # haste / ep2d_diff messages in test_sut_parser.py, which carry CONC:1,
+    # PAT:2 and REP:0. Those readings are correct and they are p50s. The corpus
+    # p99s are 23, 256 and 89, so divisors calibrated to the samples put three
+    # features at 23x, 256x and 89x — the LayerNorm-erasure mode, arriving
+    # through the guard meant to prevent it. Three samples cannot see a p99.
+    CORPUS_P99 = {
+        'TR': 9000.0, 'num_slices': 58.0, 'phase_encoding_lines': 936.0,
+        'base_resolution': 576.0, 'averages': 3.0, 'concatenations': 23.0,
+        'parallel_imaging_factor': 256.0, 'turbo_factor': 512.0,
+        'repetitions': 89.0, 'phase_partial_fourier': 32.0,
+        'slice_partial_fourier': 16.0,
+    }
+
+    def test_divisors_land_the_measured_corpus_at_order_one(self):
         module = _load_seqparams_config()
-        observed = {
-            'TR': (866, 4300), 'num_slices': (9, 18),
-            'phase_encoding_lines': (80, 333), 'base_resolution': (130, 320),
-            'averages': (1, 1), 'concatenations': (1, 1),
-            'parallel_imaging_factor': (2, 2), 'turbo_factor': (256, 256),
-            'repetitions': (0, 0),
-            'phase_partial_fourier': (1, 8), 'slice_partial_fourier': (16, 16),
-        }
-        self.assertEqual(set(observed), set(module.SEQPARAM_CANDIDATES),
-                         "a candidate was added or removed without a real "
-                         "observed value to calibrate its divisor against")
-        for name, (low, high) in observed.items():
+        self.assertEqual(set(self.CORPUS_P99), set(module.SEQPARAM_CANDIDATES),
+                         "a candidate was added or removed without a measured "
+                         "corpus p99 to calibrate its divisor against")
+        low, high = module.SEQPARAM_SCALE_BAND
+        for name, p99 in self.CORPUS_P99.items():
             divisor = module.SEQPARAM_CANDIDATES[name][0]
+            with self.subTest(candidate=name, p99=p99, divisor=divisor):
+                self.assertLessEqual(p99 / divisor, high)
+                self.assertGreaterEqual(p99 / divisor, low)
+
+    def test_the_sampled_values_are_not_left_oversized(self):
+        # The samples are still worth checking in ONE direction. A typical value
+        # landing below the band just means most scans sit near zero for that
+        # field, which is true of CONC and REP and is fine. A typical value
+        # landing ABOVE it means the divisor is too small for the common case,
+        # which is never fine.
+        module = _load_seqparams_config()
+        sampled = {
+            'TR': 4300, 'num_slices': 18, 'phase_encoding_lines': 333,
+            'base_resolution': 320, 'averages': 1, 'concatenations': 1,
+            'parallel_imaging_factor': 2, 'turbo_factor': 256,
+            'repetitions': 0, 'phase_partial_fourier': 8,
+            'slice_partial_fourier': 16,
+        }
+        _, high = module.SEQPARAM_SCALE_BAND
+        for name, value in sampled.items():
             with self.subTest(candidate=name):
-                self.assertLessEqual(high / divisor, 20.0)
-                if high > 0:
-                    self.assertGreaterEqual(high / divisor, 0.05)
+                self.assertLessEqual(value / module.SEQPARAM_CANDIDATES[name][0],
+                                     high)
+
+    def test_a_negative_field_gets_a_real_divisor(self):
+        # TP (table position) runs about -1900 to -989. A p99-only rule read
+        # -989, decided "not positive, nothing to scale", and handed back 1.0 —
+        # putting the field into the conditioning vector at ~1500x. suggest_divisor
+        # takes a MAGNITUDE now, and the abs() is a second line of defence.
+        module = _load_seqparams_config()
+        self.assertEqual(module.suggest_divisor(-989.0), 1000.0)
+        self.assertEqual(module.suggest_divisor(989.0), 1000.0)
+        # A genuinely empty field still needs the identity, not a division by 0.
+        self.assertEqual(module.suggest_divisor(0.0), 1.0)
+        self.assertEqual(module.suggest_divisor(float('nan')), 1.0)
+
+    def test_the_corpus_can_overrule_a_curated_divisor(self):
+        # "Curated wins" protects the PPF/SPF enum pairing, which a per-field
+        # percentile would split. It must NOT protect a curated value the data
+        # has falsified — that is how three out-of-band divisors survived into a
+        # build.
+        import json
+        import tempfile
+
+        table = {'fields': {
+            # Curated at 30.0 against a magnitude of 58: sound, left alone even
+            # though the table itself carries a stale value.
+            'num_slices': {'divisor': 999.0, 'magnitude': 58.0,
+                           'presence_pct': 99.0, 'numeric_pct': 100.0},
+            # Curated at 500.0 against a magnitude of 400,000: the corpus has
+            # moved past the hand-calibration, so the hand-calibration loses.
+            'parallel_imaging_factor': {'divisor': 500.0, 'magnitude': 400000.0,
+                                        'presence_pct': 99.0, 'numeric_pct': 100.0},
+        }, 'fingerprint': 'test'}
+
+        with tempfile.NamedTemporaryFile('w', suffix='.json', delete=False) as f:
+            json.dump(table, f)
+            path = f.name
+        previous = os.environ.get('SEQPARAM_DIVISOR_TABLE')
+        os.environ['SEQPARAM_DIVISOR_TABLE'] = path
+        try:
+            module = _load_seqparams_config()
+            # Curated wins over a stale table entry when it is in band...
+            self.assertEqual(module._divisor_for('num_slices'), 30.0)
+            # ...and loses to the corpus when it is not.
+            self.assertEqual(module._divisor_for('parallel_imaging_factor'),
+                             500000.0)
+            overrides = {o['name']: o for o in module.SEQPARAM_DIVISOR_OVERRIDES}
+            self.assertIn('parallel_imaging_factor', overrides)
+            self.assertEqual(overrides['parallel_imaging_factor']['source'],
+                             'curated')
+            self.assertNotIn('num_slices', overrides)
+        finally:
+            os.unlink(path)
+            if previous is None:
+                os.environ.pop('SEQPARAM_DIVISOR_TABLE', None)
+            else:
+                os.environ['SEQPARAM_DIVISOR_TABLE'] = previous
 
     def test_every_candidate_has_a_positive_divisor(self):
         # A zero or negative divisor either divides by zero or flips the

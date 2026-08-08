@@ -1180,11 +1180,20 @@ for _name, _raws in _param_values.items():
     _numeric = np.array([_safe_float(r, default=float('nan')) for r in _raws],
                         dtype=float)
     _finite = _numeric[np.isfinite(_numeric)]
+    _p01 = float(np.percentile(_finite, 1)) if _finite.size else 0.0
+    _p99 = float(np.percentile(_finite, 99)) if _finite.size else 0.0
     _field_stats[_name] = {
         'presence_pct': 100.0 * len(_raws) / _n_rows,
         'numeric_pct': 100.0 * _finite.size / max(1, len(_raws)),
+        'p01': _p01,
         'p50': float(np.percentile(_finite, 50)) if _finite.size else 0.0,
-        'p99': float(np.percentile(_finite, 99)) if _finite.size else 0.0,
+        'p99': _p99,
+        # BOTH tails, absolute. A divisor picked from p99 alone is wrong for a
+        # field that is entirely negative: TP (table position) runs about -1900
+        # to -989, so its p99 is -989 and a p99-only rule left it unscaled at
+        # ~1500x — the LayerNorm-erasure mode, arriving through the very code
+        # meant to prevent it.
+        'magnitude': max(abs(_p01), abs(_p99)),
         'max': float(_finite.max()) if _finite.size else 0.0,
         'distinct': len(set(map(str, _raws))),
     }
@@ -1201,16 +1210,29 @@ _divisor_table = {}
 for _name, _why in _admitted:
     _stats = _field_stats[_name]
     _curated = _name in SEQPARAM_CANDIDATES
+    # A curated divisor is preferred, but only where the corpus agrees it is
+    # sound. The eleven curated values were calibrated against three sampled
+    # messages; PAT/REP/CONC reach 256/89/23 across 51k rows, which three
+    # samples cannot see. config.py re-derives anything outside
+    # SEQPARAM_SCALE_BAND on load, and the same test is applied here so the
+    # EMITTED table is already correct rather than needing repair every import.
+    _preferred = (SEQPARAM_CANDIDATES[_name][0] if _curated
+                  else suggest_divisor(_stats['magnitude']))
+    _ratio = _stats['magnitude'] / _preferred if _preferred else float('inf')
+    _low, _high = SEQPARAM_SCALE_BAND
+    _in_band = (_stats['magnitude'] <= 0) or (_low <= _ratio <= _high)
     _divisor_table[_name] = {
-        'divisor': (SEQPARAM_CANDIDATES[_name][0] if _curated
-                    else suggest_divisor(_stats['p99'])),
+        'divisor': _preferred if _in_band else suggest_divisor(_stats['magnitude']),
         'missing_default': (SEQPARAM_CANDIDATES[_name][1] if _curated else 0.0),
         'presence_pct': _stats['presence_pct'],
         'numeric_pct': _stats['numeric_pct'],
+        'p01': _stats['p01'],
         'p50': _stats['p50'],
         'p99': _stats['p99'],
+        'magnitude': _stats['magnitude'],
         'distinct': _stats['distinct'],
-        'source': 'curated' if _curated else 'discovered',
+        'source': ('curated' if _curated and _in_band
+                   else 'curated-rescaled' if _curated else 'discovered'),
         'reason': _why,
     }
 
@@ -1280,19 +1302,37 @@ print(f"  divisor table -> {SEQPARAM_DIVISOR_TABLE}  (fingerprint {_fingerprint}
 
 # A divisor that leaves a field far from O(1) is the LayerNorm-erasure failure
 # mode, invisible in a trained model and obvious here.
+_rescaled = [n for n in _written_names
+             if _divisor_table[n]['source'] == 'curated-rescaled']
+if _rescaled:
+    print(f"\n  {len(_rescaled)} curated divisor(s) overruled by the corpus — the "
+          f"hand-calibrated\n  value put the feature outside "
+          f"{SEQPARAM_SCALE_BAND}, which is the LayerNorm-erasure mode:")
+    for _n in _rescaled:
+        _s = _divisor_table[_n]
+        print(f"       {_n:<24} {SEQPARAM_CANDIDATES[_n][0]:>8.1f} -> "
+              f"{_s['divisor']:>8.1f}   (|magnitude| {_s['magnitude']:.1f})")
+    print("     Worth updating SEQPARAM_CANDIDATES to match, so the curated "
+          "table stops\n     disagreeing with the data it was meant to describe.")
+
 _scale_warnings = [
-    (n, _divisor_table[n]['divisor'], _divisor_table[n]['p99'])
+    (n, _divisor_table[n]['divisor'], _divisor_table[n]['magnitude'])
     for n in _written_names
-    if not (0.05 <= _divisor_table[n]['p99'] / _divisor_table[n]['divisor'] <= 20.0)
-    and _divisor_table[n]['p99'] > 0
+    if _divisor_table[n]['magnitude'] > 0
+    and not (SEQPARAM_SCALE_BAND[0]
+             <= _divisor_table[n]['magnitude'] / _divisor_table[n]['divisor']
+             <= SEQPARAM_SCALE_BAND[1])
 ]
 if _scale_warnings:
     print("\n  !! SCALE WARNING — these land far from O(1) after scaling:")
-    for _n, _d, _p in _scale_warnings:
-        print(f"       {_n}: p99 {_p:.2f} / {_d:.1f} = {_p / _d:.3f}")
+    for _n, _d, _m in _scale_warnings:
+        print(f"       {_n}: |magnitude| {_m:.2f} / {_d:.1f} = {_m / _d:.3f}")
     print("     A feature scaled far above O(1) erases the categorical "
           "conditioning\n     through LayerNorm; one far below it is invisible. "
-          "Neither is an error.")
+          "Neither is an error,\n     and neither shows up in a trained model.")
+else:
+    print(f"\n  scale check: all {len(_written_names)} fields inside "
+          f"{SEQPARAM_SCALE_BAND} after scaling.")
 
 if PARAM_SET == 'all' and set(_written_names) != set(EXAMINATION_SEQPARAM_FEATURES) - {
         presence_name(n) for n in _written_names} - set(SEQPARAM_DERIVED):
