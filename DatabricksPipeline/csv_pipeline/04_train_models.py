@@ -160,6 +160,7 @@ print(f"[run-log] teeing all output to {_LOG_PATH}")
 
 # COMMAND ----------
 
+# DBTITLE 1,Verify GPU + config setup
 # =============================================================================
 # Verify GPU
 # =============================================================================
@@ -188,6 +189,12 @@ else:
     except Exception:
         pass
 
+# ── Load AlternatingPipeline config (needed by all devices for num_serials fix) ──
+_ap_path = os.path.join(TMP_ROOT, 'AlternatingPipeline')
+if _ap_path not in sys.path:
+    sys.path.insert(0, _ap_path)
+import config as _ap_cfg
+
 # ── CPU-specific performance setup ───────────────────────────────────────────
 if device.type == 'cpu':
     _ncores = os.cpu_count() or 4
@@ -196,14 +203,6 @@ if device.type == 'cpu':
     os.environ.setdefault('OMP_NUM_THREADS', str(_ncores))
     os.environ.setdefault('MKL_NUM_THREADS', str(_ncores))
     print(f"[CPU] {_ncores} intra-op threads, {min(4, _ncores)} interop threads")
-    # Import `config` the same way the training scripts do (they add
-    # TMP_ROOT/AlternatingPipeline to sys.path and import bare `config`).
-    # Mutating the dict in-place here means any training module that binds
-    # EXCHANGE_TRAINING_CONFIG from this same `config` object sees the new values.
-    _ap_path = os.path.join(TMP_ROOT, 'AlternatingPipeline')
-    if _ap_path not in sys.path:
-        sys.path.insert(0, _ap_path)
-    import config as _ap_cfg
     # GPU-calibrated patience of 15-20 adds many hours on CPU.  Tighten to
     # ~half without meaningfully sacrificing model quality — the small datasets
     # (3.5K exchange, 45K exam) converge well before the original limits.
@@ -215,6 +214,8 @@ if device.type == 'cpu':
     _ap_cfg.ORCHESTRATION_TRAINING_CONFIG['epochs'] = 60
     print("[CPU] early_stopping_patience: exchange/exam → 8, orch → 10")
     print("[CPU] max epochs capped at 60 (early stopping typically fires sooner)")
+else:
+    print(f"[GPU] Using full training config (patience/epochs from config.py)")
 # ─────────────────────────────────────────────────────────────────────────────
 
 # COMMAND ----------
@@ -344,11 +345,28 @@ print(f"Best val perplexity: {min(exchange_history['val_perplexity']):.2f}")
 
 # COMMAND ----------
 
+# DBTITLE 1,Train Examination Model
 # =============================================================================
 # TRAIN EXAMINATION MODEL
 # =============================================================================
 
 from AlternatingPipeline.training.train_examination import train_examination_model
+
+# Ensure num_serials matches actual pkl content (config.py hardcodes
+# NUM_SERIALS=10 but the pkl may have more after serial expansion).
+# train_examination.py line 54 reads: serial_idx = int(seq.get('serial_idx', 0))
+# — it's a 0-based index already in the pkl, so we need max(serial_idx)+1 slots.
+_exam_data = data['examination']
+_num_serials_needed = _ap_cfg.EXAMINATION_MODEL_CONFIG.get('num_serials', 10)
+if _exam_data and 'serial_idx' in _exam_data[0]:
+    _max_idx = max(int(s.get('serial_idx', 0)) for s in _exam_data)
+    _num_serials_needed = _max_idx + 1
+if _num_serials_needed > _ap_cfg.EXAMINATION_MODEL_CONFIG.get('num_serials', 10):
+    print(f"[fix] num_serials: {_ap_cfg.EXAMINATION_MODEL_CONFIG['num_serials']} -> {_num_serials_needed}")
+    _ap_cfg.EXAMINATION_MODEL_CONFIG['num_serials'] = _num_serials_needed
+    _ap_cfg.NUM_SERIALS = _num_serials_needed
+else:
+    print(f"[info] num_serials={_num_serials_needed} (unchanged)")
 
 print("\n" + "="*60)
 print("Training Examination Model")

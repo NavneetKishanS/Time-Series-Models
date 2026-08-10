@@ -266,6 +266,7 @@ print("=" * 64)
 
 # COMMAND ----------
 
+# DBTITLE 1,Load data and models
 # =============================================================================
 # Load data and models
 # =============================================================================
@@ -340,13 +341,16 @@ exchange_model.eval()
 print("Exchange model loaded.")
 
 # --- load examination model ---
-examination_model = create_examination_model(EXAMINATION_MODEL_CONFIG).to(device)
-examination_model.load_state_dict(
-    torch.load(f"{MODELS_DIR}/examination/examination_model_best.pt", map_location=device),
-    strict=False
-)
+# Derive num_serials from the checkpoint (same pattern as orchestration below)
+# so a config that hardcodes NUM_SERIALS=10 doesn't clash with a 21-serial checkpoint.
+_exam_ckpt = torch.load(f"{MODELS_DIR}/examination/examination_model_best.pt", map_location=device)
+_exam_config = dict(EXAMINATION_MODEL_CONFIG)
+if 'serial_embedding.weight' in _exam_ckpt:
+    _exam_config['num_serials'] = _exam_ckpt['serial_embedding.weight'].shape[0]
+examination_model = create_examination_model(_exam_config).to(device)
+examination_model.load_state_dict(_exam_ckpt, strict=False)
 examination_model.eval()
-print("Examination model loaded.")
+print(f"Examination model loaded (num_serials={_exam_config['num_serials']}).")
 
 # --- load orchestration model ---
 with open(f"{MODELS_DIR}/orchestration/scanner_to_idx.json") as f:

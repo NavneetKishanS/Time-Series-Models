@@ -1055,7 +1055,10 @@ displayHTML('<a href="/files/csv_pipeline/preprocessed_data.pkl">Download prepro
 # =============================================================================
 # Audit file download links
 # =============================================================================
-audit_files = sorted(glob.glob(os.path.join(UNKNOWN_BODY_AUDIT_DIR, '*.csv')))
+import os
+from glob import glob
+UNKNOWN_BODY_AUDIT_DIR = "/dbfs/FileStore/csv_pipeline/unknown_body_audit"
+audit_files = sorted(glob(os.path.join(UNKNOWN_BODY_AUDIT_DIR, '*.csv')))
 
 if not audit_files:
     print(f'No audit CSVs found in {UNKNOWN_BODY_AUDIT_DIR}')
