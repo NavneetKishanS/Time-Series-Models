@@ -775,22 +775,34 @@ for r in ranking_grouped:
                                      for k in SUT_SUSPECT_WATCHLIST},
     })
 
+# A CONVICTION NEEDS BOTH a low retention AND something actually at stake. The
+# 2026-08-10 run flagged UI0 and TOM at 24.7% and 30.7% retained — on total
+# importances of 0.13s and 0.21s against a 9.7s MAE. Losing three quarters of
+# nothing is not evidence of anything, and a gate that cries leak over 0.4s
+# trains the reader to ignore it.
+_LOSS_S = 1.0
+
 _scored = [s for s in sentinel if s['retained_pct'] is not None]
 _suspects = sorted(_scored, key=lambda s: s['retained_pct'])[:10]
-print(f"\n  {'field':<16} {'grouped':>10} {'random':>10} {'retained':>10}  note")
+print(f"\n  {'field':<16} {'grouped':>10} {'random':>10} {'lost':>9} "
+      f"{'retained':>10}  note")
 rule('-')
 for s in _suspects:
-    _flag = '  <-- CHECK' if s['retained_pct'] < 35.0 else ''
+    _lost = s['importance_random_s'] - s['importance_grouped_s']
+    _flag = ('  <-- CHECK' if s['retained_pct'] < 35.0 and _lost > _LOSS_S
+             else '')
     print(f"  {s['name']:<16} {s['importance_grouped_s']:>+9.2f}s "
-          f"{s['importance_random_s']:>+9.2f}s {s['retained_pct']:>9.1f}%"
-          f"{_flag}")
+          f"{s['importance_random_s']:>+9.2f}s {_lost:>8.2f}s "
+          f"{s['retained_pct']:>9.1f}%{_flag}")
 rule('-')
 print(f"""
   RETAINED is the share of a field's importance that SURVIVES holding out whole
   groups. A physics parameter keeps most of it, because physics transfers. An
   identifier keeps almost none, because the held-out group's id was never seen.
-  Only fields scoring above {_MEANINGFUL_S}s on the random split appear here — a field with
-  nothing to lose cannot lose it informatively.
+
+  A CHECK needs both: under 35% retained AND more than {_LOSS_S:.1f}s actually lost. A
+  field with nothing to lose cannot lose it informatively, and low retention on
+  a 0.2s field is noise wearing a leak's clothes.
 
   The test to apply, the same one that convicted ST: is this a re-expression of
   the answer, or a cause of it? A cause stays in however strongly it correlates.

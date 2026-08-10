@@ -1453,17 +1453,24 @@ if examination_sequences:
     # Presence flags are omitted — they are 0/1 with divisor 1.0 by construction
     # and would triple the length of the table for no information.
     if _divisor_table:
+        # |mag|/div, NOT p99/div. A p99-based column reads -0.198 for TP — whose
+        # values are entirely negative — and flags it, three lines below a scale
+        # check that (correctly) passed it. One notebook contradicting itself is
+        # worse than either number alone, and the magnitude is the one the
+        # divisor was actually chosen from.
         print(f"\n  {'field':<24} {'src':>10} {'present':>8} {'p50':>10} "
-              f"{'p99':>10} {'divisor':>10} {'p99/div':>9}")
+              f"{'p99':>10} {'|mag|':>10} {'divisor':>10} {'|mag|/div':>10}")
         for name in _written_names:
             _spec = _divisor_table[name]
-            _scaled = (_spec['p99'] / _spec['divisor']) if _spec['divisor'] else float('inf')
-            _flag = '' if 0.05 <= _scaled <= 20.0 or _spec['p99'] == 0 else '  <-- CHECK'
+            _mag = _spec['magnitude']
+            _scaled = (_mag / _spec['divisor']) if _spec['divisor'] else float('inf')
+            _low, _high = SEQPARAM_SCALE_BAND
+            _flag = '' if _mag == 0 or _low <= _scaled <= _high else '  <-- CHECK'
             _sel = '*' if name in EXAMINATION_SEQPARAM_FEATURES else ' '
             print(f" {_sel}{name:<24} {_spec['source']:>10} "
                   f"{_spec['presence_pct']:>7.1f}% {_spec['p50']:>10.2f} "
-                  f"{_spec['p99']:>10.2f} {_spec['divisor']:>10.1f} "
-                  f"{_scaled:>9.3f}{_flag}")
+                  f"{_spec['p99']:>10.2f} {_mag:>10.2f} {_spec['divisor']:>10.1f} "
+                  f"{_scaled:>10.3f}{_flag}")
         print(f"  (* = in the selected PARAM_SET={PARAM_SET!r}; 'src' curated = "
               f"a hand-calibrated\n   divisor from SEQPARAM_CANDIDATES, "
               f"discovered = suggest_divisor(p99))")
