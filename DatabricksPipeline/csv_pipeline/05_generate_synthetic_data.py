@@ -266,6 +266,7 @@ print("=" * 64)
 
 # COMMAND ----------
 
+# DBTITLE 1,Load data and models
 # =============================================================================
 # Load data and models
 # =============================================================================
@@ -348,14 +349,26 @@ exchange_model.eval()
 print("Exchange model loaded.")
 
 # --- load examination model ---
-examination_model = create_examination_model(EXAMINATION_MODEL_CONFIG).to(device)
+# Derive num_serials from the checkpoint (same pattern as orchestration below)
+# so a config that hardcodes NUM_SERIALS=10 doesn't clash with a 21-serial checkpoint.
+_exam_ckpt = torch.load(f"{MODELS_DIR}/examination/examination_model_best.pt", map_location=device)
+_exam_config = dict(EXAMINATION_MODEL_CONFIG)
+if 'serial_embedding.weight' in _exam_ckpt:
+    _exam_config['num_serials'] = _exam_ckpt['serial_embedding.weight'].shape[0]
+examination_model = create_examination_model(_exam_config).to(device)
+# load_checkpoint_lenient, NOT a bare strict=False load. Deriving num_serials
+# above fixes the KNOWN shape mismatch; the lenient loader is what catches the
+# next one — it refuses a checkpoint from a different architecture with a
+# diagnosis naming the offending parameters, where strict=False would load
+# everything that happened to fit and leave the rest randomly initialised.
+# Both halves are needed: his fix removes the cause, this keeps the detector.
 load_checkpoint_lenient(
     examination_model,
-    torch.load(f"{MODELS_DIR}/examination/examination_model_best.pt", map_location=device),
+    _exam_ckpt,
     label="examination checkpoint",
 )
 examination_model.eval()
-print("Examination model loaded.")
+print(f"Examination model loaded (num_serials={_exam_config['num_serials']}).")
 
 # --- per-sequence-type duration calibration (from duration_probe.json) ---
 # The duration head predicts the right RELATIVE order of scan types but has
