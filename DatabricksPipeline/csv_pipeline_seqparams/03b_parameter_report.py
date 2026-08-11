@@ -997,15 +997,15 @@ else:
                 f"arms differ by {abs(_gain):.2f}s against a ±{_noise:.2f}s seed "
                 f"spread, so this corpus cannot separate them. That is not a "
                 f"small effect — it is no measurable effect, and it does not "
-                f"support either default. Ten serial numbers are not enough to "
-                f"settle the question; more scanners are, and that is the "
-                f"actionable conclusion.")
+                f"support either default. {len(set(SERIAL_GROUPS))} serial "
+                f"numbers are not enough to settle the question; more scanners "
+                f"are, and that is the actionable conclusion.")
             print(f"\n  → INSIDE THE NOISE. On {int(_any_rare.sum()):,} rare "
                   f"rows this corpus cannot separate\n    the arms. That is not "
                   f"a small effect, it is no measurable effect, and the\n    "
-                  f"honest report is that 10 serial numbers are not enough to "
-                  f"settle it —\n    which is an argument for more data, not "
-                  f"for either default.")
+                  f"honest report is that {len(set(SERIAL_GROUPS))} serial "
+                  f"numbers are not enough to\n    settle it — which is an "
+                  f"argument for more data, not for either default.")
 
 REPORT['gates']['threshold_arms'] = gate4b
 
@@ -1410,10 +1410,11 @@ if gate3.get('undecidable'):
         f"{_UNDECIDABLE_ROWS} rows of this corpus** "
         f"(`{'`, `'.join(gate3['undecidable'][:12])}`). No experiment on "
         f"{len(sequences):,} sequences decides whether these help — not this one "
-        f"either. Görtler's \"40,000 times\" is fleet-wide; this corpus is 10 "
-        f"serial numbers. Any number quoted about these fields is a statement "
-        f"about sampling noise, and the honest answer is that they need more "
-        f"scanners rather than a different default.",
+        f"either. Görtler's \"40,000 times\" is fleet-wide; this corpus is "
+        f"{len(set(SERIAL_GROUPS))} serial numbers. Any number quoted about "
+        f"these fields is a statement about sampling noise, and the honest "
+        f"answer is that they need more scanners rather than a different "
+        f"default.",
     ]
 
 # THE ARMS. Reported here rather than buried in the JSON, because the request

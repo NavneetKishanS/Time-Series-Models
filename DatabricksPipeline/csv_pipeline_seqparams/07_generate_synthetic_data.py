@@ -432,13 +432,35 @@ print("Exchange model loaded.")
 # 05_feature_analysis.py and 06_compare_models.py, so the serve-side model is
 # built exactly as the trained one was.
 EXAMINATION_MODEL_CONFIG_SEQPARAMS = build_seqparams_model_config(EXAMINATION_MODEL_CONFIG)
+
+# --- num_serials from the CHECKPOINT, not from a hardcoded config -----------
+# Ported from PR #59 (NavneetKishanS). Serve-side counterpart of the training
+# fix in 04: a checkpoint trained on 21 serials carries a [21, 16] serial
+# embedding, and building the model from a config that still says 10 gives
+# [10, 16]. The checkpoint is the authority here — it is a fact about the model
+# being loaded, where the config is only a default.
+#
+# load_checkpoint_lenient would REFUSE that mismatch rather than load it (which
+# is why this fork failed loudly where csv_pipeline's strict=False loaded a
+# half-initialised model), but refusing at serve time is still an outage. This
+# removes the cause; the lenient loader below stays as the detector for the
+# next one.
+_exam_ckpt = torch.load(_CHECKPOINTS["examination"], map_location=device)
+if 'serial_embedding.weight' in _exam_ckpt:
+    _ckpt_serials = int(_exam_ckpt['serial_embedding.weight'].shape[0])
+    if _ckpt_serials != EXAMINATION_MODEL_CONFIG_SEQPARAMS.get('num_serials'):
+        print(f"[fix] num_serials: "
+              f"{EXAMINATION_MODEL_CONFIG_SEQPARAMS.get('num_serials')} -> "
+              f"{_ckpt_serials} (from the checkpoint, not config)")
+        EXAMINATION_MODEL_CONFIG_SEQPARAMS['num_serials'] = _ckpt_serials
+
 print(f"Examination conditioning: base_conditioning_dim="
       f"{EXAMINATION_MODEL_CONFIG_SEQPARAMS['base_conditioning_dim']}, "
       f"extra features={EXAMINATION_SEQPARAM_FEATURES}")
 examination_model = create_examination_model(EXAMINATION_MODEL_CONFIG_SEQPARAMS).to(device)
 load_checkpoint_lenient(
     examination_model,
-    torch.load(_CHECKPOINTS["examination"], map_location=device),
+    _exam_ckpt,
     label="examination checkpoint (SUT-conditioned)",
 )
 examination_model.eval()

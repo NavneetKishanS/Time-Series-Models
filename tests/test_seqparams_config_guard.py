@@ -522,6 +522,40 @@ class StepDefinitionTests(unittest.TestCase):
         source = self._step_03_source()
         self.assertIn("_cond['sut_in_segment']", source)
 
+    def _read(self, name):
+        path = os.path.join(os.path.dirname(_CONFIG_PATH), name)
+        with open(path) as f:
+            return f.read()
+
+    def test_step_04_derives_num_serials_from_the_pkl(self):
+        # PR #59 (NavneetKishanS) fixed exactly this on the csv_pipeline side:
+        # config hardcodes NUM_SERIALS=10, a pkl built after a serial expansion
+        # carries more, and the out-of-range embedding lookup is a CUDA
+        # device-side assert on GPU — after training has already started.
+        #
+        # This pipeline is a FORK with its own config, so his fix does not reach
+        # it. That is the whole failure mode of a forked config, and this test
+        # is what stops the derivation being dropped again.
+        source = self._read('04_train_models.py')
+        self.assertIn("EXAMINATION_MODEL_CONFIG_SEQPARAMS['num_serials']", source)
+        self.assertIn("serial_idx", source)
+
+    def test_step_07_derives_num_serials_from_the_checkpoint(self):
+        # Serve-side counterpart. The checkpoint is the authority on how many
+        # serials the model was built with; the config is only a default.
+        source = self._read('07_generate_synthetic_data.py')
+        self.assertIn("serial_embedding.weight", source)
+
+    def test_step_07_still_uses_the_lenient_loader(self):
+        # Deriving num_serials removes the KNOWN mismatch. The lenient loader is
+        # what catches the next one — it refuses a checkpoint from a different
+        # architecture with a diagnosis, where a bare strict=False load takes
+        # whatever fits and leaves the rest randomly initialised. Dropping it
+        # while fixing the shape would trade a loud failure for a silent one.
+        source = self._read('07_generate_synthetic_data.py')
+        self.assertIn('load_checkpoint_lenient', source)
+        self.assertNotIn('load_state_dict(_exam_ckpt, strict=False)', source)
+
     def test_step_03_uses_the_shared_field_rules(self):
         # The admissibility rule and the stable-name rule live in config so the
         # report can print the same reasons the build acted on. A second copy

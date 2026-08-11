@@ -358,6 +358,30 @@ print("=" * 64)
 
 EXAMINATION_MODEL_CONFIG_SEQPARAMS['num_protocols'] = NUM_PROTOCOLS
 
+# --- num_serials from the DATA, not from a hardcoded config -----------------
+# Ported from PR #59 (NavneetKishanS), which hit this on the csv_pipeline side:
+# config hardcodes NUM_SERIALS=10, and a pkl built after a serial expansion
+# carries more. An out-of-range embedding lookup is an IndexError on CPU and a
+# CUDA device-side assert on GPU — the second is far harder to read, and lands
+# only after training has already started.
+#
+# THIS FORK HAS ITS OWN CONFIG, so his fix does not reach it. That is exactly
+# the failure mode of a forked config: the bug was fixed once and still lives
+# here. `serial_idx` is already a 0-based index in the pkl (train_examination.py
+# reads `int(seq.get('serial_idx', 0))`), so the embedding needs max + 1 slots.
+_exam_seqs_for_serials = data['examination']
+if _exam_seqs_for_serials and 'serial_idx' in _exam_seqs_for_serials[0]:
+    _needed_serials = max(int(s.get('serial_idx', 0))
+                          for s in _exam_seqs_for_serials) + 1
+    _configured_serials = EXAMINATION_MODEL_CONFIG_SEQPARAMS.get('num_serials', 0)
+    if _needed_serials > _configured_serials:
+        print(f"[fix] num_serials: {_configured_serials} -> {_needed_serials} "
+              f"(from the pkl's serial_idx, not config)")
+        EXAMINATION_MODEL_CONFIG_SEQPARAMS['num_serials'] = _needed_serials
+    else:
+        print(f"[info] num_serials={_configured_serials} covers the pkl's "
+              f"{_needed_serials} serial(s)")
+
 # COMMAND ----------
 
 # =============================================================================

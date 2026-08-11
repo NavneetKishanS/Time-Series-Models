@@ -70,8 +70,30 @@ from typing import NamedTuple
 PARAM_SET = os.environ.get('PARAM_SET', 'all').strip().lower()
 
 # ============================================================================
-# TARGET SCANNERS & DATE RANGE — identical to csv_pipeline/, for a like-for-
-# like comparison against the old model.
+# TARGET SCANNERS & DATE RANGE
+#
+# ⚠ NO LONGER IDENTICAL TO csv_pipeline/. PR #59 expanded that pipeline to 21
+# serials; this fork is deliberately left at the original 10, and the two facts
+# together are a decision, not an oversight:
+#
+#   * every seqparams number quoted so far — the 9.7s in-segment MAE, the 80.3%
+#     join coverage, the rare-parameter row counts and the "a 0.01% field is ~5
+#     rows" boundary in 03b — was measured on THESE ten. Expanding the list
+#     silently would leave the report's prose describing a corpus that no longer
+#     exists.
+#   * it costs a full Spark rebuild, so it is a scheduling decision.
+#
+# WHAT EXPANDING WOULD BUY, when it is deliberate: roughly double the absolute
+# row counts, which is the single thing that could settle the <1% parameter
+# question 03b currently has to call undecidable — and it is what would make
+# SEQPARAM_MIN_PRESENCE_ROWS worth switching on. So this list is the lever for
+# that experiment, not a leftover.
+#
+# The like-for-like comparison against the old model now requires pinning
+# csv_pipeline to the same ten, or re-running both. Neither pipeline hardcodes
+# an embedding size against this list any more (see the num_serials derivation
+# in 04 and 07), so changing it is a config edit plus a rebuild, not a debugging
+# session.
 # ============================================================================
 
 SERIAL_NUMBERS = [183242, 176148, 176227, 175912, 175670,
