@@ -65,6 +65,10 @@ def _build_field_stats(config, parsers, messages):
         ordered = sorted(numeric)
         stats[name] = {
             'presence_pct': 100.0 * len(values) / len(messages),
+            # The count the 2026-08-10 escape hatch reads. Three messages is far
+            # under any row floor, so it never fires here — which is what makes
+            # these assertions about the PERCENTAGE rule specifically.
+            'presence_rows': len(values),
             'numeric_pct': 100.0 * len(numeric) / max(1, len(values)),
             'p99': ordered[-1] if ordered else 0.0,
             'p50': ordered[len(ordered) // 2] if ordered else 0.0,
@@ -84,7 +88,8 @@ class _RealMessageBase(unittest.TestCase):
             name: cls.config.classify_seqparam_field(name, spec)
             for name, spec in cls.stats.items()
         }
-        cls.admitted = sorted(n for n, (ok, _) in cls.verdicts.items() if ok)
+        cls.admitted = sorted(n for n, v in cls.verdicts.items()
+                              if v.verdict == 'full')
 
 
 class RealMessageSelectionTests(_RealMessageBase):
@@ -107,17 +112,18 @@ class RealMessageSelectionTests(_RealMessageBase):
         for field in ('ST', 'TST'):
             with self.subTest(field=field):
                 self.assertIn(field, self.stats, "the message stopped carrying it")
-                ok, why = self.verdicts[field]
-                self.assertFalse(ok)
-                self.assertIn('duration target', why)
+                verdict = self.verdicts[field]
+                self.assertEqual(verdict.verdict, 'excluded')
+                self.assertEqual(verdict.category, 'denied')
+                self.assertIn('duration target', verdict.reason)
 
     def test_identity_fields_are_refused_on_real_messages(self):
         for field in ('MUID', 'VER'):
             with self.subTest(field=field):
                 self.assertIn(field, self.stats)
-                ok, why = self.verdicts[field]
-                self.assertFalse(ok)
-                self.assertIn('cannot transfer', why)
+                verdict = self.verdicts[field]
+                self.assertEqual(verdict.verdict, 'excluded')
+                self.assertIn('cannot transfer', verdict.reason)
 
     def test_planner_derived_fields_are_refused_on_real_messages(self):
         # SNR moves monotonically AGAINST scan time across these three messages
@@ -126,16 +132,17 @@ class RealMessageSelectionTests(_RealMessageBase):
         for field in sorted(self.config.SUT_PLANNER_DERIVED_DENYLIST):
             with self.subTest(field=field):
                 self.assertIn(field, self.stats)
-                ok, why = self.verdicts[field]
-                self.assertFalse(ok)
-                self.assertIn('timing', why)
+                verdict = self.verdicts[field]
+                self.assertEqual(verdict.verdict, 'excluded')
+                self.assertIn('timing', verdict.reason)
 
     def test_string_valued_fields_are_refused_as_numerics(self):
         # DLL is '%SiemensSeq%\\haste' — a category. It needs an embedding, and
         # it already has one; what it must not become is a scaled numeric column.
-        ok, why = self.verdicts['DLL']
-        self.assertFalse(ok)
-        self.assertIn('embedding', why)
+        verdict = self.verdicts['DLL']
+        self.assertEqual(verdict.verdict, 'excluded')
+        self.assertEqual(verdict.category, 'non_numeric')
+        self.assertIn('embedding', verdict.reason)
 
     def test_the_physics_parameters_survive(self):
         # The counterweight to the four tests above: the denylists must not be

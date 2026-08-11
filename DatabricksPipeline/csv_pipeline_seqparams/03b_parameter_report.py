@@ -21,9 +21,18 @@ must re-run on EVERY build, because each of them can regress:
   GATE 2  join integrity    does the joined SUT message describe the sequence
                             that actually ran (was 100.0% — a regression test)
   GATE 3  admissibility     which fields exist, which are admitted, and the
-                            REASON for every exclusion
+                            REASON for every exclusion — split into the three
+                            separate decisions it actually is
+  GATE 3b family indicators is a rare parameter's PRESENCE tied to one sequence
+                            family, as Görtler argued for PDM? Costs no training
+                            run, and can say "stop" before gate 4 spends one
   GATE 4  value             do the parameters beat the protocol oracle and the
-                            +-15s bar, on an honest split, per body group
+                            +-15s bar, on an honest split
+  GATE 4b threshold arms    the <1% question, scored ON THE RARE ROWS across
+                            several seeds — aggregate MAE cannot resolve it
+  GATE 4c per body group    where the error falls, rarest group first
+  GATE 4d per sequence type Görtler's TSE breakdown, and whether the pooled
+                            model is actually worse on the minority families
   GATE 5  leakage sentinel  is any admitted field predicting duration the way
                             an identifier or a copy of the target would
 
@@ -83,8 +92,9 @@ from AlternatingPipeline.data.protocol_vocab import (
     heldout_group_r2, normalize_protocol_name,
 )
 from AlternatingPipeline.data.parameter_analysis import (
-    _to_float, exam_group_labels, heldout_regressor_score,
+    _to_float, exam_group_labels, heldout_predictions, heldout_regressor_score,
     numeric_field_inventory, numeric_matrix, permutation_importance_mae,
+    presence_concentration, stratified_mae,
 )
 from AlternatingPipeline.data.holdout import holdout_mask, split_summary
 
@@ -358,14 +368,22 @@ inventory = numeric_field_inventory(sequences)
 field_rows = []
 for row in inventory:
     name = seqparam_stable_name(row['key'])
-    stats = {'presence_pct': row['presence_pct'], 'numeric_pct': row['numeric_pct']}
-    ok, why = classify_seqparam_field(name, stats)
+    stats = {'presence_pct': row['presence_pct'],
+             # The absolute count, which is what the 2026-08-10 escape hatch
+             # reads. numeric_field_inventory has always computed it as
+             # 'present'; the rule simply never asked for it.
+             'presence_rows': row['present'],
+             'numeric_pct': row['numeric_pct']}
+    verdict = classify_seqparam_field(name, stats)
     field_rows.append({
         'name': name,
         'raw_key': row['key'],
-        'admissible': bool(ok),
-        'reason': why,
+        'admissible': verdict.verdict == 'full',
+        'verdict': verdict.verdict,
+        'category': verdict.category,
+        'reason': verdict.reason,
         'presence_pct': row['presence_pct'],
+        'presence_rows': row['present'],
         'numeric_pct': row['numeric_pct'],
         'distinct': row['distinct'],
         'p50': row['p50'],
@@ -377,23 +395,87 @@ for row in inventory:
 
 admitted = [r for r in field_rows if r['admissible']]
 excluded = [r for r in field_rows if not r['admissible']]
+presence_only = [r for r in field_rows if r['verdict'] == 'presence_only']
 gate3 = {
     'fields_seen': len(field_rows),
     'admitted': len(admitted),
     'excluded': len(excluded),
+    'presence_only': len(presence_only),
     'selected': len([r for r in admitted if r['in_selected_set']]),
     'unidentified': [r['name'] for r in admitted if not r['curated']],
+    'rare_mode': SEQPARAM_RARE_MODE,
+    'min_presence_pct': SEQPARAM_MIN_PRESENCE_PCT,
+    'min_presence_rows': SEQPARAM_MIN_PRESENCE_ROWS,
     'fields': field_rows,
 }
 
 print(f"\n  {gate3['fields_seen']} distinct fields in the messages")
-print(f"  {gate3['admitted']} admissible  |  {gate3['excluded']} excluded")
-print(f"\n  EXCLUDED — with the reason, because this is the question that keeps "
-      f"being asked:")
+print(f"  {gate3['admitted']} admissible  |  {gate3['excluded']} excluded"
+      + (f"  |  {gate3['presence_only']} presence-flag only"
+         if gate3['presence_only'] else ""))
+
+# =============================================================================
+# THE EXCLUSIONS, SPLIT THREE WAYS — the 2026-08-10 review's central confusion.
+#
+# "45 excluded" was quoted as though it were one decision. It is three, and only
+# two of them are open to debate:
+#
+#   rare         a THRESHOLD, and the one Görtler challenged. Settleable by a
+#                sweep — see the arms in gate 4.
+#   non_numeric  needs an embedding, not a lower floor. Real work, named as a
+#                follow-up rather than buried in an aggregate count.
+#   denied       ST is the target. Not a threshold question, and not up for
+#                debate at any setting.
+#
+# Row counts are printed because learnability tracks the COUNT, not the ratio —
+# and because the count is what tells us which of these this corpus can decide.
+# =============================================================================
+_CATEGORY_HEADINGS = [
+    ('rare', "TOO RARE — the threshold question, and the only one a sweep can "
+             "settle"),
+    ('non_numeric', "NON-NUMERIC — needs an embedding (bucket 3), not a lower "
+                    "floor"),
+    ('denied', "DENIED — target-equivalent, identity or planner-derived. Not up "
+               "for debate"),
+]
+for _category, _heading in _CATEGORY_HEADINGS:
+    _rows = [r for r in excluded if r['category'] == _category]
+    if not _rows:
+        continue
+    print(f"\n  {_heading} ({len(_rows)}):")
+    rule('-')
+    for r in sorted(_rows, key=lambda r: -r['presence_rows']):
+        print(f"  {r['name']:<16} {r['presence_rows']:>7,} rows "
+              f"{r['presence_pct']:>7.3f}%   {r['reason']}")
 rule('-')
-for r in sorted(excluded, key=lambda r: r['name']):
-    print(f"  {r['name']:<16} {r['reason']}")
-rule('-')
+
+# THE HONEST BOUNDARY. Görtler's "40,000 times" is fleet-wide; this corpus is 10
+# serials. A 0.1% field here is ~50 rows and a 0.01% field is ~5. Saying which
+# fields this corpus CANNOT decide about is more useful than a number that
+# implies it did — and it is the concrete argument for more serial numbers.
+_UNDECIDABLE_ROWS = 30
+_undecidable = [r for r in excluded
+                if r['category'] == 'rare' and r['presence_rows'] < _UNDECIDABLE_ROWS]
+gate3['undecidable'] = [r['name'] for r in _undecidable]
+if _undecidable:
+    print(f"\n  ⚠ {len(_undecidable)} rare field(s) appear on fewer than "
+          f"{_UNDECIDABLE_ROWS} rows of this corpus.\n    NO experiment on "
+          f"{len(sequences):,} sequences can decide whether these help — "
+          f"including\n    this one. They need more serial numbers, and any "
+          f"conclusion quoted about\n    them is a statement about sampling "
+          f"noise:")
+    for r in sorted(_undecidable, key=lambda r: r['presence_rows']):
+        print(f"       {r['name']:<16} {r['presence_rows']:>5,} rows")
+
+if presence_only:
+    print(f"\n  PRESENCE-FLAG ONLY ({len(presence_only)}) — SEQPARAM_RARE_MODE="
+          f"{SEQPARAM_RARE_MODE!r}.\n  These contribute a 0/1 indicator and no "
+          f"value column: Görtler's PDM argument is\n  that the field marks a "
+          f"sequence family, which is a claim about WHERE it appears,\n  not "
+          f"about what it measures:")
+    for r in sorted(presence_only, key=lambda r: -r['presence_rows']):
+        print(f"    {r['name']:<16} {r['presence_rows']:>7,} rows "
+              f"{r['presence_pct']:>7.3f}%")
 
 _wl = [r for r in admitted if r['watchlisted']]
 if _wl:
@@ -416,9 +498,16 @@ REPORT['gates']['admissibility'] = gate3
 _ordered = sorted(field_rows, key=lambda r: (-r['presence_pct'], r['name']))
 fig, ax = plt.subplots(figsize=(9, max(5, len(_ordered) * 0.16)))
 _colours, _labels = [], []
+# One colour per DECISION, not per admitted/excluded. The old chart painted
+# "too rare" and "needs an embedding" the same grey, which is exactly the
+# conflation that made "45 excluded" read as one debate in the 08-10 review.
+_CATEGORY_COLOURS = {'denied': '#E45756', 'rare': '#F58518',
+                     'non_numeric': '#BAB0AC'}
 for r in _ordered:
-    if not r['admissible']:
-        _colours.append('#E45756' if 'denied' in r['reason'] else '#BAB0AC')
+    if r['verdict'] == 'presence_only':
+        _colours.append('#B279A2')
+    elif not r['admissible']:
+        _colours.append(_CATEGORY_COLOURS.get(r['category'], '#BAB0AC'))
     elif r['curated']:
         _colours.append('#54A24B')
     else:
@@ -433,19 +522,138 @@ ax.set_xlabel('% of rows carrying the field')
 ax.set_title(f"Every field, and why it is or is not in the model "
              f"({gate3['admitted']} of {gate3['fields_seen']} admitted)")
 ax.axvline(SEQPARAM_MIN_PRESENCE_PCT, color='#666', ls=':', lw=1)
-_legend = [
-    plt.Rectangle((0, 0), 1, 1, color='#54A24B'),
-    plt.Rectangle((0, 0), 1, 1, color='#4C78A8'),
-    plt.Rectangle((0, 0), 1, 1, color='#E45756'),
-    plt.Rectangle((0, 0), 1, 1, color='#BAB0AC'),
+_legend_spec = [
+    ('#54A24B', 'admitted, hand-calibrated'),
+    ('#4C78A8', 'admitted, discovered'),
+    ('#B279A2', 'presence flag only (rare, indicator kept)'),
+    ('#F58518', 'excluded: too rare — THE THRESHOLD QUESTION'),
+    ('#BAB0AC', 'excluded: not numeric — needs an embedding'),
+    ('#E45756', 'DENIED (target / identity / planner-derived)'),
 ]
-ax.legend(_legend, ['admitted, hand-calibrated', 'admitted, discovered',
-                    'DENIED (target / identity / planner-derived)',
-                    'excluded (not numeric, or below the presence floor)'],
+ax.legend([plt.Rectangle((0, 0), 1, 1, color=c) for c, _ in _legend_spec],
+          [label for _, label in _legend_spec],
           fontsize=7, loc='lower right')
 ax.spines[['top', 'right']].set_visible(False)
 save_chart(fig, 'field_admissibility',
            'The answer to "how many parameters and why", one row per field.')
+
+# COMMAND ----------
+
+# =============================================================================
+# GATE 3b — IS A RARE PARAMETER A SEQUENCE-FAMILY INDICATOR?
+#
+# Görtler, 2026-08-10, arguing against the <1% exclusion: "PDM is a parameter of
+# a very new sequence... it only occurs in heart sequences, so this might help
+# the model identify heart sequences."
+#
+# That is a claim about a field's PRESENCE, not its VALUE, and it is checkable
+# without training anything. This gate is deliberately placed BEFORE gate 4: if
+# rare fields turn out diffuse, or turn out to be things `sequence_type` already
+# says, then the arms in gate 4 have no premise and the GPU hours are not worth
+# spending.
+#
+# The reading that matters is the one a naive check would get wrong. "PDM only
+# occurs in heart sequences" is P(cardiac | PDM present) = 1.0 — but that ALONE
+# does not make the flag useful. If PDM is also on essentially every cardiac row
+# then presence and `sequence_type` are the same fact, the model already has it,
+# and the flag is redundant. The field worth having is the one confined to a
+# family while covering only PART of it.
+# =============================================================================
+
+rule()
+print(" GATE 3b — RARE PARAMETERS AS SEQUENCE-FAMILY INDICATORS")
+rule()
+
+_seq_type_names = [ID_TO_SEQUENCE_TYPE.get(int(s.get('sequence_type', 0)), 'other')
+                   for s in sequences]
+for _seq, _label in zip(sequences, _seq_type_names):
+    _seq['_seq_type_name'] = _label
+
+concentration = presence_concentration(
+    sequences, [r['raw_key'] for r in field_rows],
+    category_key='_seq_type_name')
+_by_raw = {r['raw_key']: r for r in field_rows}
+for _row in concentration:
+    _meta = _by_raw[_row['name']]
+    _row['stable_name'] = _meta['name']
+    _row['category'] = _meta['category']
+    _row['admissible'] = _meta['admissible']
+
+gate3b = {
+    'fields': concentration,
+    'verdict_counts': dict(Counter(r['verdict'] for r in concentration)),
+}
+REPORT['gates']['family_indicators'] = gate3b
+
+print(f"\n  {len(concentration)} fields, presence cross-tabulated against "
+      f"{len(set(_seq_type_names))} sequence types")
+print(f"\n  {'field':<16} {'rows':>7} {'top type':>12} {'P(type|field)':>14} "
+      f"{'P(field|type)':>14} {'NMI':>6}  verdict")
+rule('-')
+
+# The rare fields FIRST — they are what the question is about, and a listing
+# sorted purely by concentration buries them under the universal fields.
+_rare_conc = [r for r in concentration if r['category'] == 'rare']
+_other_conc = [r for r in concentration if r['category'] != 'rare']
+for _row in _rare_conc + _other_conc[:12]:
+    _mark = '  <- RARE' if _row['category'] == 'rare' else ''
+    print(f"  {_row['stable_name']:<16} {_row['presence_rows']:>7,} "
+          f"{str(_row['top_category']):>12} {_row['top_share']:>13.1%} "
+          f"{_row['coverage_in_top']:>13.1%} {_row['nmi']:>6.2f}  "
+          f"{_row['verdict']}{_mark}")
+rule('-')
+
+# --- THE DECISION GATE ------------------------------------------------------
+# Stated as a verdict rather than left for a reader to infer, because the whole
+# value of running this before gate 4 is that it can say "stop".
+_rare_informative = [r for r in _rare_conc if r['verdict'] == 'informative']
+_rare_redundant = [r for r in _rare_conc if r['verdict'] == 'redundant']
+_rare_diffuse = [r for r in _rare_conc if r['verdict'] == 'diffuse']
+
+print(f"\n  Of {len(_rare_conc)} rare field(s): {len(_rare_informative)} "
+      f"informative, {len(_rare_redundant)} redundant,\n  {len(_rare_diffuse)} "
+      f"diffuse.")
+
+if _rare_informative:
+    print(f"\n  → GÖRTLER'S MECHANISM HOLDS for {len(_rare_informative)} "
+          f"field(s). Each is confined to one\n    sequence family while "
+          f"covering only part of it — a distinction `sequence_type`\n    "
+          f"cannot express, which is exactly what a presence flag would add:")
+    for _row in _rare_informative:
+        print(f"       {_row['stable_name']:<16} {_row['presence_rows']:>6,} "
+              f"rows, {_row['top_share']:.0%} in {_row['top_category']}, "
+              f"covering {_row['coverage_in_top']:.0%} of it")
+    print(f"\n    The presence-only arm in gate 4 is worth running. Note this "
+          f"gate says the\n    INFORMATION is there, not that the model can use "
+          f"it — that is gate 4's job.")
+else:
+    print(f"\n  → GÖRTLER'S MECHANISM DOES NOT HOLD on this corpus. No rare "
+          f"field is both\n    confined to a sequence family and a refinement "
+          f"of it.")
+    if _rare_redundant:
+        print(f"    {len(_rare_redundant)} rare field(s) ARE family-confined, "
+              f"but cover essentially the whole\n    family — so "
+              f"`sequence_type` already tells the model what their flag would.\n"
+              f"    That is a real result and it argues AGAINST the "
+              f"presence-only arm, not for it:")
+        for _row in _rare_redundant[:8]:
+            print(f"       {_row['stable_name']:<16} "
+                  f"{_row['top_share']:.0%} in {_row['top_category']}, "
+                  f"covering {_row['coverage_in_top']:.0%} of it")
+    print(f"\n    Gate 4's arms can still be run, but the premise for expecting "
+          f"them to help\n    is absent — say so rather than reporting the "
+          f"aggregate MAE as if it settled\n    anything.")
+
+# The corpus boundary, restated where the decision is made. A field on 5 rows
+# cannot produce a trustworthy concentration figure either — 5/5 in one family
+# is what you would expect by chance often enough to mean nothing.
+_thin_conc = [r for r in _rare_conc if r['presence_rows'] < _UNDECIDABLE_ROWS]
+if _thin_conc:
+    print(f"\n  ⚠ {len(_thin_conc)} of those rare field(s) sit under "
+          f"{_UNDECIDABLE_ROWS} rows, where a 100%\n    concentration figure is "
+          f"not evidence — it is what a handful of rows does by\n    chance. "
+          f"Their verdicts above are reported for completeness and should NOT "
+          f"be\n    quoted: {', '.join(r['stable_name'] for r in _thin_conc[:12])}")
 
 # COMMAND ----------
 
@@ -606,6 +814,203 @@ print(f"\n  ORACLE COVERAGE: {oracle_cov_g:.1f}% grouped vs {oracle_cov_r:.1f}% 
 
 # COMMAND ----------
 
+# =============================================================================
+# GATE 4b — THE THRESHOLD ARMS, SCORED WHERE THE EFFECT WOULD ACTUALLY APPEAR
+#
+# The 2026-08-10 review's open question, done properly this time.
+#
+# WHAT WAS WRONG BEFORE: the case against Görtler's sub-1% parameters was that
+# aggregate MSE rose when they were included. If a rare field helps only the
+# rows it appears on — 150 out of 50,000 — then even a large improvement there
+# moves aggregate MAE by hundredths of a second. Aggregate MAE cannot resolve
+# the claim in either direction, so the old result did not disprove the
+# mechanism; it was blind to it. Every arm below is therefore reported BOTH
+# overall and on the rare rows specifically, and the overall column is labelled
+# as unable to settle anything.
+#
+# THE ARMS:
+#   incumbent       the 1% floor, rare fields dropped        (today's default)
+#   rare-as-flags   rare fields as a 0/1 indicator, no value (Görtler's actual
+#                   argument: presence marks a sequence family)
+#   floor 0.1%      rare fields down to 0.1% as full values
+#   floor 0.0%      every numeric field the corpus contains  ("really all")
+#
+# The denylists apply to EVERY arm. "All parameters" never means ST.
+# =============================================================================
+
+rule()
+print(" GATE 4b — THE <1% THRESHOLD ARMS")
+rule()
+
+_rare_rows_all = [r for r in field_rows if r['category'] == 'rare']
+if not _rare_rows_all:
+    print("\n  No field falls below the presence floor, so there is no threshold "
+          "question\n  to answer on this corpus. Nothing to sweep.")
+    gate4b = {'arms': [], 'rare_fields': []}
+else:
+    # The wide matrix: admitted values, then rare values, then rare presence
+    # flags. Built once; each arm is a column slice of it, so every arm is
+    # scored on identical rows with an identically-fitted estimator.
+    _rare_names = [r['name'] for r in _rare_rows_all]
+    _rare_keys = [r['raw_key'] for r in _rare_rows_all]
+
+    _rare_values = numeric_matrix(sequences, _rare_keys)
+    # Presence is "the message carried this key", NOT "the value parsed as a
+    # number" — a field can be present and unparseable, and conflating the two
+    # would make the flag a data-quality signal instead of a family indicator.
+    _rare_flags = np.array(
+        [[1.0 if k in (s.get('sut_raw') or {}) else 0.0 for k in _rare_keys]
+         for s in sequences], dtype=float)
+
+    _base = parameters[np.ix_(np.where(score_rows)[0],
+                              list(range(len(_admitted_names))))]
+    _rare_values_s = _rare_values[score_rows]
+    _rare_flags_s = _rare_flags[score_rows]
+
+    _pct = np.array([r['presence_pct'] for r in _rare_rows_all])
+    _tenth = _pct >= 0.1
+
+    _arms = [
+        ('incumbent — 1% floor, rare dropped', _base),
+        ('rare as PRESENCE FLAGS only',
+         np.hstack([_base, _rare_flags_s])),
+        (f"floor 0.1% — {int(_tenth.sum())} rare fields, full values",
+         np.hstack([_base, _rare_values_s[:, _tenth], _rare_flags_s[:, _tenth]])
+         if _tenth.any() else None),
+        (f"floor 0.0% — all {len(_rare_names)} rare fields, full values",
+         np.hstack([_base, _rare_values_s, _rare_flags_s])),
+    ]
+
+    # SEEDS, NOT ONE RUN. The differences being argued about are fractions of a
+    # second; without the spread across seeds there is no way to tell a finding
+    # from noise, and quoting a single run is how the previous conclusion was
+    # reached.
+    _SEEDS = [int(s) for s in os.environ.get('ARM_SEEDS', '0,1,2,3,4').split(',')]
+
+    # The rare stratum: rows carrying ANY rare field. This is the population the
+    # entire disagreement is about, and it is invisible in the overall column.
+    _any_rare = _rare_flags_s.max(axis=1) > 0
+    print(f"\n  {int(_any_rare.sum()):,} of {len(_y):,} scored rows carry at "
+          f"least one rare field ({100.0 * _any_rare.mean():.2f}%).")
+    print(f"  Scored over {len(_SEEDS)} seeds on the {GROUP_BY}-grouped split.")
+
+    print(f"\n  {'arm':<44} {'overall MAE':>18} {'MAE on rare rows':>22}")
+    print(f"  {'':<44} {'(cannot settle it)':>18} {'(where it would show)':>22}")
+    rule('-')
+
+    _arm_rows = []
+    for _label, _cols in _arms:
+        if _cols is None:
+            continue
+        _overall, _rare_mae = [], []
+        for _seed in _SEEDS:
+            _pred = heldout_predictions(_cols, _y, repeats=REPEATS, seed=_seed,
+                                        groups=_g)
+            _cov = _pred['held_out_count'] > 0
+            _strata = stratified_mae(_y, _pred['predictions'], _cov, _any_rare)
+            _by = {r['stratum']: r for r in _strata}
+            _scored = _cov & np.isfinite(_pred['predictions'])
+            _overall.append(float(np.mean(np.abs(
+                _y[_scored] - _pred['predictions'][_scored]))))
+            if True in _by and _by[True]['rows']:
+                _rare_mae.append(_by[True]['mae_s'])
+
+        _row = {
+            'label': _label,
+            'n_features': int(_cols.shape[1]),
+            'overall_mae_s': round(float(np.mean(_overall)), 2),
+            'overall_sd_s': round(float(np.std(_overall)), 2),
+            'rare_mae_s': round(float(np.mean(_rare_mae)), 2) if _rare_mae else None,
+            'rare_sd_s': round(float(np.std(_rare_mae)), 2) if _rare_mae else None,
+            'rare_rows': int(_any_rare.sum()),
+        }
+        _arm_rows.append(_row)
+        _rare_txt = ('—' if _row['rare_mae_s'] is None
+                     else f"{_row['rare_mae_s']:.2f} ±{_row['rare_sd_s']:.2f}s")
+        print(f"  {_label:<44} {_row['overall_mae_s']:>11.2f} "
+              f"±{_row['overall_sd_s']:<5.2f} {_rare_txt:>22}")
+    rule('-')
+
+    gate4b = {
+        'arms': _arm_rows,
+        'seeds': _SEEDS,
+        'rare_fields': [{'name': r['name'], 'presence_rows': r['presence_rows'],
+                         'presence_pct': r['presence_pct']}
+                        for r in _rare_rows_all],
+        'rare_stratum_rows': int(_any_rare.sum()),
+    }
+
+    # --- what the arms actually said ---------------------------------------
+    # Read on the RARE stratum, and only when the gap clears the seed spread.
+    # A difference inside the noise is not a small finding, it is no finding,
+    # and saying so is the whole reason the seeds are run.
+    _incumbent = _arm_rows[0]
+    _best = min((r for r in _arm_rows[1:] if r['rare_mae_s'] is not None),
+                key=lambda r: r['rare_mae_s'], default=None)
+    if _best and _incumbent['rare_mae_s'] is not None:
+        _gain = _incumbent['rare_mae_s'] - _best['rare_mae_s']
+        _noise = max(_incumbent['rare_sd_s'], _best['rare_sd_s'])
+        _overall_gain = _incumbent['overall_mae_s'] - _best['overall_mae_s']
+        # "Strongest ALTERNATIVE", not "best arm" — when every alternative is
+        # worse than the incumbent, calling the least-bad one "best" reads as an
+        # endorsement of a change the numbers do not support.
+        _direction = 'better' if _gain > 0 else 'worse'
+        print(f"\n  On the rare rows, the strongest alternative to the incumbent "
+              f"is\n  {_best['label']!r}:\n"
+              f"    {_incumbent['rare_mae_s']:.2f}s -> {_best['rare_mae_s']:.2f}s "
+              f"— {abs(_gain):.2f}s {_direction}, against a seed spread of "
+              f"±{_noise:.2f}s.")
+        print(f"    The same change moves the OVERALL number by "
+              f"{_overall_gain:+.2f}s — which is why\n    the overall column "
+              f"was never going to settle this either way.")
+        if _gain > 2 * _noise:
+            gate4b['verdict'] = 'rare fields help'
+            gate4b['verdict_md'] = (
+                f"**The rare fields help.** On the {int(_any_rare.sum()):,} rows "
+                f"that carry one, {_best['label']!r} scores "
+                f"{_best['rare_mae_s']:.2f}s against the incumbent's "
+                f"{_incumbent['rare_mae_s']:.2f}s — a {_gain:.2f}s gain against a "
+                f"±{_noise:.2f}s seed spread. Görtler was right that the "
+                f"exclusion was costing something, and the cost lands on exactly "
+                f"the rows he said it would.")
+            print(f"\n  → REAL. The gain on the rare rows is more than twice the "
+                  f"seed spread.\n    Görtler was right that the exclusion was "
+                  f"costing something, and the cost is\n    on exactly the rows "
+                  f"he said it would be.")
+        elif _gain < -2 * _noise:
+            gate4b['verdict'] = 'rare fields hurt'
+            gate4b['verdict_md'] = (
+                f"**Including the rare fields hurts, on the rare rows "
+                f"themselves.** The best alternative scores "
+                f"{_best['rare_mae_s']:.2f}s against the incumbent's "
+                f"{_incumbent['rare_mae_s']:.2f}s ({abs(_gain):.2f}s worse, "
+                f"±{_noise:.2f}s spread). This is a real answer to the question "
+                f"rather than the blind one, and it supports keeping the floor.")
+            print(f"\n  → INCLUDING THEM HURTS, and it hurts on the rare rows "
+                  f"themselves — not\n    just in aggregate. That is a real "
+                  f"answer to the question rather than the\n    blind one, and "
+                  f"it argues for keeping the floor.")
+        else:
+            gate4b['verdict'] = 'inside the noise'
+            gate4b['verdict_md'] = (
+                f"**Inside the noise.** On {int(_any_rare.sum()):,} rare rows the "
+                f"arms differ by {abs(_gain):.2f}s against a ±{_noise:.2f}s seed "
+                f"spread, so this corpus cannot separate them. That is not a "
+                f"small effect — it is no measurable effect, and it does not "
+                f"support either default. Ten serial numbers are not enough to "
+                f"settle the question; more scanners are, and that is the "
+                f"actionable conclusion.")
+            print(f"\n  → INSIDE THE NOISE. On {int(_any_rare.sum()):,} rare "
+                  f"rows this corpus cannot separate\n    the arms. That is not "
+                  f"a small effect, it is no measurable effect, and the\n    "
+                  f"honest report is that 10 serial numbers are not enough to "
+                  f"settle it —\n    which is an argument for more data, not "
+                  f"for either default.")
+
+REPORT['gates']['threshold_arms'] = gate4b
+
+# COMMAND ----------
+
 # --- the 1% cases: one model, errors partitioned by body group -------------
 # Fitting per group would train ten small models and measure their smallness.
 # One model, held out once, errors split afterwards, is the thing that answers
@@ -635,7 +1040,7 @@ for _r in sorted(set(_held_regions.tolist())):
 per_region.sort(key=lambda r: r['rows'])
 
 rule()
-print(" GATE 4b — PER BODY GROUP (the extraordinary 1%)")
+print(" GATE 4c — PER BODY GROUP (the extraordinary 1%)")
 rule()
 print(f"\n  {'body region':<12} {'rows':>7} {'share':>7} {'MAE':>8}   "
       f"rarest first")
@@ -647,6 +1052,57 @@ for _r in per_region:
 rule('-')
 print("  A single overall MAE cannot see these. The goal is the rare rows, and "
       "the\n  rare rows are the top of this table.")
+
+# --- PER SEQUENCE TYPE — Görtler's action item #1, 2026-08-10 --------------
+# He asked for the improvement "specifically for TSE" rather than an overall
+# number, for the same reason the rare-row stratum exists: roughly 4-5 sequence
+# types dominate the corpus, so a pooled MAE is mostly a statement about those
+# few and says nothing about how the model behaves on the rest.
+#
+# It also feeds his §3.3 argument. Per-sequence models are only worth building
+# if the pooled model is actually WORSE on the minority families — this table is
+# what decides that, and it should be read before anybody restructures training.
+_held_types = np.array(_seq_type_names)[score_rows][~_is_train]
+per_seq_type = stratified_mae(_y[~_is_train], _pred, np.ones(_err.size, dtype=bool),
+                              _held_types)
+_pooled_mae = float(_err.mean())
+
+rule()
+print(" GATE 4d — PER SEQUENCE TYPE (Görtler's TSE question)")
+rule()
+print(f"\n  {'sequence type':<14} {'rows':>7} {'share':>7} {'MAE':>8} "
+      f"{'vs pooled':>10}   dominant families first")
+rule('-')
+for _r in per_seq_type:
+    _delta = _r['mae_s'] - _pooled_mae
+    _flag = '  <-- thin' if _r['rows'] < 100 else ''
+    print(f"  {str(_r['stratum']):<14} {_r['rows']:>7,} "
+          f"{100.0 * _r['rows'] / max(1, _err.size):>6.1f}% "
+          f"{_r['mae_s']:>7.1f}s {_delta:>+9.1f}s{_flag}")
+rule('-')
+
+_dominant = [r for r in per_seq_type if r['rows'] >= 0.05 * _err.size]
+_minority = [r for r in per_seq_type
+             if 100 <= r['rows'] < 0.05 * _err.size]
+if _dominant and _minority:
+    _dom_mae = float(np.mean([r['mae_s'] for r in _dominant]))
+    _min_mae = float(np.mean([r['mae_s'] for r in _minority]))
+    print(f"\n  {len(_dominant)} dominant type(s) average {_dom_mae:.1f}s; "
+          f"{len(_minority)} minority type(s)\n  average {_min_mae:.1f}s "
+          f"({_min_mae - _dom_mae:+.1f}s).")
+    if _min_mae - _dom_mae > 2.0:
+        print(f"    → the pooled model IS worse on the minority families, which "
+              f"is the\n      precondition for Görtler's per-sequence-model "
+              f"proposal (§3.3). Worth\n      pricing a per-family split before "
+              f"adding more parameters.")
+    else:
+        print(f"    → the pooled model is NOT materially worse on the minority "
+              f"families.\n      Görtler asked whether it already captures the "
+              f"sequence-parameter\n      association implicitly; on this "
+              f"corpus the answer looks like yes, and\n      per-sequence "
+              f"models would be solving a problem the data does not show.")
+
+gate4['per_sequence_type'] = per_seq_type
 
 _q = [50, 75, 90, 95, 99]
 _quantiles = {f'p{n}': round(float(np.percentile(_err, n)), 1) for n in _q}
@@ -924,13 +1380,102 @@ _md += [
     "",
     "## Why not more",
     "",
-    f"{gate3['excluded']} fields are held out, in three categories, and none of "
-    f"them is feature selection — they are the difference between a real number "
-    f"and a fake one:",
+    f"{gate3['excluded']} fields are held out, and lumping them into one number "
+    f"is what made the 2026-08-10 discussion circular. They are **three separate "
+    f"decisions**, and only two of them are open to debate:",
     "",
 ]
-for r in sorted(excluded, key=lambda r: r['name']):
-    _md.append(f"- **`{r['name']}`** — {r['reason']}")
+_MD_CATEGORY_BLURB = [
+    ('rare', "**Too rare** — a threshold, and the one Görtler challenged. This "
+             "is settleable by a sweep, and the arms below are that sweep."),
+    ('non_numeric', "**Not numeric** — these need an embedding, not a lower "
+                    "floor. Real work, not a config change."),
+    ('denied', "**Denied** — target-equivalent, an identity, or derived by the "
+               "scanner from the timing it was about to run. `ST` *is* the "
+               "answer; including it is not a threshold question."),
+]
+for _category, _blurb in _MD_CATEGORY_BLURB:
+    _rows = [r for r in excluded if r['category'] == _category]
+    if not _rows:
+        continue
+    _md += ["", f"### {_blurb}", ""]
+    for r in sorted(_rows, key=lambda r: -r['presence_rows']):
+        _md.append(f"- **`{r['name']}`** — {r['presence_rows']:,} rows "
+                   f"({r['presence_pct']:.3f}%) — {r['reason']}")
+
+if gate3.get('undecidable'):
+    _md += [
+        "",
+        f"**{len(gate3['undecidable'])} of the rare fields appear on fewer than "
+        f"{_UNDECIDABLE_ROWS} rows of this corpus** "
+        f"(`{'`, `'.join(gate3['undecidable'][:12])}`). No experiment on "
+        f"{len(sequences):,} sequences decides whether these help — not this one "
+        f"either. Görtler's \"40,000 times\" is fleet-wide; this corpus is 10 "
+        f"serial numbers. Any number quoted about these fields is a statement "
+        f"about sampling noise, and the honest answer is that they need more "
+        f"scanners rather than a different default.",
+    ]
+
+# THE ARMS. Reported here rather than buried in the JSON, because the request
+# that produced them was "test this before we assume your conclusion is right"
+# and an answer that lives only in a log does not do that.
+if gate4b.get('arms'):
+    _md += [
+        "",
+        "### The <1% question, measured properly",
+        "",
+        f"The previous case for the 1% floor was that aggregate MSE rose when "
+        f"sub-1% fields were included. **That measurement cannot resolve the "
+        f"claim.** A field that helps only the rows it appears on — "
+        f"{gate4b['rare_stratum_rows']:,} of {int(score_rows.sum()):,} here — "
+        f"moves aggregate MAE by hundredths of a second, well inside seed "
+        f"spread. So each arm below is scored on the rare rows specifically, "
+        f"over {len(gate4b['seeds'])} seeds:",
+        "",
+        "| arm | features | overall MAE | MAE on rare rows |",
+        "|---|---:|---:|---:|",
+    ]
+    for _a in gate4b['arms']:
+        _rare_txt = ('—' if _a['rare_mae_s'] is None
+                     else f"{_a['rare_mae_s']:.2f} ±{_a['rare_sd_s']:.2f}s")
+        _md.append(f"| {_a['label']} | {_a['n_features']} | "
+                   f"{_a['overall_mae_s']:.2f} ±{_a['overall_sd_s']:.2f}s | "
+                   f"{_rare_txt} |")
+    if gate4b.get('verdict_md'):
+        _md += ["", gate4b['verdict_md']]
+
+if gate3b.get('fields'):
+    _rare_informative_md = [r for r in gate3b['fields']
+                            if r['category'] == 'rare' and r['verdict'] == 'informative']
+    _rare_redundant_md = [r for r in gate3b['fields']
+                          if r['category'] == 'rare' and r['verdict'] == 'redundant']
+    _md += ["", "### Are the rare fields sequence-family indicators?", ""]
+    if _rare_informative_md:
+        _md.append(
+            f"Görtler's mechanism — \"PDM only occurs in heart sequences, so it "
+            f"might help the model identify heart sequences\" — **holds for "
+            f"{len(_rare_informative_md)} field(s)**. Each is confined to one "
+            f"sequence family while covering only part of it, which is a "
+            f"distinction `sequence_type` cannot express: "
+            + ", ".join(f"`{r['stable_name']}` ({r['top_share']:.0%} in "
+                        f"{r['top_category']}, covering "
+                        f"{r['coverage_in_top']:.0%} of it)"
+                        for r in _rare_informative_md[:8]) + ".")
+    else:
+        _md.append(
+            "Görtler's mechanism does not hold on this corpus: no rare field is "
+            "both confined to a sequence family and a refinement of it.")
+    if _rare_redundant_md:
+        _md.append("")
+        _md.append(
+            f"{len(_rare_redundant_md)} rare field(s) ARE family-confined but "
+            f"cover essentially the whole family, so `sequence_type` already "
+            f"tells the model what their presence flag would. That argues "
+            f"against adding them, and it is the cheapest way this question "
+            f"could have been answered: "
+            + ", ".join(f"`{r['stable_name']}`" for r in _rare_redundant_md[:8])
+            + ".")
+
 if 'planner_denylist_cost_s' in REPORT:
     _md += [
         "",

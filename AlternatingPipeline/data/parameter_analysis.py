@@ -95,6 +95,134 @@ def numeric_field_inventory(sequences, source='sut_raw'):
     return sorted(rows, key=lambda r: (-r['presence_pct'], r['key']))
 
 
+def _normalised_mutual_information(labels_a, labels_b):
+    """NMI in [0, 1]: 2*I(A;B) / (H(A) + H(B)), 0 when either side is constant.
+
+    Symmetric, so it says "how tied together are these two labellings" without
+    committing to a direction. The DIRECTIONAL questions are answered by
+    top_share and coverage_in_top in presence_concentration below, and both are
+    needed — NMI alone cannot separate "marks a family" from "marks a subset of
+    a family".
+    """
+    labels_a = np.asarray(labels_a)
+    labels_b = np.asarray(labels_b)
+    total = labels_a.size
+    if total == 0:
+        return 0.0
+
+    values_a, index_a = np.unique(labels_a, return_inverse=True)
+    values_b, index_b = np.unique(labels_b, return_inverse=True)
+    if values_a.size < 2 or values_b.size < 2:
+        # A constant labelling carries no information about anything. Returning
+        # 0 rather than NaN keeps a field that is present on every row (or none)
+        # from poisoning a sort.
+        return 0.0
+
+    joint = np.zeros((values_a.size, values_b.size), dtype=float)
+    np.add.at(joint, (index_a, index_b), 1.0)
+    joint /= total
+
+    marginal_a = joint.sum(axis=1, keepdims=True)
+    marginal_b = joint.sum(axis=0, keepdims=True)
+
+    with np.errstate(divide='ignore', invalid='ignore'):
+        terms = joint * np.log(joint / (marginal_a * marginal_b))
+    mutual = float(np.nansum(np.where(joint > 0, terms, 0.0)))
+
+    def entropy(marginal):
+        flat = marginal.ravel()
+        flat = flat[flat > 0]
+        return float(-np.sum(flat * np.log(flat)))
+
+    denominator = entropy(marginal_a) + entropy(marginal_b)
+    if denominator <= 0:
+        return 0.0
+    return max(0.0, min(1.0, 2.0 * mutual / denominator))
+
+
+# A field whose presence covers this much of its top category is telling the
+# model something `sequence_type` already told it. Not 1.0, because a handful of
+# mislabelled or aborted rows should not rescue a redundant field.
+_REDUNDANT_COVERAGE = 0.95
+# Below this, presence is not tied to a family at all and Görtler's mechanism
+# does not hold for the field.
+_CONCENTRATED_SHARE = 0.90
+
+
+def presence_concentration(sequences, field_names, category_key='sequence_type',
+                           source='sut_raw'):
+    """Is a parameter's PRESENCE tied to one sequence family? — Görtler, 2026-08-10.
+
+    He argued rare parameters earn their place as INDICATORS: "PDM only occurs in
+    heart sequences so this might help the model identify heart sequences." That
+    is a claim about where a field appears, not what it measures, and it is
+    checkable without training anything — which is the point, because the
+    alternative is spending GPU hours on an arm whose premise is unverified.
+
+    Two conditional probabilities, in opposite directions, and both are needed:
+
+      top_share        P(category = top | field present) — how confined the
+                       field is. This is the quantity Görtler's claim is about.
+      coverage_in_top  P(field present | category = top) — whether the field
+                       covers its family or marks a SUBSET of it.
+
+    Confusing them is the trap. A field with top_share 1.0 looks like a perfect
+    indicator either way, but if coverage_in_top is also ~1.0 then presence and
+    `sequence_type` are the same fact and the flag is REDUNDANT — the model
+    already has it. The interesting field is the one confined to a family while
+    covering only part of it: that is a refinement `sequence_type` cannot
+    express.
+
+    Returns one dict per field, ordered most-concentrated first, each carrying a
+    `verdict` of 'absent', 'diffuse', 'redundant' or 'informative'.
+    """
+    if not sequences:
+        return []
+
+    categories = np.array(
+        [str(seq.get(category_key, 'unknown')) for seq in sequences], dtype=object)
+
+    rows = []
+    for name in field_names:
+        present = np.array(
+            [name in (seq.get(source) or {}) for seq in sequences], dtype=bool)
+        presence_rows = int(present.sum())
+
+        row = {
+            'name': name,
+            'presence_rows': presence_rows,
+            'presence_pct': 100.0 * presence_rows / len(sequences),
+            'top_category': None,
+            'top_share': 0.0,
+            'coverage_in_top': 0.0,
+            'nmi': 0.0,
+            'verdict': 'absent',
+        }
+        if presence_rows == 0:
+            rows.append(row)
+            continue
+
+        values, counts = np.unique(categories[present], return_counts=True)
+        top = int(np.argmax(counts))
+        top_category = values[top]
+        in_top = categories == top_category
+
+        row['top_category'] = top_category
+        row['top_share'] = float(counts[top]) / presence_rows
+        row['coverage_in_top'] = float((present & in_top).sum()) / max(1, int(in_top.sum()))
+        row['nmi'] = _normalised_mutual_information(present, categories)
+
+        if row['top_share'] < _CONCENTRATED_SHARE:
+            row['verdict'] = 'diffuse'
+        elif row['coverage_in_top'] >= _REDUNDANT_COVERAGE:
+            row['verdict'] = 'redundant'
+        else:
+            row['verdict'] = 'informative'
+        rows.append(row)
+
+    return sorted(rows, key=lambda r: (-r['top_share'], -r['nmi'], r['name']))
+
+
 def numeric_matrix(sequences, field_names, source='sut_raw'):
     """Stack the named SUT keys into a float matrix, missing entries as NaN.
 
@@ -214,6 +342,108 @@ def heldout_regressor_score(features, values, holdout_frac=0.2, seed=0,
                "so there is nothing to transfer to" if groups is not None else "")
         )
     return float(np.mean(r2s)), float(np.mean(maes))
+
+
+def heldout_predictions(features, values, holdout_frac=0.2, seed=0, repeats=3,
+                        max_iter=200, groups=None):
+    """Held-out prediction PER ROW, so a stratum can be scored without a refit.
+
+    THE MEASUREMENT THE 2026-08-10 REVIEW WAS MISSING. The case against Görtler's
+    sub-1% parameters was that aggregate MSE rose when they were included — but a
+    field helping only the ~1% of rows it appears on moves aggregate MAE by a
+    fraction of a second, inside seed noise. Aggregate MAE is structurally
+    incapable of detecting the effect that was being argued about, so the result
+    did not disprove the mechanism; it could not see it.
+
+    `heldout_regressor_score` averages over repeats before returning, so it
+    cannot answer "how did the model do on the rows where PDM was present".
+    This runs the SAME splits and the SAME estimator and keeps the residuals,
+    which is what makes the per-stratum numbers in 03b comparable to the
+    aggregate ones printed next to them.
+
+    Every prediction is out-of-sample: a row is only ever predicted by a model
+    fitted without it, and predictions are averaged across the repeats that held
+    it out. Rows never held out come back NaN with a count of 0 rather than an
+    in-sample prediction — a distinction that matters most on the rare strata,
+    which are small enough to be in-sample on most repeats.
+
+    Returns {'predictions', 'held_out_count', 'repeats_used'}.
+    """
+    from sklearn.ensemble import HistGradientBoostingRegressor
+
+    features = np.asarray(features, dtype=float)
+    values = np.asarray(values, dtype=float)
+    if features.shape[0] != values.shape[0]:
+        raise ValueError("features and values must be the same length")
+    if features.shape[0] < 2:
+        raise ValueError("need at least 2 rows to hold any out")
+
+    rng = np.random.default_rng(seed)
+    totals = np.zeros(values.shape[0], dtype=float)
+    counts = np.zeros(values.shape[0], dtype=float)
+    repeats_used = 0
+
+    for repeat in range(repeats):
+        is_train = holdout_mask(features.shape[0], holdout_frac, rng, groups)
+        if not is_train.any() or is_train.all():
+            continue
+        model = HistGradientBoostingRegressor(
+            max_iter=max_iter, random_state=seed + repeat,
+        )
+        model.fit(features[is_train], values[is_train])
+        held = ~is_train
+        totals[held] += model.predict(features[held])
+        counts[held] += 1.0
+        repeats_used += 1
+
+    if not repeats_used:
+        raise ValueError(
+            "no usable train/test split was produced"
+            + (" — with `groups`, this means one group holds nearly every row, "
+               "so there is nothing to transfer to" if groups is not None else "")
+        )
+
+    with np.errstate(invalid='ignore', divide='ignore'):
+        predictions = np.where(counts > 0, totals / counts, MISSING)
+    return {'predictions': predictions, 'held_out_count': counts,
+            'repeats_used': repeats_used}
+
+
+def stratified_mae(values, predictions, covered, labels):
+    """MAE within each stratum, from one set of held-out predictions.
+
+    The companion to `heldout_predictions`, and the reason both exist: a
+    parameter that only appears on cardiac sequences can only show its worth on
+    cardiac rows, so the number that settles the argument is per-stratum, not
+    overall.
+
+    Uncovered rows (never held out) are EXCLUDED rather than scored — a NaN
+    residual silently treated as zero would make the least-measured stratum look
+    like the best-predicted one. A stratum with no covered rows is still
+    returned, with rows=0 and a NaN MAE, because "the split never tested this
+    group" is itself a finding and silence would read as "no problem here".
+
+    `labels` can be any per-row array — sequence type, body group, or a boolean
+    presence mask. Returns one dict per stratum, largest first.
+    """
+    values = np.asarray(values, dtype=float)
+    predictions = np.asarray(predictions, dtype=float)
+    covered = np.asarray(covered, dtype=bool)
+    labels = np.asarray(labels)
+
+    rows = []
+    for label in np.unique(labels):
+        in_stratum = labels == label
+        scored = in_stratum & covered & np.isfinite(predictions)
+        n = int(scored.sum())
+        rows.append({
+            'stratum': label.item() if hasattr(label, 'item') else label,
+            'rows': n,
+            'rows_total': int(in_stratum.sum()),
+            'mae_s': (float(np.mean(np.abs(values[scored] - predictions[scored])))
+                      if n else MISSING),
+        })
+    return sorted(rows, key=lambda r: -r['rows'])
 
 
 def permutation_importance_mae(features, values, field_names=None,

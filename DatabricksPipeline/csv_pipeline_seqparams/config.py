@@ -35,6 +35,7 @@ samples), so TRIGGER_MODE_VOCAB is unused for now and every row defaults to
 import json
 import math
 import os
+from typing import NamedTuple
 
 # ============================================================================
 # PARAM_SET — WHICH PARAMETERS GO INTO THE MODEL. The one switch.
@@ -690,6 +691,75 @@ SEQPARAM_MIN_PRESENCE_PCT = float(os.environ.get('SEQPARAM_MIN_PRESENCE_PCT', '1
 # not in a scaled numeric column. Same threshold 03b-03f used.
 SEQPARAM_MIN_NUMERIC_PCT = float(os.environ.get('SEQPARAM_MIN_NUMERIC_PCT', '90.0'))
 
+# ----------------------------------------------------------------------------
+# GÖRTLER'S <1% CHALLENGE, 2026-08-10 — the two knobs it added.
+#
+# He rejected the percentage floor with a concrete mechanism: PDM occurs almost
+# only on cardiac sequences, so despite being vanishingly rare it may be a
+# near-perfect INDICATOR of that family; and rare parameters belong to NEW
+# sequence types whose share grows, so a static ratio ages badly.
+#
+# The evidence brought against him — "aggregate MSE rises when sub-1% fields are
+# included" — cannot detect that claim. A field helping only the ~1% of rows it
+# appears on moves aggregate MAE by a fraction of a second, inside seed noise.
+# So both knobs below exist to be SWEPT, and the arms are scored per stratum in
+# 03b. Neither default changes the incumbent field list.
+# ----------------------------------------------------------------------------
+
+# THE COUNT ESCAPE HATCH. Learnability tracks the absolute number of rows a
+# field appears on; the percentage floor tracks a ratio that stays flat as the
+# corpus grows. So a percentage-only rule gets HARDER to justify exactly as the
+# data gets better — 40,000 occurrences is eminently learnable whatever fraction
+# of the fleet that is.
+#
+# DISABLED BY DEFAULT (0 = never fires), and that is a deliberate choice rather
+# than timidity. A hatch that is ON by default silently changes the shipped
+# feature set: at 10 serials / ~51k sequences the 1% floor is ~510 rows, so a
+# 500-row hatch would admit every field in the 0.98-1.0% band that the
+# percentage floor rejects. Small, but it moves the INCUMBENT — and an arm sweep
+# whose baseline moved is measuring two things at once.
+#
+# So the hatch ships as a knob the sweep turns on, not as a new default. Set it
+# to a learnability floor (500 is a reasonable start) to score it as an arm, and
+# promote it to a default once the corpus is large enough that the decision is
+# backed by a measurement rather than by this comment.
+SEQPARAM_MIN_PRESENCE_ROWS = float(
+    os.environ.get('SEQPARAM_MIN_PRESENCE_ROWS', '0'))
+
+# WHAT HAPPENS TO A FIELD BELOW BOTH FLOORS.
+#   'drop'          — the incumbent. No column at all.
+#   'present_only'  — a `<name>__present` flag, and NO value column.
+#
+# 'present_only' is the arm nobody proposed in the meeting, and it is the one
+# that follows from what Görtler actually said. "PDM only occurs in heart
+# sequences so this might help the model IDENTIFY heart sequences" is a claim
+# about a field's PRESENCE, not its VALUE. A 0/1 indicator is learnable from far
+# fewer rows than a continuous slope, so dropping the field wholesale discards
+# the cheap, robust half to avoid the thin, noisy half.
+SEQPARAM_RARE_MODE = os.environ.get('SEQPARAM_RARE_MODE', 'drop').strip().lower()
+SEQPARAM_RARE_MODES = ('drop', 'present_only')
+if SEQPARAM_RARE_MODE not in SEQPARAM_RARE_MODES:
+    raise ValueError(
+        f"SEQPARAM_RARE_MODE={SEQPARAM_RARE_MODE!r} is not a known rare-field "
+        f"mode. Choose one of {list(SEQPARAM_RARE_MODES)}."
+    )
+
+# WHAT STEP 03 WRITES, as opposed to what this config SELECTS.
+#
+# These were one number until 2026-08-10, and that made every threshold arm cost
+# a Spark rebuild: 03_build_preprocessed_pkl.py applies the floor when deciding
+# which COLUMNS TO WRITE, so a pkl built at 1% simply has no column for a 0.3%
+# field and no config setting can conjure one. Writing at 0.0 and selecting at
+# the arm's floor means one rebuild serves every arm — the same principle
+# already documented above SEQPARAM_ALL_CANDIDATES.
+#
+# "Write everything" means every THIN field. It does NOT relax the denylists or
+# the numeric floor: a denied field sitting in the pkl is one config typo away
+# from being trained on, and that is not a risk worth taking for a column no arm
+# is allowed to select.
+SEQPARAM_WRITE_MIN_PRESENCE_PCT = float(
+    os.environ.get('SEQPARAM_WRITE_MIN_PRESENCE_PCT', '0.0'))
+
 # The band a scaled feature has to land in. Above it, the feature erases the
 # categorical conditioning through LayerNorm; below it, the feature is invisible
 # to the model. Neither raises anything at training time, which is why it is
@@ -793,6 +863,13 @@ def _load_divisor_table(path):
             # wins — see _missing_default_for below.
             'missing_default': float(spec.get('missing_default', 0.0)),
             'presence_pct': float(spec.get('presence_pct', 0.0)),
+            # None, not 0.0, when the table predates 2026-08-10. The count
+            # escape hatch is an OR against this — defaulting a missing count to
+            # 0 would read as "definitely too few rows" and quietly work, while
+            # None makes the hatch inert on an old table, which is the honest
+            # behaviour when the count was never measured.
+            'presence_rows': (float(spec['presence_rows'])
+                              if spec.get('presence_rows') is not None else None),
             'numeric_pct': float(spec.get('numeric_pct', 100.0)),
             'p99': _p99,
             'magnitude': float(spec.get('magnitude', 0.0) or 0.0) or abs(_p99),
@@ -870,32 +947,107 @@ if SEQPARAM_DIVISOR_OVERRIDES:
               f"was {_o['was_ratio']:.1f}x)")
 
 
-def classify_seqparam_field(name, stats):
-    """Why a discovered field is or is not admissible. One rule, one place.
+class SeqparamVerdict(NamedTuple):
+    """What the admissibility rule decided, and why.
 
-    `stats` is {'presence_pct', 'numeric_pct'} for the field, under its STABLE
-    name (see seqparam_stable_name).
+    Three fields rather than the old (bool, reason) pair, because the 2026-08-10
+    review asked two different questions that a bool conflates:
 
-    Returns (admissible: bool, reason: str). The reason is not decoration — it
-    is what the human-readable half of the parameter report prints, so "how many
-    parameters are we using and why" is answered from the same code that made
-    the decision rather than from a comment that can drift away from it.
+      verdict   what the field GETS — 'full' (value column + presence flag),
+                'presence_only' (flag alone), or 'excluded'.
+      category  WHY it is not fully admitted — 'admitted', 'rare',
+                'non_numeric', or 'denied'. The parameter report groups on this,
+                which is what turns a single "45 excluded" line into the three
+                separate decisions it actually is. Only two of them are open to
+                debate; 'denied' is not.
+      reason    the sentence the human-readable report prints.
+    """
+    verdict: str
+    category: str
+    reason: str
+
+
+def _classify_seqparam_field(name, stats, min_presence_pct, rare_mode):
+    """The rule. One place, parameterised by the floor and the rare-field mode.
+
+    `stats` is {'presence_pct', 'numeric_pct', 'presence_rows'} for the field,
+    under its STABLE name (see seqparam_stable_name). `presence_rows` is
+    optional: a divisor table written before 2026-08-10 does not carry it, and
+    such a table must still classify rather than crash, so a missing count
+    simply means the count hatch cannot fire.
+
+    THE ORDER OF THE BRANCHES IS LOAD-BEARING. The denylists come first and stay
+    first: they are the leakage guards, and widening admission is exactly the
+    kind of change that quietly reopens a leak. No rare mode reaches a denied or
+    non-numeric field, because both of those are refusals about what a field IS,
+    not about how much of it we have.
     """
     if name in SUT_LEAKAGE_DENYLIST:
-        return False, 'denied: ~equal to the duration target'
+        return SeqparamVerdict('excluded', 'denied',
+                               'denied: ~equal to the duration target')
     if name in SUT_IDENTIFIER_DENYLIST:
-        return False, 'denied: an identity that cannot transfer to a new customer'
+        return SeqparamVerdict(
+            'excluded', 'denied',
+            'denied: an identity that cannot transfer to a new customer')
     if name in SUT_PLANNER_DERIVED_DENYLIST:
-        return False, 'denied: derived by the scanner from the timing it was about to run'
+        return SeqparamVerdict(
+            'excluded', 'denied',
+            'denied: derived by the scanner from the timing it was about to run')
     if stats.get('numeric_pct', 100.0) < SEQPARAM_MIN_NUMERIC_PCT:
-        return False, (f"not numeric on {stats.get('numeric_pct', 0.0):.0f}% of rows "
-                       f"— belongs in an embedding, not a scaled column")
-    if stats.get('presence_pct', 0.0) < SEQPARAM_MIN_PRESENCE_PCT:
-        return False, (f"present on only {stats.get('presence_pct', 0.0):.2f}% of rows "
-                       f"(floor {SEQPARAM_MIN_PRESENCE_PCT:.1f}%)")
+        return SeqparamVerdict(
+            'excluded', 'non_numeric',
+            f"not numeric on {stats.get('numeric_pct', 0.0):.0f}% of rows "
+            f"— belongs in an embedding, not a scaled column")
+
+    presence_pct = stats.get('presence_pct', 0.0)
+    presence_rows = stats.get('presence_rows')
+    clears_pct = presence_pct >= min_presence_pct
+    # A row floor of 0 means the hatch is off, not that every field clears it.
+    clears_rows = (SEQPARAM_MIN_PRESENCE_ROWS > 0
+                   and presence_rows is not None
+                   and presence_rows >= SEQPARAM_MIN_PRESENCE_ROWS)
+
+    if not (clears_pct or clears_rows):
+        rows = '' if presence_rows is None else f", {presence_rows:,.0f} rows"
+        thin = (f"present on only {presence_pct:.2f}% of rows{rows} "
+                f"(floors {min_presence_pct:.1f}% / "
+                f"{SEQPARAM_MIN_PRESENCE_ROWS:,.0f} rows)")
+        if rare_mode == 'present_only':
+            # The flag survives, the value does not. Georg's mechanism is about
+            # WHERE the field appears, and that costs one clean 0/1 column.
+            return SeqparamVerdict('presence_only', 'rare',
+                                   f"presence flag only: {thin}")
+        return SeqparamVerdict('excluded', 'rare', thin)
+
+    if clears_rows and not clears_pct:
+        return SeqparamVerdict(
+            'full', 'admitted',
+            f"admissible on row count: {presence_rows:,.0f} rows despite "
+            f"{presence_pct:.2f}% presence")
     if name in SEQPARAM_CANDIDATES:
-        return True, 'admissible: hand-calibrated candidate'
-    return True, 'admissible: discovered, divisor from p99'
+        return SeqparamVerdict('full', 'admitted',
+                               'admissible: hand-calibrated candidate')
+    return SeqparamVerdict('full', 'admitted',
+                           'admissible: discovered, divisor from p99')
+
+
+def classify_seqparam_field(name, stats):
+    """What the model SELECTS — the configured floor and rare mode."""
+    return _classify_seqparam_field(name, stats, SEQPARAM_MIN_PRESENCE_PCT,
+                                    SEQPARAM_RARE_MODE)
+
+
+def classify_seqparam_field_for_write(name, stats):
+    """What step 03 WRITES into the pkl — a deliberately wider net.
+
+    Separate from the selection rule so one Spark rebuild serves every threshold
+    arm. Rare fields are written in FULL (value + flag) whatever the selection
+    mode is, because a written column can always be left unselected, whereas an
+    unwritten one costs another 4-minute Spark job to recover.
+    """
+    return _classify_seqparam_field(name, stats,
+                                    SEQPARAM_WRITE_MIN_PRESENCE_PCT, 'drop')
+
 
 # Everything the discovered table offers that is admissible under all three
 # objections and clears both floors. Sorted for a stable column order — the
@@ -903,7 +1055,14 @@ def classify_seqparam_field(name, stats):
 # must not depend on dict iteration or on which run wrote the table.
 SEQPARAM_ADMISSIBLE_DISCOVERED = sorted(
     name for name, spec in SEQPARAM_DISCOVERED.items()
-    if classify_seqparam_field(name, spec)[0]
+    if classify_seqparam_field(name, spec).verdict == 'full'
+)
+
+# Rare fields kept as a bare indicator under SEQPARAM_RARE_MODE='present_only'.
+# Empty in every other mode, which is why the incumbent arm does not move.
+SEQPARAM_PRESENCE_ONLY = sorted(
+    name for name, spec in SEQPARAM_DISCOVERED.items()
+    if classify_seqparam_field(name, spec).verdict == 'presence_only'
 )
 
 # ============================================================================
@@ -1041,12 +1200,20 @@ def _missing_default_for(name):
 
 
 if SEQPARAM_USE_PRESENCE_FLAGS:
-    _selected_flags = [presence_name(n) for n in _selected_values]
+    # Rare fields under 'present_only' contribute a flag and NO value column, so
+    # their names are appended here rather than to _selected_values. That is the
+    # whole arm: keep the indicator, drop the thin measurement.
+    _selected_flags = [presence_name(n)
+                       for n in _selected_values + SEQPARAM_PRESENCE_ONLY]
     _selected_derived = sorted(SEQPARAM_DERIVED)
 else:
     # The ablation arm. Without flags the vector is exactly what it was before
     # 2026-08-07, so `luke` reproduces the historical 7-feature checkpoint and
     # gate 4 can price the flags rather than assume them.
+    #
+    # A presence-only field is nothing BUT a flag, so this arm necessarily drops
+    # it entirely — ablating the flags and keeping the rare fields would be a
+    # contradiction, not a third arm.
     _selected_flags = []
     _selected_derived = []
 
@@ -1075,9 +1242,12 @@ EXAMINATION_SEQPARAM_SCALE = [
 # every admissible field it discovers in the messages, which is how PARAM_SET=
 # 'all' has values to read on the run AFTER the one that emitted the table.
 _all_values = sorted(set(SEQPARAM_CANDIDATES) | set(SEQPARAM_ADMISSIBLE_DISCOVERED))
+# A presence-only field gets a FLAG here but no value column, mirroring what the
+# selection above does — SEQPARAM_MISSING_DEFAULTS is derived from this list, so
+# a flag missing from it would reach step 03's write pass with no default.
 SEQPARAM_ALL_CANDIDATES = (
     _all_values
-    + [presence_name(n) for n in _all_values]
+    + [presence_name(n) for n in _all_values + SEQPARAM_PRESENCE_ONLY]
     + sorted(SEQPARAM_DERIVED)
 )
 

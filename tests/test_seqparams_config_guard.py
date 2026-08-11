@@ -480,7 +480,31 @@ class StepDefinitionTests(unittest.TestCase):
         # One Spark rebuild has to serve every parameter set, or switching sets
         # costs hours instead of a training run.
         source = self._step_03_source()
-        self.assertIn('_written_names = [n for n, _ in _admitted]', source)
+        self.assertIn('_written_names = [n for n, _, _ in _admitted]', source)
+
+    def test_step_03_decides_what_to_WRITE_on_the_write_rule(self):
+        # The 2026-08-10 split. Deciding the written columns on the SELECTION
+        # rule is what made every threshold arm of Görtler's <1% question cost
+        # another Spark job: a pkl built at a 1% floor has no column for a 0.3%
+        # field, and no config setting can conjure one.
+        source = self._step_03_source()
+        self.assertIn('classify_seqparam_field_for_write(_name, _field_stats[_name])',
+                      source)
+
+    def test_step_03_records_the_absolute_row_count(self):
+        # Learnability tracks the count, not the ratio. Without this the report
+        # cannot answer "how many rows does PDM appear on" — the most basic
+        # question about the rare-parameter debate — without another Spark run.
+        source = self._step_03_source()
+        self.assertIn("'presence_rows': len(_raws)", source)
+
+    def test_step_03_persists_stats_for_EXCLUDED_fields_too(self):
+        # Until 2026-08-10 the emitted table carried {name: reason} for excluded
+        # fields and threw the stats away, so the corpus could not be asked
+        # about its own exclusions after the fact.
+        source = self._step_03_source()
+        self.assertIn("'excluded': _excluded_payload", source)
+        self.assertIn("'presence_rows': _stats['presence_rows']", source)
 
     def test_step_03_uses_the_per_name_missing_default(self):
         source = self._step_03_source()

@@ -1184,6 +1184,13 @@ for _name, _raws in _param_values.items():
     _p99 = float(np.percentile(_finite, 99)) if _finite.size else 0.0
     _field_stats[_name] = {
         'presence_pct': 100.0 * len(_raws) / _n_rows,
+        # THE ABSOLUTE COUNT, not just the ratio. Görtler's 2026-08-10 point:
+        # a field on 40,000 rows is learnable whatever fraction of the fleet
+        # that is, and a percentage floor gets harder to justify as serials are
+        # added because the ratio stays flat while the count grows. This is what
+        # SEQPARAM_MIN_PRESENCE_ROWS reads, and what the report needs to say
+        # "this corpus cannot decide" honestly rather than by implication.
+        'presence_rows': len(_raws),
         'numeric_pct': 100.0 * _finite.size / max(1, len(_raws)),
         'p01': _p01,
         'p50': float(np.percentile(_finite, 50)) if _finite.size else 0.0,
@@ -1199,15 +1206,28 @@ for _name, _raws in _param_values.items():
     }
 
 # --- 2. decide + scale -----------------------------------------------------
-# classify_seqparam_field is the ONE rule, and it lives in config.py so the
-# report prints its reasons rather than a comment that can drift from it.
+# classify_seqparam_field_for_write is the ONE rule, and it lives in config.py so
+# the report prints its reasons rather than a comment that can drift from it.
+#
+# WRITE, not SELECT, and the distinction is the whole reason a threshold sweep is
+# affordable. This pass decides which COLUMNS EXIST in the pkl; config.py decides
+# which of them a given PARAM_SET reads. Until 2026-08-10 they were one rule, so
+# a pkl built at a 1% floor simply had no column for a 0.3% field and every arm
+# of Görtler's <1% question cost another 4-minute Spark job. Writing at
+# SEQPARAM_WRITE_MIN_PRESENCE_PCT (0.0 by default) means one rebuild serves them
+# all.
+#
+# The denylists and the numeric floor are NOT relaxed by that widening — see
+# _classify_seqparam_field. A denied field in the pkl is one config typo away
+# from being trained on.
 _admitted, _excluded = [], []
 for _name in sorted(_field_stats):
-    _ok, _why = classify_seqparam_field(_name, _field_stats[_name])
-    (_admitted if _ok else _excluded).append((_name, _why))
+    _verdict = classify_seqparam_field_for_write(_name, _field_stats[_name])
+    (_admitted if _verdict.verdict == 'full' else _excluded).append(
+        (_name, _verdict.category, _verdict.reason))
 
 _divisor_table = {}
-for _name, _why in _admitted:
+for _name, _category, _why in _admitted:
     _stats = _field_stats[_name]
     _curated = _name in SEQPARAM_CANDIDATES
     # A curated divisor is preferred, but only where the corpus agrees it is
@@ -1225,6 +1245,7 @@ for _name, _why in _admitted:
         'divisor': _preferred if _in_band else suggest_divisor(_stats['magnitude']),
         'missing_default': (SEQPARAM_CANDIDATES[_name][1] if _curated else 0.0),
         'presence_pct': _stats['presence_pct'],
+        'presence_rows': _stats['presence_rows'],
         'numeric_pct': _stats['numeric_pct'],
         'p01': _stats['p01'],
         'p50': _stats['p50'],
@@ -1238,12 +1259,47 @@ for _name, _why in _admitted:
 
 print(f"\n  {len(_field_stats)} distinct parameter fields in the messages")
 print(f"  {len(_admitted)} admissible, {len(_excluded)} excluded")
-if _excluded:
-    print("\n  EXCLUDED — every one with its reason, because 'why are we not "
-          "using\n  this parameter' is the question this pipeline keeps being "
-          "asked:")
-    for _name, _why in _excluded:
-        print(f"    {_name:<16} {_why}")
+
+# SPLIT BY CATEGORY, because "45 excluded" is three different decisions and only
+# two of them are open to debate. The 2026-08-10 review spent most of its time on
+# a number that lumped them together:
+#   rare         — a THRESHOLD. This is the one Görtler challenged, and the one
+#                  a sweep can settle.
+#   non_numeric  — needs an embedding, not a threshold change. Real work, named
+#                  as a follow-up rather than silently counted as "excluded".
+#   denied       — ST is the target. NOT up for debate at any setting.
+_BY_CATEGORY = {
+    'rare': ("TOO RARE — the threshold question. Row counts included because "
+             "learnability\n  tracks the count, not the ratio:"),
+    'non_numeric': ("NON-NUMERIC — these need an embedding (bucket 3), not a "
+                    "lower floor:"),
+    'denied': ("DENIED — target-equivalent, identity, or planner-derived. Not "
+               "a threshold\n  question and not up for debate at any setting:"),
+}
+for _category, _heading in _BY_CATEGORY.items():
+    _rows = [(n, w) for n, c, w in _excluded if c == _category]
+    if not _rows:
+        continue
+    print(f"\n  {_heading}")
+    for _name, _why in _rows:
+        _rows_seen = _field_stats[_name]['presence_rows']
+        print(f"    {_name:<16} {_rows_seen:>7,} rows   {_why}")
+
+# The honest boundary. At ~51k sequences a 0.1% field is ~51 rows and a 0.01%
+# field is ~5 — Görtler's "40,000 times" is fleet-wide, not corpus-wide. Saying
+# which excluded fields this corpus simply cannot decide about is more useful
+# than a number that implies it did.
+_UNDECIDABLE_ROWS = 30
+_undecidable = [(n, _field_stats[n]['presence_rows']) for n, c, _ in _excluded
+                if c == 'rare' and _field_stats[n]['presence_rows'] < _UNDECIDABLE_ROWS]
+if _undecidable:
+    print(f"\n  ⚠ {len(_undecidable)} rare field(s) appear on fewer than "
+          f"{_UNDECIDABLE_ROWS} rows of this corpus.\n    No experiment on 10 "
+          f"serial numbers can decide whether these help — not this one\n    "
+          f"either. They need more serial numbers, and the report should say "
+          f"so rather\n    than quote a number about them:")
+    for _name, _rows_seen in sorted(_undecidable, key=lambda r: r[1]):
+        print(f"       {_name:<16} {_rows_seen:>5,} rows")
 
 # --- 3. write --------------------------------------------------------------
 # Every admissible field gets a value column and a presence column. Writing the
@@ -1251,7 +1307,7 @@ if _excluded:
 # set switch cost a training run instead of another Spark job — and it is what
 # lets PARAM_SET='all' resolve against THIS build rather than needing a second
 # one after the divisor table appears.
-_written_names = [n for n, _ in _admitted]
+_written_names = [n for n, _, _ in _admitted]
 _defaults = {n: _divisor_table[n]['missing_default'] for n in _written_names}
 
 for _s in examination_sequences:
@@ -1286,14 +1342,39 @@ _fingerprint = hashlib.sha256(
                sort_keys=True).encode()
 ).hexdigest()[:16]
 
+# EXCLUDED FIELDS GET THEIR FULL STATS, not just a reason string. Until
+# 2026-08-10 this was `{name: reason}`, so the single most basic question about
+# Görtler's challenge — "how many rows does PDM actually appear on?" — could not
+# be answered without another Spark run. Everything here is already computed in
+# the discovery pass above; it was simply being thrown away.
+_excluded_payload = {}
+for _name, _category, _why in _excluded:
+    _stats = _field_stats[_name]
+    _excluded_payload[_name] = {
+        'category': _category,
+        'reason': _why,
+        'presence_pct': _stats['presence_pct'],
+        'presence_rows': _stats['presence_rows'],
+        'numeric_pct': _stats['numeric_pct'],
+        'p01': _stats['p01'],
+        'p50': _stats['p50'],
+        'p99': _stats['p99'],
+        'magnitude': _stats['magnitude'],
+        'distinct': _stats['distinct'],
+    }
+
 _divisor_payload = {
     'fingerprint': _fingerprint,
     'generated': datetime.now().isoformat(timespec='seconds'),
     'source_pkl': PKL_OUTPUT,
     'source_rows': len(examination_sequences),
+    # BOTH floors, because they are now different numbers and a table that does
+    # not say which one it was written under cannot be compared with another.
+    'write_min_presence_pct': SEQPARAM_WRITE_MIN_PRESENCE_PCT,
     'min_presence_pct': SEQPARAM_MIN_PRESENCE_PCT,
+    'min_presence_rows': SEQPARAM_MIN_PRESENCE_ROWS,
     'min_numeric_pct': SEQPARAM_MIN_NUMERIC_PCT,
-    'excluded': {n: why for n, why in _excluded},
+    'excluded': _excluded_payload,
     'fields': _divisor_table,
 }
 with open(SEQPARAM_DIVISOR_TABLE, 'w') as _f:
