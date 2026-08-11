@@ -109,7 +109,12 @@ class VerdictShapeTests(unittest.TestCase):
         # The human half of the parameter report prints this. "Why are we not
         # using this parameter" is the question this pipeline keeps being asked,
         # and it must be answered by the code that made the decision.
-        verdict = self.config.classify_seqparam_field('PDM', _stats(0.01, 5))
+        #
+        # Floor set explicitly: the shipped floor is 0.0 since 2026-08-11, so
+        # nothing is rare at the default and there would be no exclusion reason
+        # to inspect.
+        config = _config_with(SEQPARAM_MIN_PRESENCE_PCT=1.0)
+        verdict = config.classify_seqparam_field('PDM', _stats(0.01, 5))
         self.assertTrue(verdict.reason)
         self.assertIn('0.01', verdict.reason)
 
@@ -181,6 +186,7 @@ class PresenceOnlyTests(unittest.TestCase):
         # shipped default — both would be flags, which is correct but would not
         # test the distinction.
         config, _ = _config_with_table(PARAM_SET='all',
+                                       SEQPARAM_MIN_PRESENCE_PCT=1.0,
                                        SEQPARAM_RARE_MODE='present_only',
                                        SEQPARAM_MIN_PRESENCE_ROWS=500)
         self.assertEqual(config.SEQPARAM_PRESENCE_ONLY, ['PDM'])
@@ -188,9 +194,10 @@ class PresenceOnlyTests(unittest.TestCase):
         self.assertNotIn('PDM', config.EXAMINATION_SEQPARAM_FEATURES)
 
     def test_with_the_hatch_off_every_rare_field_becomes_a_flag(self):
-        # The shipped default. Row count cannot rescue a field into a value
-        # column unless somebody turns the hatch on deliberately.
+        # Row count cannot rescue a field into a value column unless somebody
+        # turns the hatch on deliberately.
         config, _ = _config_with_table(PARAM_SET='all',
+                                       SEQPARAM_MIN_PRESENCE_PCT=1.0,
                                        SEQPARAM_RARE_MODE='present_only')
         self.assertEqual(config.SEQPARAM_PRESENCE_ONLY,
                          ['PDM', 'RARE_BUT_MANY'])
@@ -218,7 +225,9 @@ class PresenceOnlyTests(unittest.TestCase):
                 self.assertEqual(config.SEQPARAM_MISSING_DEFAULTS[flag], 0.0)
 
     def test_presence_only_is_empty_when_the_mode_is_off(self):
-        config, _ = _config_with_table(PARAM_SET='all', SEQPARAM_RARE_MODE='drop')
+        config, _ = _config_with_table(PARAM_SET='all',
+                                       SEQPARAM_MIN_PRESENCE_PCT=1.0,
+                                       SEQPARAM_RARE_MODE='drop')
         self.assertEqual(config.SEQPARAM_PRESENCE_ONLY, [])
         self.assertNotIn('PDM__present', config.EXAMINATION_SEQPARAM_FEATURES)
 
@@ -227,6 +236,7 @@ class PresenceOnlyTests(unittest.TestCase):
         # It should get a VALUE column: 40k rows is enough to learn a slope, and
         # demoting it to a flag would throw away the measurement for no reason.
         config, _ = _config_with_table(PARAM_SET='all',
+                                       SEQPARAM_MIN_PRESENCE_PCT=1.0,
                                        SEQPARAM_RARE_MODE='present_only',
                                        SEQPARAM_MIN_PRESENCE_ROWS=500)
         self.assertIn('RARE_BUT_MANY', config.EXAMINATION_SEQPARAM_FEATURES)
@@ -334,15 +344,33 @@ class WriteSelectSplitTests(unittest.TestCase):
             config.classify_seqparam_field('PDM', thin).verdict, 'excluded')
 
 
-class TheIncumbentArmDoesNotMoveTests(unittest.TestCase):
-    """The baseline must be bit-identical, or every arm is measured against a
-    moving target and the whole comparison is worthless."""
+class ShippedDefaultsTests(unittest.TestCase):
+    """What the pipeline actually runs with, pinned.
 
-    def test_defaults_are_unchanged(self):
+    The floor was 1.0 while the arms were being measured, and the sweep was
+    built so the baseline could not move underneath it. On 2026-08-11 the sweep
+    reported (four arms indistinguishable on the rare rows) and the review moved
+    the floor to 0.0 on that evidence. The guard now protects the NEW default
+    for the same reason it protected the old one.
+    """
+
+    def test_the_floor_is_zero_per_the_2026_08_11_decision(self):
         config = _load_config()
-        self.assertEqual(config.SEQPARAM_MIN_PRESENCE_PCT, 1.0)
+        self.assertEqual(config.SEQPARAM_MIN_PRESENCE_PCT, 0.0)
         self.assertEqual(config.SEQPARAM_MIN_NUMERIC_PCT, 90.0)
         self.assertEqual(config.SEQPARAM_RARE_MODE, 'drop')
+
+    def test_a_zero_floor_makes_the_rare_mode_moot(self):
+        # With nothing below the floor there is nothing for present_only to act
+        # on, so the two modes must agree. If they ever disagree at this floor,
+        # something is classifying on a rule other than presence.
+        stats = {'presence_pct': 0.004, 'numeric_pct': 100.0,
+                 'presence_rows': 2}
+        for mode in _RARE_MODES:
+            with self.subTest(mode=mode):
+                config = _config_with(SEQPARAM_RARE_MODE=mode)
+                self.assertEqual(
+                    config.classify_seqparam_field('PDM', stats).verdict, 'full')
 
     def test_the_count_hatch_is_off_by_default(self):
         # It must not widen the incumbent silently. At ~51k sequences the 1%

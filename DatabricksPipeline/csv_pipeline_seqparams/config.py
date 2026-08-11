@@ -72,32 +72,30 @@ PARAM_SET = os.environ.get('PARAM_SET', 'all').strip().lower()
 # ============================================================================
 # TARGET SCANNERS & DATE RANGE
 #
-# ⚠ NO LONGER IDENTICAL TO csv_pipeline/. PR #59 expanded that pipeline to 21
-# serials; this fork is deliberately left at the original 10, and the two facts
-# together are a decision, not an oversight:
+# 21 SERIALS since 2026-08-11, matching csv_pipeline after PR #59 — so the
+# like-for-like comparison against the old model holds again. Decided in the
+# 08-11 review, which also ruled AGAINST going straight to 40: adding too many
+# at once makes a result impossible to attribute.
 #
-#   * every seqparams number quoted so far — the 9.7s in-segment MAE, the 80.3%
-#     join coverage, the rare-parameter row counts and the "a 0.01% field is ~5
-#     rows" boundary in 03b — was measured on THESE ten. Expanding the list
-#     silently would leave the report's prose describing a corpus that no longer
-#     exists.
-#   * it costs a full Spark rebuild, so it is a scheduling decision.
+# WHY 21 IS THE RUN THAT MATTERS. The 08-11 parameter report had to call the
+# <1% question undecidable, and the reason was arithmetic rather than method:
+# roughly doubling the corpus roughly doubles every rare field's row count,
+# which is what makes ~13 of the 37 rare fields learnable for the first time.
+# It does NOT rescue the genuinely rare end — PDM was on 7 rows at 10 serials
+# and lands near 15 here, where a useful count is in the hundreds.
 #
-# WHAT EXPANDING WOULD BUY, when it is deliberate: roughly double the absolute
-# row counts, which is the single thing that could settle the <1% parameter
-# question 03b currently has to call undecidable — and it is what would make
-# SEQPARAM_MIN_PRESENCE_ROWS worth switching on. So this list is the lever for
-# that experiment, not a leftover.
-#
-# The like-for-like comparison against the old model now requires pinning
-# csv_pipeline to the same ten, or re-running both. Neither pipeline hardcodes
-# an embedding size against this list any more (see the num_serials derivation
-# in 04 and 07), so changing it is a config edit plus a rebuild, not a debugging
-# session.
+# WHICH IS WHY 40 MUST BE CHOSEN, NOT COUNTED UP TO. The same review's
+# conclusion: pick customers whose scans CONTAIN the rare combinations — a site
+# doing mainly cardiac work — rather than the next 19 serials off the list. A
+# rare parameter stays rare at any corpus size if nobody in the corpus runs the
+# sequence that uses it. The remaining 19 candidates are in csv_pipeline's
+# config as a comment; they are candidates, not a queue.
 # ============================================================================
 
 SERIAL_NUMBERS = [183242, 176148, 176227, 175912, 175670,
-                  183776, 182625, 176615, 176240, 175828]
+                  183776, 182625, 176615, 176240, 175828,
+                  141049, 155687, 175693, 175727, 175832,
+                  176133, 176430, 176583, 176659, 176750, 176802]
 
 DATE_START = "2024-01-01"
 DATE_END   = "2024-01-31"
@@ -502,15 +500,21 @@ SUT_PLANNER_DERIVED_DENYLIST = {'SNR'}
 # The test to apply, the same one that convicted ST: is this a re-expression of
 # the answer, or a cause of it? A cause stays in, however strongly it correlates.
 #
-#   BHD/ACQW/TGD are absent from all three pinned messages (they ride gated and
-#   breath-hold sequences), so nothing here has been measured on our corpus yet.
-#   BHD is the closest call — a breath-hold duration on a breath-hold sequence is
-#   very nearly the measurement duration — and it is left admissible rather than
-#   denied on a guess, because gate 5 can settle it with numbers.
+#   ACQW/TGD are absent from all three pinned messages (they ride gated
+#   sequences), so nothing about them has been measured on our corpus yet. BHD
+#   was the closest call on this list and is now SETTLED — see its entry.
 SUT_SUSPECT_WATCHLIST = {
-    'BHD':  'breath-hold duration — a time in seconds, and on a breath-hold '
-            'sequence it is close to the measurement itself. Strongest denial '
-            'candidate; unverified because no sampled message carries it.',
+    # CLEARED 2026-08-11 by Görtler, and the reasoning is the general test this
+    # watchlist applies: BHD is an UPPER LIMIT per breath-hold step, not a
+    # measurement of one. Patients manage ~15-20s (dashboard: 15s and 18s
+    # dominate, 25-30s very seldom), and the sequence is designed to FIT inside
+    # that window. A bound the protocol was built to satisfy is a CAUSE of the
+    # duration, not a re-expression of it — the same distinction that convicted
+    # ST and acquitted MUID. Stays admitted; kept on the watchlist because it is
+    # 19.5%-present and a future gate-5 spike would still be worth a look.
+    'BHD':  'breath-hold duration — an UPPER LIMIT per breath-hold step, not '
+            'the step duration. Cleared 2026-08-11: the sequence is built to '
+            'fit inside it, so it is a cause rather than a copy of the target.',
     'ACQW': 'acquisition window — a time, but per cardiac cycle. Reads as a '
             'cause rather than a re-expression.',
     'TGD':  'trigger delay — a time, but it precedes the acquisition rather '
@@ -522,9 +526,266 @@ SUT_SUSPECT_WATCHLIST = {
             'the random-vs-grouped importance gap, not by this note.',
     'ES':   'echo spacing — a time, but a per-echo one, and a genuine driver '
             'of how long a turbo train takes.',
-    'UT':   'unidentified, 3-digit, varies between messages on one scanner '
-            '(655/683). Named here so it is not mistaken for something known.',
+    'UT':   'UTraRef (vendor table, 2026-08-11) — no longer unidentified, but '
+            'the name alone does not say what it drives. 3-digit, varies '
+            'between messages on one scanner (655/683). Left on the watchlist '
+            'until somebody in sequence development explains it.',
 }
+
+# ============================================================================
+# THE VENDOR PARAMETER TABLE — what each MRI_SUT_1005 field actually IS.
+#
+# From `protocol_parameter_descriptions.xlsx`, sent by the MR sequence
+# development department after the 2026-08-11 review. 188 parameters, each with
+# a description and an authoritative isNumeric flag.
+#
+# This closes the single worst gap in the 08-11 report, which had to say "122
+# admitted fields have no entry in SUT_FIELD_MAP — we USE them but cannot say
+# what they mean". Fine for training; blocking for step 07, which has to
+# synthesise every field it conditions on and cannot reason about a name it has
+# never seen.
+#
+# DELIBERATELY NOT MERGED INTO SUT_FIELD_MAP. That map decides a field's STABLE
+# NAME, which is the identity of a column in the conditioning vector and in the
+# divisor table — renaming `IPS` to `images_per_slab` would repoint every
+# learned weight and invalidate the checkpoint for a cosmetic gain. Identity
+# lives in SUT_FIELD_MAP; MEANING lives here. Keyed by the raw mnemonic, which
+# is what the vendor ships.
+#
+# Two answers from the same review are recorded against the watchlist above
+# rather than here, because they changed a decision rather than a label:
+#   IPS = ImagesPerSlab. A 3D slab cut into N 2D images — so it is a genuine
+#         count-of-images driver on 3D sequences (flash 3D, 3D VIBE), which is
+#         exactly the shape of a duration cause. It ranks #2 in the 08-11
+#         importance table and that now makes physical sense.
+#   BHD = breathholdDuration, and it is NOT the target. Görtler: it is an UPPER
+#         LIMIT per breath-hold step (patients manage ~15-20s), so the sequence
+#         must fit inside it. A bound on duration is a cause of duration, not a
+#         copy of it. It stays admitted.
+# ============================================================================
+
+SUT_FIELD_DESCRIPTIONS = {
+    # raw mnemonic: (description, vendor says numeric)
+    'AAM'     : ('AutoAlignRefMode', True),
+    'AAR'     : ('AutoAlignRegion', True),
+    'ACC'     : ('ACC or SOS', True),
+    'ACQW'    : ('acquisition window', True),
+    'ADI'     : ('adiabat mode', True),
+    'ADJBC'   : ('adjust with BC', True),
+    'ADJCF'   : ('Confirm Frequency', True),
+    'ADJDF'   : ('AssumeDominantFat', True),
+    'ADJLO'   : ('Local Shim', True),
+    'ADJLR'   : ('LR balancing', True),
+    'ADJM'    : ('adjustment mode', True),
+    'ADJMV'   : ('Manual AdjVolume', True),
+    'ADJSI'   : ('AssumeSilicone', True),
+    'AE'      : ('asym echo allow', True),
+    'AEM'     : ('asym echo mode', True),
+    'ARRW'    : ('arrhythmia window', True),
+    'ASL'     : ('ASL mode', True),
+    'ASLBD'   : ('bolus duration', True),
+    'ASLIT'   : ('inversion time', True),
+    'ASLLD'   : ('labeling duration', True),
+    'ASLPL'   : ('post labeling delay', True),
+    'ATG'     : ('adaptive trigger', True),
+    'AVG'     : ('Averages', True),
+    'AVGD'    : ('Averages double', True),
+    'B0'      : ('B0 shim mode', True),
+    'B1'      : ('B1 shim mode', True),
+    'B1S'     : ('B1 squared', True),
+    'B1SM'    : ('B1 squared with MeasPause', True),
+    'BCE'     : ('Excitation mode', True),
+    'BCM'     : ('BC seq excitation', True),
+    'BH'      : ('breathholds', True),
+    'BHD'     : ('breathholdDuration', True),
+    'BR'      : ('Base resolution', True),
+    'BV0'     : ('bValue 1', True),
+    'BV1'     : ('bValue 2', True),
+    'BV2'     : ('bValue 3', True),
+    'BV3'     : ('bValue 4', True),
+    'BV4'     : ('bValue 5', True),
+    'BV5'     : ('bValue 6', True),
+    'BV6'     : ('bValue 7', True),
+    'BV7'     : ('bValue 8', True),
+    'BVM'     : ('Max bValue', True),
+    'BW'      : ('bandwidth 0', True),
+    'BW1'     : ('bandwidth 1', True),
+    'BW2'     : ('bandwidth 2', True),
+    'CAI'     : ('PATCaipirinhaMode', True),
+    'CARI'    : ('cardio inlice EVA', True),
+    'CDM'     : ('Coil Focus', True),
+    'CINE'    : ('cine mode', True),
+    'CMM'     : ('ChannelOptimizatio', True),
+    'CO'      : ('contrasts', True),
+    'CONC'    : ('Concats', True),
+    'CS'      : ('coil select', False),
+    'CSC'     : ('CSC', False),
+    'CT2'     : ('comp T2 decay', True),
+    'DBFA'    : ('DarkBlood FlipAngle', True),
+    'DBTH'    : ('DarkBlood Thick', True),
+    'DHB'     : ('dummy heart beats', True),
+    'DIFF'    : ('diffusion mode', True),
+    'DIM'     : ('dimension', True),
+    'DIX'     : ('Dixon', True),
+    'DIXF'    : ('Dixon Fast', True),
+    'DLL'     : ('sequence DLL', False),
+    'DSH'     : ('Diffusion Scheme', True),
+    'DW'      : ('dwell time', True),
+    'DYMO'    : ('dynamic mode', True),
+    'EF'      : ('epi factor', True),
+    'ELL'     : ('ellipt scanning', True),
+    'ES'      : ('echo spacing us', True),
+    'EXP'     : ('pTx excitation mod', True),
+    'FA'      : ('Flip angle', True),
+    'FA0'     : ('Flip Angle (array0)', True),
+    'FA1'     : ('Flip Angle (array1)', True),
+    'FA2'     : ('Flip Angle (array2)', True),
+    'FAM'     : ('flip angle mode', True),
+    'FC'      : ('flow compensation', True),
+    'FLTB'    : ('B1 filter', True),
+    'FLTD'    : ('Distortion Filter', True),
+    'FLTE'    : ('Elliptical filter', True),
+    'FLTI'    : ('Image filter', True),
+    'FLTR'    : ('Raw filter mode', True),
+    'FOV'     : ('FieldOfView', True),
+    'FS'      : ('FatSat', True),
+    'FSM'     : ('FatSatMode', True),
+    'FSO'     : ('FatSupOpt', True),
+    'FWC'     : ('FatWaterContrast', True),
+    'GAI'     : ('Gain setting', True),
+    'GM'      : ('gradient mode', True),
+    'GPPV'    : ('GRASP Preview', True),
+    'GPRV'    : ('GRASP ReconVolumes', True),
+    'GSRT'    : ('slew rate fast*', True),
+    'HYP'     : ('hyperecho', True),
+    'I2D'     : ('Interpolation', True),
+    'IAS'     : ('NATIVE inv arraysiz', True),
+    'INV'     : ('Inversion', True),
+    'INVC'    : ('# inversion contr.', True),
+    'IPS'     : ('ImagesPerSlab', True),
+    'IRS'     : ('inversion scheme', True),
+    'IS'      : ('ImageScaleFactor*10', True),
+    'LPS'     : ('Lines Per Shot', True),
+    'MAP'     : ('parametric map', True),
+    'MBF'     : ('MBF', True),
+    'MDS'     : ('MDS mode', True),
+    'MP'      : ('measurement pause', True),
+    'MSM'     : ('multi slice mode', True),
+    'MTC'     : ('MTC', True),
+    'MUID'    : ('MeasUID', True),
+    'N0'      : ('nucleus0', False),
+    'N1'      : ('nucleus1', False),
+    'NDW'     : ('No of DiffWeightings', True),
+    'NOR'     : ('Normalize filter', True),
+    'NRED'    : ('noise reduction', True),
+    'OR'      : ('orientation', False),
+    'ORG'     : ('Organ under Exam', True),
+    'PAC'     : ('PACE mode', True),
+    'PAR'     : ('Partitions', True),
+    'PAT'     : ('PAT Mode', True),
+    'PAT3'    : ('PAT accel 3D', True),
+    'PATP'    : ('PAT accel PE', True),
+    'PATTF'   : ('Pat TotalFactor', True),
+    'PDM'     : ('proton density map', True),
+    'PEL'     : ('phase encoding lin', True),
+    'PERE'    : ('Phase enc rewinder', True),
+    'PFOV'    : ('Phase FoV', True),
+    'PHAPS'   : ('PHAPS mode', True),
+    'PHS'     : ('cardiac phases', True),
+    'PHYM'    : ('physio method', True),
+    'PHYS'    : ('physio signal', True),
+    'POM'     : ('PositioningMode', True),
+    'POS'     : ('PhaseOversampling', True),
+    'PPF'     : ('Phase PartFourier', True),
+    'PRS'     : ('PATRefScanMode', True),
+    'PSN'     : ('PSN Mode', True),
+    'RCM'     : ('recon mode', True),
+    'REDEC'   : ('Reduced EC sensit.', True),
+    'REO'     : ('reordering', True),
+    'REP'     : ('repetitions', True),
+    'RFSP'    : ('RF  spoiling', True),
+    'RFT'     : ('RF pulse type', True),
+    'RGI'     : ('retrogated images', True),
+    'ROM'     : ('Readout mode', True),
+    'ROS'     : ('Readout segments', True),
+    'RSAT'    : ('RSats', True),
+    'RSATM'   : ('RSat0 mode', True),
+    'RST'     : ('Restore/DEFT', True),
+    'RVI'     : ('radial views', True),
+    'SAT'     : ('Saturation', True),
+    'SEG'     : ('segments', True),
+    'SG'      : ('slice groups', True),
+    'SHT'     : ('shots', True),
+    'SLC'     : ('slices', True),
+    'SLT'     : ('slice thickness', True),
+    'SM'      : ('segmentation mode', True),
+    'SNR'     : ('SNR estimate', True),
+    'SOS'     : ('SliceOversampling', True),
+    'SP'      : ('rel table position', True),
+    'SPF'     : ('Slice PartFourier', True),
+    'SQ'      : ('sequence type', True),
+    'ST'      : ('scan time', True),
+    'SWI'     : ('SWI', True),
+    'T2P'     : ('T2 prep pulse', True),
+    'TAG'     : ('tagging', True),
+    'TDF'     : ('trufi delta freq', True),
+    'TE'      : ('TE rounded to ms', True),
+    'TE1'     : ('TE (2nd TE time)', True),
+    'TE2'     : ('TE (3rd TE time)', True),
+    'TEU'     : ('TE in us', True),
+    'TF'      : ('turbo factor', True),
+    'TGD'     : ('trigger delay', True),
+    'TGP'     : ('trigger pulses', True),
+    'TI'      : ('TI time', True),
+    'TI1'     : ('2nd TI time', True),
+    'TISC'    : ('TIScout', True),
+    'TOM'     : ('TOM mode', True),
+    'TP'      : ('abs table position', True),
+    'TR'      : ('TR', True),
+    'TRJ'     : ('Trajectory', True),
+    'TST'     : ('total scan time', True),
+    'UI0'     : ('UserInfo0', True),
+    'UI1'     : ('UserInfo1', True),
+    'UI2'     : ('UserInfo2', True),
+    'UI3'     : ('UserInfo3', True),
+    'UT'      : ('UTraRef', True),
+    'VER'     : ('version number', True),
+    'VISH'    : ('view sharing', True),
+    'WARPS'   : ('WARP SEMAC steps', True),
+    'WARPV'   : ('WARP VAT', True),
+    'WRP'     : ('WrapUp/DEFT', True),
+}
+
+# THE VENDOR OVERRULES OUR SAMPLE. Our own numeric test is empirical — "does
+# this parse as a float on 90% of rows" — and a categorical CODE passes it
+# trivially. `N0`/`N1` (nucleus) and `CSC` are enumerations that happen to be
+# written as integers, and nothing in the corpus distinguishes them from a
+# measurement. Scaling a category id into the conditioning vector is meaningless
+# (see the bucket-3 note in the feature-shape design), so the vendor flag is
+# treated as authoritative where it disagrees with the sample.
+#
+# `CS`/`DLL`/`OR` were already caught empirically. `N0`/`N1`/`CSC` were not, and
+# would have entered the 0.0%-floor vector as scaled numerics.
+SUT_VENDOR_NON_NUMERIC = frozenset(
+    name for name, (_desc, _numeric) in SUT_FIELD_DESCRIPTIONS.items()
+    if not _numeric
+)
+
+
+def seqparam_description(name):
+    """Vendor description for a field, by raw mnemonic or stable name.
+
+    Returns None when the vendor table does not know the field — which is
+    itself worth reporting, since it means the message carries something the
+    sequence development department did not document.
+    """
+    if name in SUT_FIELD_DESCRIPTIONS:
+        return SUT_FIELD_DESCRIPTIONS[name][0]
+    for _raw, (_desc, _numeric) in SUT_FIELD_DESCRIPTIONS.items():
+        if SUT_FIELD_MAP.get(_raw) == name:
+            return _desc
+    return None
+
 
 # The union every consumer wants. 03f built this by hand at its line 400; having
 # it here means adding a fourth objection later reaches every caller at once.
@@ -703,12 +964,30 @@ SEQPARAM_DERIVED = {
 # SEQPARAM_DIVISOR_FINGERPRINT below goes into the model manifest.
 # ============================================================================
 
-# A field on 1% of rows is on ~500 rows of the current corpus — thin, but thin is
-# exactly where the extraordinary 1% lives, and a presence flag means a mostly-
-# absent field costs the model nothing to ignore. This floor is the single knob
-# that trades tail coverage against vector width; the report prints what it
-# excludes so the trade is visible rather than assumed.
-SEQPARAM_MIN_PRESENCE_PCT = float(os.environ.get('SEQPARAM_MIN_PRESENCE_PCT', '1.0'))
+# THE FLOOR IS 0.0 SINCE 2026-08-11 — every numeric field the corpus contains
+# reaches the model, ~170 of them where the 1% floor admitted 133.
+#
+# Decided in that morning's review, on the measurement rather than on either
+# prior: 03b's gate 4b scored four arms (1% floor / presence-flags-only / 0.1% /
+# 0.0%) on the 2,197 rows that actually carry a rare field, over five seeds, and
+# they landed 13.49 / 13.96 / 14.03 / 14.06s against a ±1.28s spread. Nothing
+# separates them. Given no measurable cost, the meeting took the option that
+# keeps the data rather than the one that discards it — a digital twin aiming at
+# the extraordinary 1% should not be hiding fields from itself, and the rule
+# that excluded them was never validated, only inherited.
+#
+# WHAT THIS DOES NOT SETTLE. "No measurable difference" at 10 serials is a
+# statement about the corpus, not about the parameters; the same review kept
+# more data as the fix and explicitly rejected re-weighting rare parameters to
+# compensate. Re-read gate 4b after the 21-serial run — it is the first one with
+# the counts to say something.
+#
+# THE COST IS DOWNSTREAM, NOT HERE. Every admitted field is one step 07 must
+# synthesise, and at this floor that includes fields on one or two rows, where
+# the (body_region, sequence_type) sampler has no distribution to draw from and
+# its empty-pool fallback writes a fabricated 0.0. That is a real bill and 03b
+# reports it; it is not a reason to re-narrow the training vector.
+SEQPARAM_MIN_PRESENCE_PCT = float(os.environ.get('SEQPARAM_MIN_PRESENCE_PCT', '0.0'))
 # Below this, a "numeric" field is mostly strings and belongs in an embedding,
 # not in a scaled numeric column. Same threshold 03b-03f used.
 SEQPARAM_MIN_NUMERIC_PCT = float(os.environ.get('SEQPARAM_MIN_NUMERIC_PCT', '90.0'))
@@ -1015,6 +1294,17 @@ def _classify_seqparam_field(name, stats, min_presence_pct, rare_mode):
         return SeqparamVerdict(
             'excluded', 'denied',
             'denied: derived by the scanner from the timing it was about to run')
+    # THE VENDOR FLAG COMES FIRST, because our own test cannot see this case.
+    # `N0`/`N1`/`CSC` are enumerations written as integers: they parse as floats
+    # on 100% of rows and sail through the empirical check, and would then be
+    # scaled into the conditioning vector as though a nucleus id were a
+    # measurement. The sequence development department's isNumeric flag is the
+    # only thing in the pipeline that knows the difference.
+    if name in SUT_VENDOR_NON_NUMERIC:
+        return SeqparamVerdict(
+            'excluded', 'non_numeric',
+            'vendor table says non-numeric — a category code, not a '
+            'measurement; belongs in an embedding')
     if stats.get('numeric_pct', 100.0) < SEQPARAM_MIN_NUMERIC_PCT:
         return SeqparamVerdict(
             'excluded', 'non_numeric',

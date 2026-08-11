@@ -485,12 +485,25 @@ if _wl:
         print(f"    {r['name']:<10} {r['presence_pct']:>5.1f}% present   "
               f"{SUT_SUSPECT_WATCHLIST[r['raw_key']]}")
 
-if gate3['unidentified']:
-    print(f"\n  {len(gate3['unidentified'])} admitted fields have no entry in "
-          f"SUT_FIELD_MAP — we USE them but\n  cannot say what they mean. That "
-          f"is fine for training and NOT fine for step 07,\n  which has to "
-          f"synthesise every field it conditions on:")
-    print("    " + ", ".join(sorted(gate3['unidentified'])[:24]))
+# WHAT WE CANNOT NAME — now measured against the vendor table rather than
+# against SUT_FIELD_MAP. The 08-11 report said "122 admitted fields have no
+# entry in SUT_FIELD_MAP", which counted every field we had not hand-curated
+# and was the wrong question: SUT_FIELD_MAP is about column IDENTITY, not
+# meaning. With the sequence development department's table loaded, the real
+# question is how many fields nobody has documented at all — which is the list
+# step 07 genuinely cannot reason about.
+_undocumented = [r for r in admitted if seqparam_description(r['name']) is None]
+gate3['undocumented'] = [r['name'] for r in _undocumented]
+if _undocumented:
+    print(f"\n  {len(_undocumented)} admitted field(s) are absent from the "
+          f"vendor parameter table.\n  Nobody has documented these — they are "
+          f"the ones to take back to sequence\n  development, and the ones step "
+          f"07 cannot reason about:")
+    print("    " + ", ".join(sorted(r['name'] for r in _undocumented)[:30]))
+else:
+    print(f"\n  Every admitted field is documented in the vendor parameter "
+          f"table. Step 07 has\n  a description for everything it must "
+          f"synthesise.")
 
 REPORT['gates']['admissibility'] = gate3
 
@@ -842,15 +855,35 @@ rule()
 print(" GATE 4b — THE <1% THRESHOLD ARMS")
 rule()
 
-_rare_rows_all = [r for r in field_rows if r['category'] == 'rare']
+# "RARE" IS DEFINED HERE, NOT BY THE SHIPPED FLOOR — and that decoupling is what
+# keeps this gate alive after 2026-08-11.
+#
+# The gate originally read `category == 'rare'`, which meant "excluded by the
+# configured floor". That worked while the floor was 1.0 and broke the moment
+# the review moved it to 0.0: with nothing excluded, nothing is 'rare', and the
+# gate that was supposed to be RE-READ after the 21-serial run would have
+# printed "nothing to sweep" instead. The sweep has to be able to ask its
+# question independently of which answer is currently shipped.
+#
+# So the arm set is defined against a fixed reference threshold. The arms below
+# then say what including or excluding that set is worth — whatever the config
+# happens to be doing today.
+ARM_RARE_PCT = float(os.environ.get('ARM_RARE_PCT', '1.0'))
+
+_rare_rows_all = [r for r in field_rows
+                  if r['admissible'] and r['presence_pct'] < ARM_RARE_PCT]
+_base_rows = [r for r in field_rows
+              if r['admissible'] and r['presence_pct'] >= ARM_RARE_PCT]
+
 if not _rare_rows_all:
-    print("\n  No field falls below the presence floor, so there is no threshold "
-          "question\n  to answer on this corpus. Nothing to sweep.")
-    gate4b = {'arms': [], 'rare_fields': []}
+    print(f"\n  No admitted field sits below {ARM_RARE_PCT:.1f}% presence, so "
+          f"there is no threshold\n  question to answer on this corpus. Nothing "
+          f"to sweep.")
+    gate4b = {'arms': [], 'rare_fields': [], 'arm_rare_pct': ARM_RARE_PCT}
 else:
-    # The wide matrix: admitted values, then rare values, then rare presence
-    # flags. Built once; each arm is a column slice of it, so every arm is
-    # scored on identical rows with an identically-fitted estimator.
+    # The wide matrix: base values, then rare values, then rare presence flags.
+    # Built once; each arm is a column slice of it, so every arm is scored on
+    # identical rows with an identically-fitted estimator.
     _rare_names = [r['name'] for r in _rare_rows_all]
     _rare_keys = [r['raw_key'] for r in _rare_rows_all]
 
@@ -862,23 +895,32 @@ else:
         [[1.0 if k in (s.get('sut_raw') or {}) else 0.0 for k in _rare_keys]
          for s in sequences], dtype=float)
 
-    _base = parameters[np.ix_(np.where(score_rows)[0],
-                              list(range(len(_admitted_names))))]
+    # The baseline is the COMMON fields only. Slicing `parameters` by admitted
+    # index would put the rare fields in every arm including the one that is
+    # supposed to be without them.
+    _base_idx = [_admitted_names.index(r['name']) for r in _base_rows
+                 if r['name'] in _admitted_names]
+    _base = parameters[np.ix_(np.where(score_rows)[0], _base_idx)]
     _rare_values_s = _rare_values[score_rows]
     _rare_flags_s = _rare_flags[score_rows]
 
     _pct = np.array([r['presence_pct'] for r in _rare_rows_all])
     _tenth = _pct >= 0.1
 
+    # Which arm the pipeline is actually configured to run, marked AFTER the
+    # numbers so it cannot push the columns out of alignment. Worth marking at
+    # all because the shipped answer changed on 2026-08-11 and a reader should
+    # not have to cross-reference config to know which row is us.
+    _drops_rare = SEQPARAM_MIN_PRESENCE_PCT >= ARM_RARE_PCT
     _arms = [
-        ('incumbent — 1% floor, rare dropped', _base),
+        (f"drop them — {len(_base_idx)} common fields only", _base, _drops_rare),
         ('rare as PRESENCE FLAGS only',
-         np.hstack([_base, _rare_flags_s])),
+         np.hstack([_base, _rare_flags_s]), False),
         (f"floor 0.1% — {int(_tenth.sum())} rare fields, full values",
          np.hstack([_base, _rare_values_s[:, _tenth], _rare_flags_s[:, _tenth]])
-         if _tenth.any() else None),
-        (f"floor 0.0% — all {len(_rare_names)} rare fields, full values",
-         np.hstack([_base, _rare_values_s, _rare_flags_s])),
+         if _tenth.any() else None, False),
+        (f"keep all {len(_rare_names)} rare fields, full values",
+         np.hstack([_base, _rare_values_s, _rare_flags_s]), not _drops_rare),
     ]
 
     # SEEDS, NOT ONE RUN. The differences being argued about are fractions of a
@@ -899,7 +941,7 @@ else:
     rule('-')
 
     _arm_rows = []
-    for _label, _cols in _arms:
+    for _label, _cols, _is_shipped in _arms:
         if _cols is None:
             continue
         _overall, _rare_mae = [], []
@@ -923,17 +965,21 @@ else:
             'rare_mae_s': round(float(np.mean(_rare_mae)), 2) if _rare_mae else None,
             'rare_sd_s': round(float(np.std(_rare_mae)), 2) if _rare_mae else None,
             'rare_rows': int(_any_rare.sum()),
+            'shipped': bool(_is_shipped),
         }
         _arm_rows.append(_row)
         _rare_txt = ('—' if _row['rare_mae_s'] is None
                      else f"{_row['rare_mae_s']:.2f} ±{_row['rare_sd_s']:.2f}s")
         print(f"  {_label:<44} {_row['overall_mae_s']:>11.2f} "
-              f"±{_row['overall_sd_s']:<5.2f} {_rare_txt:>22}")
+              f"±{_row['overall_sd_s']:<5.2f} {_rare_txt:>22}"
+              f"{'   <- SHIPPED' if _is_shipped else ''}")
     rule('-')
 
     gate4b = {
         'arms': _arm_rows,
         'seeds': _SEEDS,
+        'arm_rare_pct': ARM_RARE_PCT,
+        'shipped_floor_pct': SEQPARAM_MIN_PRESENCE_PCT,
         'rare_fields': [{'name': r['name'], 'presence_rows': r['presence_rows'],
                          'presence_pct': r['presence_pct']}
                         for r in _rare_rows_all],
@@ -944,6 +990,9 @@ else:
     # Read on the RARE stratum, and only when the gap clears the seed spread.
     # A difference inside the noise is not a small finding, it is no finding,
     # and saying so is the whole reason the seeds are run.
+    # arms[0] is always "drop them" — the reference point, whether or not it is
+    # what ships. The question this gate asks is "what is INCLUDING them worth",
+    # and that reads the same in both directions.
     _incumbent = _arm_rows[0]
     _best = min((r for r in _arm_rows[1:] if r['rare_mae_s'] is not None),
                 key=lambda r: r['rare_mae_s'], default=None)
@@ -951,15 +1000,15 @@ else:
         _gain = _incumbent['rare_mae_s'] - _best['rare_mae_s']
         _noise = max(_incumbent['rare_sd_s'], _best['rare_sd_s'])
         _overall_gain = _incumbent['overall_mae_s'] - _best['overall_mae_s']
-        # "Strongest ALTERNATIVE", not "best arm" — when every alternative is
-        # worse than the incumbent, calling the least-bad one "best" reads as an
-        # endorsement of a change the numbers do not support.
+        # "Strongest way of KEEPING them", not "best arm" — when every way of
+        # keeping them is worse than dropping them, calling the least-bad one
+        # "best" reads as an endorsement the numbers do not support.
         _direction = 'better' if _gain > 0 else 'worse'
-        print(f"\n  On the rare rows, the strongest alternative to the incumbent "
-              f"is\n  {_best['label']!r}:\n"
-              f"    {_incumbent['rare_mae_s']:.2f}s -> {_best['rare_mae_s']:.2f}s "
-              f"— {abs(_gain):.2f}s {_direction}, against a seed spread of "
-              f"±{_noise:.2f}s.")
+        print(f"\n  On the rare rows, the strongest way of KEEPING them is"
+              f"\n  {_best['label']!r}:\n"
+              f"    dropping {_incumbent['rare_mae_s']:.2f}s -> keeping "
+              f"{_best['rare_mae_s']:.2f}s — {abs(_gain):.2f}s {_direction}, "
+              f"against a seed spread of ±{_noise:.2f}s.")
         print(f"    The same change moves the OVERALL number by "
               f"{_overall_gain:+.2f}s — which is why\n    the overall column "
               f"was never going to settle this either way.")
@@ -1267,8 +1316,16 @@ print(f"""
 
 print(f"\n  TOP OF THE RANKING (grouped — what actually earns its place):")
 for i, r in enumerate(ranking_grouped[:12], 1):
+    # The vendor description, not just the mnemonic. On the 08-11 run the #2
+    # field was `IPS` and nobody in the meeting could say what it was; it turns
+    # out to be ImagesPerSlab — a count of 2D images cut from a 3D slab, which
+    # is exactly the shape of a duration cause. A ranking you cannot read is a
+    # ranking you cannot sanity-check.
+    _desc = seqparam_description(r['name']) or '— not in the vendor table'
     _note = SUT_SUSPECT_WATCHLIST.get(r['name'], '')
-    print(f"    {i:>2}  {r['name']:<16} {r['importance_s']:>+7.2f}s   {_note}")
+    print(f"    {i:>2}  {r['name']:<16} {r['importance_s']:>+7.2f}s   {_desc}")
+    if _note:
+        print(f"        {'':16} {'':>7}    ! {_note}")
 
 _dead = [s['name'] for s in sentinel if abs(s['importance_grouped_s']) < 0.05]
 print(f"\n  {len(_dead)} of {len(sentinel)} fields move the held-out MAE by less "
@@ -1527,14 +1584,19 @@ _md += [
      f"({gate4['split_optimism_s']:+.1f}s between the grouped and random "
      f"splits). The model is not leaning on within-group memorisation."),
 ]
-if gate3['unidentified']:
+if gate3['undocumented']:
     _md.append(
-        f"4. **{len(gate3['unidentified'])} admitted fields are unidentified.** "
-        f"Fine for training — the model does not need to know what a field "
-        f"means. Not fine for step 07, which must synthesise every field it "
-        f"conditions on: "
-        + ", ".join(f"`{n}`" for n in sorted(gate3['unidentified'])[:12])
+        f"4. **{len(gate3['undocumented'])} admitted fields are undocumented.** "
+        f"The vendor parameter table covers the rest, so these are the ones to "
+        f"take back to MR sequence development — and the ones step 07 cannot "
+        f"reason about when it has to synthesise them: "
+        + ", ".join(f"`{n}`" for n in sorted(gate3['undocumented'])[:12])
         + ".")
+else:
+    _md.append(
+        "4. **Every admitted field is documented.** The vendor parameter table "
+        "(sequence development, 2026-08-11) names all of them, which unblocks "
+        "step 07 — it now has a description for every field it must synthesise.")
 if gate1['sampler_thinnest'] and gate1['sampler_thinnest'][0]['rows'] < 10:
     _md.append(
         f"5. **Thin sampler cells.** The smallest (body_region, sequence_type) "
