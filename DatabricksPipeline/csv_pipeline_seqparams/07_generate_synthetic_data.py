@@ -327,6 +327,7 @@ print("=" * 64)
 
 # COMMAND ----------
 
+# DBTITLE 1,Cell 6
 # =============================================================================
 # Load data and models
 # =============================================================================
@@ -453,6 +454,16 @@ if 'serial_embedding.weight' in _exam_ckpt:
               f"{EXAMINATION_MODEL_CONFIG_SEQPARAMS.get('num_serials')} -> "
               f"{_ckpt_serials} (from the checkpoint, not config)")
         EXAMINATION_MODEL_CONFIG_SEQPARAMS['num_serials'] = _ckpt_serials
+if 'conditioning_scale' in _exam_ckpt:
+    _ckpt_cond_dim = int(_exam_ckpt['conditioning_scale'].shape[0])
+    if _ckpt_cond_dim != EXAMINATION_MODEL_CONFIG_SEQPARAMS.get('base_conditioning_dim'):
+        print(f"[fix] base_conditioning_dim: "
+              f"{EXAMINATION_MODEL_CONFIG_SEQPARAMS.get('base_conditioning_dim')} -> "
+              f"{_ckpt_cond_dim} (from the checkpoint, not config)")
+        EXAMINATION_MODEL_CONFIG_SEQPARAMS['base_conditioning_dim'] = _ckpt_cond_dim
+    # Remove pre-computed scale so model creates buffer from base_conditioning_dim;
+    # load_state_dict then overwrites it with the checkpoint's trained values.
+    EXAMINATION_MODEL_CONFIG_SEQPARAMS.pop('conditioning_scale', None)
 
 print(f"Examination conditioning: base_conditioning_dim="
       f"{EXAMINATION_MODEL_CONFIG_SEQPARAMS['base_conditioning_dim']}, "
@@ -1170,6 +1181,7 @@ def _generate_orch_tokens(scanner_idx, date, demographic_distributions, serial_s
 
 # COMMAND ----------
 
+# DBTITLE 1,Cell 8
 # =============================================================================
 # MAIN GENERATION LOOP — one synthetic day per customer per date
 # =============================================================================
@@ -1308,6 +1320,11 @@ for customer_idx, (serial_str, daily_schedules) in enumerate(customer_schedules.
                 cond, _sut_values = _build_exam_cond_tensor(
                     patient, current_t, day_start, region_id, seq_type
                 )
+                # Trim to model's trained conditioning dim (feature list may
+                # have grown since this checkpoint was trained).
+                _exp_dim = examination_model.conditioning_scale.shape[0]
+                if cond.shape[-1] > _exp_dim:
+                    cond = cond[..., :_exp_dim]
                 sut_draw_counter[tuple(sorted(_sut_values.items()))] += 1
                 exam_rows, current_t, retries, used_fallback = _generate_valid_exam_rows(
                     cond, region_id, seq_type, serial_idx,

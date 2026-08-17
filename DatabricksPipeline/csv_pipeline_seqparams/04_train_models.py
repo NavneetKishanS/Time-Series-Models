@@ -388,6 +388,17 @@ if _exam_seqs_for_serials and 'serial_idx' in _exam_seqs_for_serials[0]:
 # TRAIN EXAMINATION MODEL
 # =============================================================================
 
+# Free memory from pre-flight/gate cells — train_examination_model reloads the
+# pkl from data_path, so keeping the first copy alive doubles peak memory and
+# triggers OOM on the 28 GiB NC4as_T4_v3 node.
+import gc
+for _var in ('data', '_exam_seqs', '_exam_seqs_for_serials', '_names', '_ids',
+             '_durations', '_keep', '_named'):
+    globals().pop(_var, None)
+gc.collect()
+if torch.cuda.is_available():
+    torch.cuda.empty_cache()
+
 from AlternatingPipeline.training.train_examination import train_examination_model
 
 print("\n" + "="*60)

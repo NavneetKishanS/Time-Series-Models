@@ -145,7 +145,7 @@ from AlternatingPipeline.config import (
     EXAMINATION_MODEL_CONFIG, EXAMINATION_TRAINING_CONFIG, START_TOKEN_ID,
 )
 from AlternatingPipeline.models.examination_model import create_examination_model
-from AlternatingPipeline.models.checkpoint_compat import load_checkpoint_lenient
+from AlternatingPipeline.models.checkpoint_compat import load_checkpoint_lenient, IncompatibleCheckpointError
 from AlternatingPipeline.training.utils import temporal_split, build_conditioning_tensor
 
 CHECKPOINT_PATH = f"{MODELS_DIR}/examination/examination_model_best.pt"
@@ -161,11 +161,20 @@ else:
     # Lenient: tolerates params added since the checkpoint was trained (e.g.
     # duration_cond_bias, which is zero-initialised and therefore a no-op),
     # while still refusing a checkpoint from a different architecture.
-    load_checkpoint_lenient(
-        model,
-        torch.load(CHECKPOINT_PATH, map_location=device),
-        label=f"examination checkpoint ({CHECKPOINT_PATH})",
-    )
+    try:
+        load_checkpoint_lenient(
+            model,
+            torch.load(CHECKPOINT_PATH, map_location=device),
+            label=f"examination checkpoint ({CHECKPOINT_PATH})",
+        )
+    except IncompatibleCheckpointError as e:
+        print(f"Checkpoint incompatible with current model architecture:\n{e}\n")
+        print("The model config has changed since this checkpoint was trained.")
+        print("Re-run 04_train_models.py to produce a compatible checkpoint.")
+        print("Skipping Section B.")
+        CHECKPOINT_PATH = None  # signal to skip the rest
+
+if CHECKPOINT_PATH and os.path.exists(CHECKPOINT_PATH):
     model = model.to(device)
     model.eval()
 

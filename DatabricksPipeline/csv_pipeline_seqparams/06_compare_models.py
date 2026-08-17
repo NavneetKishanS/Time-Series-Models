@@ -18,30 +18,50 @@
 
 # COMMAND ----------
 
+# DBTITLE 1,Cell 3
 import os
 import sys
 import math
 import pickle
+import shutil
 from collections import defaultdict
 
 import numpy as np
 import torch
 
 _AP_PATH = "/tmp/alternating_pipeline_src"  # matches 04_train_models.py's TMP_ROOT
-if _AP_PATH not in sys.path:
-    sys.path.insert(0, _AP_PATH)
+_REPO_ROOT = "/Workspace/Shared/Patient Exchange and Examination NK/Time-Series-Models"
 
-# This notebook does not copy the source itself — 04_train_models.py does, and
-# /tmp survives the whole cluster lifetime. Fail with instructions if that copy
-# predates a module this notebook needs. (assert_pipeline_source_fresh comes
-# from `%run ./config` above, which is always loaded fresh from the Workspace.)
-assert_pipeline_source_fresh(_AP_PATH, required_modules=[
+# Self-heal: refresh the /tmp copy if it's stale or missing modules this
+# notebook needs (avoids requiring 04_train_models.py to run first).
+_REQUIRED_MODULES = [
     "AlternatingPipeline.config",
     "AlternatingPipeline.models.examination_model",
     "AlternatingPipeline.models.checkpoint_compat",
     "AlternatingPipeline.training.utils",
     "AlternatingPipeline.validation.metrics",
-])
+]
+_needs_refresh = not os.path.isdir(_AP_PATH) or not all(
+    os.path.isfile(os.path.join(_AP_PATH, m.replace('.', '/') + '.py'))
+    or os.path.isdir(os.path.join(_AP_PATH, m.replace('.', '/')))
+    for m in _REQUIRED_MODULES
+)
+if _needs_refresh:
+    print(f"[refresh] Stale or missing source at {_AP_PATH} — re-copying from repo...")
+    _ap_dst = f"{_AP_PATH}/AlternatingPipeline"
+    if os.path.exists(_ap_dst):
+        shutil.rmtree(_ap_dst)
+    os.makedirs(_AP_PATH, exist_ok=True)
+    shutil.copytree(f"{_REPO_ROOT}/AlternatingPipeline", _ap_dst)
+    # Evict stale cached modules so fresh imports take effect
+    for _k in [k for k in sys.modules if k.startswith('AlternatingPipeline')]:
+        del sys.modules[_k]
+    print("[refresh] Done.")
+
+if _AP_PATH not in sys.path:
+    sys.path.insert(0, _AP_PATH)
+
+assert_pipeline_source_fresh(_AP_PATH, required_modules=_REQUIRED_MODULES)
 
 from AlternatingPipeline.config import (
     EXAMINATION_MODEL_CONFIG, EXAMINATION_TRAINING_CONFIG,
@@ -71,6 +91,7 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # COMMAND ----------
 
+# DBTITLE 1,Cell 4
 # =============================================================================
 # Load both models against the SAME (new, superset) pkl
 # =============================================================================
@@ -122,11 +143,22 @@ if old_model is None:
 
 # build_seqparams_model_config comes from this file's own %run ./config —
 # single source of truth shared with 04_train_models.py / 05_feature_analysis.py.
+# Override dimensions from the checkpoint itself so this notebook loads whatever
+# checkpoint it finds regardless of when it was trained (feature set may have
+# expanded since training).
 EXAMINATION_MODEL_CONFIG_SEQPARAMS = build_seqparams_model_config(EXAMINATION_MODEL_CONFIG)
+_new_ckpt = torch.load(NEW_CHECKPOINT, map_location=device)
+if 'conditioning_scale' in _new_ckpt:
+    EXAMINATION_MODEL_CONFIG_SEQPARAMS['base_conditioning_dim'] = _new_ckpt['conditioning_scale'].shape[0]
+    # Remove pre-computed scale list so model creates buffer from base_conditioning_dim;
+    # load_state_dict then overwrites it with the checkpoint's trained values.
+    EXAMINATION_MODEL_CONFIG_SEQPARAMS.pop('conditioning_scale', None)
+if 'serial_embedding.weight' in _new_ckpt:
+    EXAMINATION_MODEL_CONFIG_SEQPARAMS['num_serials'] = _new_ckpt['serial_embedding.weight'].shape[0]
 new_model = create_examination_model(EXAMINATION_MODEL_CONFIG_SEQPARAMS)
 load_checkpoint_lenient(
     new_model,
-    torch.load(NEW_CHECKPOINT, map_location=device),
+    _new_ckpt,
     label=f"new examination checkpoint ({NEW_CHECKPOINT})",
 )
 new_model = new_model.to(device).eval()
@@ -137,6 +169,7 @@ print(f"New model params: {sum(p.numel() for p in new_model.parameters()):,}")
 
 # COMMAND ----------
 
+# DBTITLE 1,Cell 5
 # =============================================================================
 # Predict with both models on every held-out sequence
 # =============================================================================
@@ -150,6 +183,11 @@ def _predict_one(model, seq, extra_features):
         seq['conditioning'], extra_feature_names=extra_features,
         denylist=SUT_ALL_DENYLISTS,
     ).unsqueeze(0).to(device)
+    # Trim to model's trained conditioning dim (feature list may have grown
+    # since this checkpoint was trained — new features are appended at end).
+    _expected_dim = model.conditioning_scale.shape[0]
+    if cond.shape[1] > _expected_dim:
+        cond = cond[:, :_expected_dim]
     info = {
         'body_region': torch.tensor([seq['body_region']], device=device),
         'sequence_type': torch.tensor([int(seq.get('sequence_type', 0))], device=device),
