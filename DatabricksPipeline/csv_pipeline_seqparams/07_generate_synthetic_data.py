@@ -412,6 +412,11 @@ with open(SEQPARAMS_PKL, 'rb') as f:
     exam_data = pickle.load(f)
 print(f"Examination sequences (seqparams pkl): {len(exam_data.get('examination', [])):,}")
 
+# See config.SUT_AUDIT_ONLY_KEYS — generation never reads these; stripped in
+# place to avoid carrying them for the rest of the session.
+if exam_data.get('examination'):
+    strip_audit_only_fields(exam_data['examination'])
+
 # --- load exchange model ---
 # load_checkpoint_lenient tolerates params added/removed since training, but
 # refuses a checkpoint whose parameter SHAPES differ — that means a different

@@ -99,6 +99,9 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 with open(PKL_OUTPUT, 'rb') as f:
     _data = pickle.load(f)
 examination_sequences = _data['examination']
+# See config.SUT_AUDIT_ONLY_KEYS — none of this notebook's fields are read
+# below; stripped in place to avoid carrying them for the rest of the session.
+strip_audit_only_fields(examination_sequences)
 _, val_sequences = temporal_split(examination_sequences, val_days=2)
 print(f"Held-out validation sequences (shared by both models): {len(val_sequences)}")
 

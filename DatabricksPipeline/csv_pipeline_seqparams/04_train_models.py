@@ -251,6 +251,32 @@ with open(PKL_PATH, 'rb') as f:
     data = pickle.load(f)
 print(f"Examination sequences: {len(data['examination']):,}")
 
+# Strip audit-only fields (sut_raw / sut_debug / coil_config / ...) that this
+# script never reads — see SUT_AUDIT_ONLY_KEYS in config.py. In place, so no
+# list copy and no memory spike while stripping. This is the same class of
+# fix as Cell 8's double-pkl-copy cleanup below, applied to weight this
+# script never needed to carry in the first place.
+def _rss_mb():
+    try:
+        with open('/proc/self/status') as _f:
+            for _line in _f:
+                if _line.startswith('VmRSS:'):
+                    return int(_line.split()[1]) / 1024
+    except Exception:
+        return None
+
+_rss_before = _rss_mb()
+_n_stripped = seqparams_config.strip_audit_only_fields(data['examination'])
+_rss_after = _rss_mb()
+_rss_note = (
+    f" — RSS {_rss_before:,.0f} -> {_rss_after:,.0f} MB "
+    f"(freed {_rss_before - _rss_after:,.0f} MB)"
+    if _rss_before is not None and _rss_after is not None else ""
+)
+print(f"[mem] stripped {_n_stripped:,} audit-only field instances "
+      f"({', '.join(seqparams_config.SUT_AUDIT_ONLY_KEYS)}) from "
+      f"{len(data['examination']):,} rows{_rss_note}")
+
 print("=" * 64)
 print(" STEP 04-SEQPARAMS PRE-FLIGHT")
 print("=" * 64)

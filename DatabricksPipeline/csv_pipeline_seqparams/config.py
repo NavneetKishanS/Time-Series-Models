@@ -128,6 +128,48 @@ SEQPARAM_DIVISOR_TABLE = os.environ.get(
 )
 
 # ----------------------------------------------------------------------------
+# AUDIT-ONLY PKL FIELDS — written by step 03 for the archived 03b-03f
+# investigation notebooks, never read by 04/05/06/07 or by
+# AlternatingPipeline/training/*.py (confirmed by grep across all of them).
+#
+#   sut_raw    EVERY key in the joined SUT message — dozens of entries per
+#              row, kept so a new candidate parameter can be evaluated
+#              offline instead of costing another Spark rebuild.
+#   sut_debug  the SUT_FIELD_MAP-filtered parse (~24 keys) — used by the
+#              SD58-vs-real-duration cross-check, not by training.
+#   coil_config, sequence_binary, orientation, sut_scope, sut_offset_s,
+#   sut_binary_before, sut_inside_skipped — join/coil diagnostics from the
+#   same investigation.
+#
+# At PARAM_SET='all' this rides along, unread, in every one of 51k+
+# examination-sequence dicts for the full lifetime of the pkl in memory — a
+# real contributor to the "28 GiB node is at capacity" state noted in
+# 96db4e4. strip_audit_only_fields() below removes it IN PLACE (no list
+# copy, so no memory spike while stripping) right after pickle.load(), before
+# any of it can be held alive by a later cell the way the pre-fix double pkl
+# copy in 04's Cell 6/7/8 was.
+# ----------------------------------------------------------------------------
+
+SUT_AUDIT_ONLY_KEYS = (
+    'sut_raw', 'sut_debug', 'coil_config', 'sequence_binary', 'orientation',
+    'sut_scope', 'sut_offset_s', 'sut_binary_before', 'sut_inside_skipped',
+)
+
+
+def strip_audit_only_fields(examination_sequences):
+    """Pop SUT_AUDIT_ONLY_KEYS from every row of `examination_sequences` IN
+    PLACE. Returns the number of (row, key) pairs actually removed, so a
+    caller can tell a fresh pkl (already stripped, or never carrying these
+    keys) from one where the strip did real work."""
+    _removed = 0
+    for _row in examination_sequences:
+        for _k in SUT_AUDIT_ONLY_KEYS:
+            if _row.pop(_k, None) is not None:
+                _removed += 1
+    return _removed
+
+
+# ----------------------------------------------------------------------------
 # THE OTHER PIPELINE — what this one still borrows, and why it is a constant.
 #
 # This pipeline's pkl holds ONLY 'examination' (see 03_build_preprocessed_pkl.py),

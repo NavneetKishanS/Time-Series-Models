@@ -25,6 +25,7 @@
 # COMMAND ----------
 
 import os
+import gc
 import math
 import pickle
 
@@ -49,6 +50,11 @@ with open(PKL_OUTPUT, 'rb') as f:
     _data = pickle.load(f)
 examination_sequences = _data['examination']
 print(f"Examination sequences: {len(examination_sequences):,}")
+
+# See config.SUT_AUDIT_ONLY_KEYS — neither Section A nor B reads these;
+# stripped in place so they aren't carried for the rest of the session
+# (Section B loads the model onto the same node right after Section A).
+strip_audit_only_fields(examination_sequences)
 
 _rows = []
 for s in examination_sequences:
@@ -79,17 +85,52 @@ print("\nCorrelation matrix of numerical conditioning features vs. total_duratio
 corr_matrix = df[numerical_features].corr()
 print(corr_matrix.round(2))
 
-plt.figure(figsize=(10, 8))
-sns.heatmap(corr_matrix, annot=True, cmap='coolwarm', fmt=".2f")
-plt.title('Correlation Matrix — Examination Conditioning Features (SUT-enriched)')
+# PARAM_SET='all' at the 0% presence floor (487d9e2) puts ~170 raw SUT fields
+# into the model, and with presence flags on (the default) that's ~341 extra
+# conditioning columns -> ~350 total here. A FIXED (10, 8) figure with
+# annot=True was sized for the original ~14-column feature set; at 350x350
+# cells that's ~122,500 text annotations crushed into a few pixels each, which
+# renders as a solid black block, not a readable heatmap. Scale the canvas to
+# the actual feature count and drop per-cell numbers once they can no longer
+# be read anyway — the colorbar still carries the signal.
+_n_feat = len(numerical_features)
+_ANNOT_MAX_FEATURES = 40  # beyond this, per-cell text is illegible and expensive
+_heatmap_annot = _n_feat <= _ANNOT_MAX_FEATURES
+_side_in = max(10, _n_feat * 0.35)
+plt.figure(figsize=(_side_in, _side_in * 0.8))
+sns.heatmap(
+    corr_matrix, annot=_heatmap_annot, cmap='coolwarm', fmt=".2f",
+    center=0, vmin=-1, vmax=1, cbar_kws={'label': 'Pearson r'},
+    annot_kws={'size': 6} if _heatmap_annot else None,
+)
+plt.title(f'Correlation Matrix — Examination Conditioning Features (SUT-enriched, n={_n_feat})')
+plt.xticks(fontsize=6 if _n_feat > _ANNOT_MAX_FEATURES else 10, rotation=90)
+plt.yticks(fontsize=6 if _n_feat > _ANNOT_MAX_FEATURES else 10)
 plt.tight_layout()
 _corr_path = f"{ANALYSIS_DIR}/correlation_matrix.png"
-plt.savefig(_corr_path)
-print(f"\nSaved → {_corr_path}")
+plt.savefig(_corr_path, dpi=150 if _n_feat > _ANNOT_MAX_FEATURES else 100)
+plt.close()  # leaked figures accumulate across reruns in a persistent Databricks kernel
+print(f"\nSaved → {_corr_path}" + ("" if _heatmap_annot else
+      f"  (annotations dropped: {_n_feat} features > {_ANNOT_MAX_FEATURES}; see the CSV for exact values)"))
 
 _corr_csv = f"{ANALYSIS_DIR}/correlation_matrix.csv"
 corr_matrix.to_csv(_corr_csv)
 print(f"Saved → {_corr_csv}")
+
+# Readable regardless of feature count: correlation with the actual target,
+# ranked, which is usually the number people opened this chart to find anyway.
+_target_corr = corr_matrix['total_duration'].drop('total_duration').sort_values(key=abs, ascending=False)
+plt.figure(figsize=(9, max(5, len(_target_corr) * 0.18)))
+plt.barh(_target_corr.index[::-1], _target_corr.values[::-1],
+         color=['#4C78A8' if v >= 0 else '#E45756' for v in _target_corr.values[::-1]])
+plt.axvline(0, color='#666', linewidth=0.8)
+plt.xlabel('Pearson r with total_duration')
+plt.title(f'Feature correlation with total_duration (n={len(_target_corr)}, ranked by |r|)')
+plt.tight_layout()
+_target_corr_path = f"{ANALYSIS_DIR}/correlation_with_duration.png"
+plt.savefig(_target_corr_path, dpi=110)
+plt.close()
+print(f"Saved → {_target_corr_path}")
 
 # COMMAND ----------
 
@@ -115,6 +156,16 @@ df.groupby(['sequence_type', 'trigger_mode', 'body_region'])['total_duration'].a
     ['mean', 'std', 'count']
 ).to_csv(_cat_csv)
 print(f"\nSaved → {_cat_csv}")
+
+# Free Section A's intermediates before Section B loads the model onto the
+# same node. `_rows` and `df` are a ~51k-row x ~350-col Python list-of-dicts
+# and DataFrame at PARAM_SET='all' — the same double-liability pattern
+# 04_train_models.py Cell 8 was fixed for (96db4e4), unaddressed here.
+# `examination_sequences` is NOT freed: Section B's temporal_split() below
+# still needs it.
+for _var in ('_rows', 'df', 'corr_matrix', '_target_corr', '_data'):
+    globals().pop(_var, None)
+gc.collect()
 
 # COMMAND ----------
 
@@ -282,13 +333,18 @@ if CHECKPOINT_PATH and os.path.exists(CHECKPOINT_PATH):
     _perm_df.to_csv(_perm_csv, index=False)
     print(f"\nSaved → {_perm_csv}")
 
-    plt.figure(figsize=(9, 5))
+    # Same feature-count problem as the Section A heatmap: at PARAM_SET='all'
+    # this is ~345 bars (4 base + EXAMINATION_SEQPARAM_FEATURES), not the ~10
+    # the fixed (9, 5) figure was sized for.
+    plt.figure(figsize=(9, max(5, len(_perm_df) * 0.18)))
     plt.barh(_perm_df['feature'], _perm_df['degradation_s'])
     plt.xlabel('MAE degradation when shuffled (s)')
-    plt.title('Permutation importance — examination duration model')
+    plt.title(f'Permutation importance — examination duration model (n={len(_perm_df)} features)')
+    plt.tick_params(axis='y', labelsize=6 if len(_perm_df) > 40 else 10)
     plt.tight_layout()
     _perm_png = f"{ANALYSIS_DIR}/permutation_importance.png"
-    plt.savefig(_perm_png)
+    plt.savefig(_perm_png, dpi=150 if len(_perm_df) > 40 else 100)
+    plt.close()
     print(f"Saved → {_perm_png}")
 
 # COMMAND ----------
