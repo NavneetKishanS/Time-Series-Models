@@ -331,7 +331,15 @@ print("=" * 64)
 # =============================================================================
 # Load data and models
 # =============================================================================
-import sys
+import sys, gc, ctypes
+# Free accumulated memory before heavy pkl loads — on the 28 GiB NC4as_T4_v3
+# node the margin is thin once the seqparams pkl expands to ~5.5 GiB.
+gc.collect()
+try:
+    ctypes.CDLL("libc.so.6").malloc_trim(0)
+    torch.cuda.empty_cache()
+except Exception:
+    pass
 sys.path[:] = [p for p in sys.path if 'Patient Exchange and Examination' not in p]
 import AlternatingPipeline as _ap                                                                      
 _ap.__path__[:] = [p for p in _ap.__path__ if 'Patient Exchange and Examination' not in p]
@@ -408,6 +416,16 @@ with open(PKL_PATH, 'rb') as f:
 customer_schedules = data['customer_schedules']
 print(f"Customers: {list(customer_schedules.keys())}")
 
+# Extract orchestration data now so we can free `data` before loading the
+# seqparams pkl — keeping both in memory exceeds the 28 GiB node limit.
+orch_samples, _ = extract_orchestration_samples(data)
+demographic_distributions = build_demographic_distributions(data)
+del data; gc.collect()
+try:
+    ctypes.CDLL("libc.so.6").malloc_trim(0)
+except Exception:
+    pass
+
 with open(SEQPARAMS_PKL, 'rb') as f:
     exam_data = pickle.load(f)
 print(f"Examination sequences (seqparams pkl): {len(exam_data.get('examination', [])):,}")
@@ -480,6 +498,7 @@ load_checkpoint_lenient(
     label="examination checkpoint (SUT-conditioned)",
 )
 examination_model.eval()
+del _exam_ckpt; gc.collect()
 print("Examination model loaded.")
 
 # --- SUT parameter sampler (SEQPARAMS FORK) ---
@@ -539,11 +558,10 @@ orch_config['num_scanners'] = orch_ckpt['scanner_embedding.weight'].shape[0]
 orchestration_model = create_orchestration_model(orch_config).to(device)
 load_checkpoint_lenient(orchestration_model, orch_ckpt, label="orchestration checkpoint")
 orchestration_model.eval()
+del orch_ckpt; gc.collect()
 print("Orchestration model loaded.")
 
-# --- demographic distributions per body region (sampled from real data) ---
-orch_samples, _ = extract_orchestration_samples(data)
-demographic_distributions = build_demographic_distributions(data)
+# --- demographic distributions (computed earlier to allow freeing csv_pipeline pkl) ---
 
 # --- per-scanner region histograms used as orchestration conditioning ---
 # The orchestration model was TRAINED with each scanner's real body-region
@@ -587,6 +605,7 @@ for _s in exam_data.get('examination', []):
         ):
             _fallback_exam_duration_pools[_duration_key].append(_duration_sec)
 _all_seqtypes = [st for sts in _region_seqtypes.values() for st in sts] or [0]
+del exam_data; gc.collect()
 print(f"Sequence-type pool: {len(_all_seqtypes):,} scans across "
       f"{len(_region_seqtypes)} body regions")
 

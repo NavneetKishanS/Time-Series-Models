@@ -82,7 +82,8 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 _REPO = "/Workspace/Repos/Time-Series-Models"
-for _candidate in (_REPO, "/tmp/Time-Series-Models", os.getcwd()):
+for _candidate in (_REPO, "/tmp/tsm", "/tmp/alternating_pipeline_src",
+                  "/tmp/Time-Series-Models", os.getcwd()):
     if os.path.isdir(os.path.join(_candidate, "AlternatingPipeline")):
         if _candidate not in sys.path:
             sys.path.insert(0, _candidate)
@@ -1244,6 +1245,30 @@ save_chart(fig, 'error_quantiles',
 # about the same either way, because physics transfers and identity does not.
 # The DIVERGENCE is the signal, not the magnitude.
 # =============================================================================
+
+# Free heavy objects from Cell 11 and large data structures this cell does not
+# need. On the 28 GiB NC4as_T4_v3 node, peak memory during
+# permutation_importance_mae triggers the OOM killer without this cleanup.
+import gc, ctypes
+for _v in ('_model', '_pred', '_err', '_held_regions', '_held_types',
+           '_is_train', 'per_seq_type', 'ranked_names',
+           '_pooled_mae', '_g', 'regions', '_seq_type_names'):
+    globals().pop(_v, None)
+# `sequences` is the largest single object (~GBs of dicts from the pkl).
+# Cell 12 does not iterate it; Cell 13 only calls len(). Replace with a
+# zero-cost proxy so len() still works in downstream cells.
+if 'sequences' in globals() and not isinstance(globals()['sequences'], range):
+    sequences = range(len(sequences))
+try:
+    plt.close('all')
+except NameError:
+    pass
+gc.collect()
+gc.collect()  # second pass for ref-cycles with __del__
+try:
+    ctypes.CDLL("libc.so.6").malloc_trim(0)
+except Exception:
+    pass
 
 rule()
 print(" GATE 5 — LEAKAGE SENTINEL")
