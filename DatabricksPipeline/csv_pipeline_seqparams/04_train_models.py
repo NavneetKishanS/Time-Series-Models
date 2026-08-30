@@ -277,21 +277,10 @@ def _rss_mb():
     except Exception:
         return None
 
-# Define audit-only keys and stripping logic inline — not yet in config.py
-SUT_AUDIT_ONLY_KEYS = frozenset(['sut_raw', 'sut_debug', 'coil_config'])
-
-def _strip_audit_only_fields(sequences):
-    """Remove audit-only keys in place; return count of removed instances."""
-    n = 0
-    for seq in sequences:
-        for k in SUT_AUDIT_ONLY_KEYS:
-            if k in seq:
-                del seq[k]
-                n += 1
-    return n
-
 _rss_before = _rss_mb()
-_n_stripped = _strip_audit_only_fields(data['examination'])
+if _rss_before is not None:
+    print(f"[mem] post-pkl-load RSS: {_rss_before:,.0f} MB")
+_n_stripped = seqparams_config.strip_audit_only_fields(data['examination'])
 _rss_after = _rss_mb()
 _rss_note = (
     f" — RSS {_rss_before:,.0f} -> {_rss_after:,.0f} MB "
@@ -300,7 +289,7 @@ _rss_note = (
 )
 gc.collect()
 print(f"[mem] stripped {_n_stripped:,} audit-only field instances "
-      f"({', '.join(SUT_AUDIT_ONLY_KEYS)}) from "
+      f"({', '.join(seqparams_config.SUT_AUDIT_ONLY_KEYS)}) from "
       f"{len(data['examination']):,} rows{_rss_note}")
 
 print("=" * 64)

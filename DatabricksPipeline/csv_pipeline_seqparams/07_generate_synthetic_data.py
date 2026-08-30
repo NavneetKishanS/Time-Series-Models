@@ -332,6 +332,7 @@ print("=" * 64)
 # Load data and models
 # =============================================================================
 import sys, gc, ctypes
+from collections import Counter
 # Free accumulated memory before heavy pkl loads — on the 28 GiB NC4as_T4_v3
 # node the margin is thin once the seqparams pkl expands to ~5.5 GiB.
 gc.collect()
@@ -376,6 +377,10 @@ from AlternatingPipeline.generation.output_integrity import (
     validate_orchestration_sequence,
     validate_rendered_output,
 )
+from AlternatingPipeline.generation.abort_calibration import (
+    build_abort_rate_table,
+    select_abort_rate,
+)
 
 MAX_GENERATION_ATTEMPTS = max(
     1,
@@ -404,12 +409,31 @@ MAX_DAY_SPAN_SEC = float(os.environ.get(
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Device: {device}")
 
+def _memory_snapshot(stage):
+    """Print host/GPU use at the expensive notebook boundaries."""
+    rss_mb = None
+    try:
+        with open('/proc/self/status') as handle:
+            for line in handle:
+                if line.startswith('VmRSS:'):
+                    rss_mb = int(line.split()[1]) / 1024
+                    break
+    except OSError:
+        pass
+    gpu = ''
+    if torch.cuda.is_available():
+        gpu = (f", cuda_alloc={torch.cuda.memory_allocated() / 2**20:.0f} MiB"
+               f", cuda_reserved={torch.cuda.memory_reserved() / 2**20:.0f} MiB")
+    print(f"[mem] {stage}: rss={rss_mb:.0f} MiB{gpu}" if rss_mb is not None
+          else f"[mem] {stage}: rss=unavailable{gpu}")
+
 # --- preprocessed data ---
 # SEQPARAMS FORK: `data` is the csv_pipeline pkl and drives the orchestration
 # and exchange halves (customer_schedules / exchange live only there).
 # `exam_data` is the seqparams pkl and drives everything examination-side, so
 # the scan-type mix, duration fallbacks and SUT parameters are all drawn from
 # the exact same sequences the examination model was trained on.
+_memory_snapshot('before base pkl')
 with open(PKL_PATH, 'rb') as f:
     data = pickle.load(f)
 
@@ -425,10 +449,29 @@ try:
     ctypes.CDLL("libc.so.6").malloc_trim(0)
 except Exception:
     pass
+_memory_snapshot('after base pkl release')
 
 with open(SEQPARAMS_PKL, 'rb') as f:
     exam_data = pickle.load(f)
 print(f"Examination sequences (seqparams pkl): {len(exam_data.get('examination', [])):,}")
+_memory_snapshot('after seqparams pkl load')
+
+# The decoder is useful for the event path but terminal abort probabilities are
+# poorly calibrated by token sampling (and were observed at nearly 36%). Keep
+# the terminal outcome anchored to the same corpus used for training.
+_ABORT_ID = SOURCEID_VOCAB['MRI_MSR_34']
+_SUCCESS_ID = SOURCEID_VOCAB['MRI_MSR_104']
+abort_rate_table = build_abort_rate_table(exam_data.get('examination', []), _ABORT_ID)
+_global_abort_meta = abort_rate_table[('global', ())]
+print("Abort calibration: "
+      f"{_global_abort_meta['aborts']:,}/{_global_abort_meta['total']:,} "
+      f"({100 * _global_abort_meta['rate']:.2f}% smoothed global rate)")
+abort_generation_stats = Counter()
+
+# Reject a model whose *raw* terminal sampling has run away even though the
+# calibrated renderer could mask it.  The tolerance is intentionally generous
+# for a single scanner but makes a 36% rate unexportable.
+MAX_RAW_ABORT_RATE = float(os.environ.get('MAX_RAW_ABORT_RATE', '0.15'))
 
 # See config.SUT_AUDIT_ONLY_KEYS — generation never reads these; stripped in
 # place to avoid carrying them for the rest of the session.
@@ -606,6 +649,7 @@ for _s in exam_data.get('examination', []):
             _fallback_exam_duration_pools[_duration_key].append(_duration_sec)
 _all_seqtypes = [st for sts in _region_seqtypes.values() for st in sts] or [0]
 del exam_data; gc.collect()
+_memory_snapshot('after seqparams pool extraction')
 print(f"Sequence-type pool: {len(_all_seqtypes):,} scans across "
       f"{len(_region_seqtypes)} body regions")
 
@@ -967,6 +1011,37 @@ def _generate_exam_rows(tokens, durations, mu, sigma, day_start, t_offset,
     return rows, t
 
 
+def _calibrate_exam_finish(tokens, serial_idx, region_id, seq_type):
+    """Replace only the terminal outcome with a corpus-calibrated draw."""
+    token_list = tokens.detach().cpu().tolist()
+    finish_positions = [
+        idx for idx, token in enumerate(token_list)
+        if token in (_SUCCESS_ID, _ABORT_ID)
+    ]
+    if len(finish_positions) != 1:
+        raise GenerationIntegrityError(
+            f"cannot calibrate malformed examination finish structure: {finish_positions}"
+        )
+
+    raw_finish = int(token_list[finish_positions[0]])
+    rate, rate_key, _ = select_abort_rate(
+        abort_rate_table, serial_idx, region_id, seq_type
+    )
+    calibrated_finish = _ABORT_ID if np.random.random() < rate else _SUCCESS_ID
+    abort_generation_stats['raw_total'] += 1
+    abort_generation_stats['raw_abort'] += int(raw_finish == _ABORT_ID)
+    abort_generation_stats['calibrated_total'] += 1
+    abort_generation_stats['calibrated_abort'] += int(calibrated_finish == _ABORT_ID)
+    abort_generation_stats[f"stratum:{rate_key[0]}"] += 1
+    abort_generation_stats['overrides'] += int(calibrated_finish != raw_finish)
+
+    if calibrated_finish == raw_finish:
+        return tokens
+    calibrated = tokens.clone()
+    calibrated[finish_positions[0]] = calibrated_finish
+    return calibrated
+
+
 def _generate_valid_exam_rows(cond, region_id, seq_type, serial_idx,
                               day_start, current_t, patient_id, patient_info,
                               serial, step_counter, customer_idx, sample_idx):
@@ -1004,8 +1079,11 @@ def _generate_valid_exam_rows(cond, region_id, seq_type, serial_idx,
         candidates.append((tokens[0], durations[0], mu[0], sigma[0]))
 
         try:
+            calibrated_tokens = _calibrate_exam_finish(
+                tokens[0], serial_idx, region_id, seq_type
+            )
             rows, next_t = _generate_exam_rows(
-                tokens[0], durations[0], mu[0], sigma[0],
+                calibrated_tokens, durations[0], mu[0], sigma[0],
                 day_start, current_t,
                 patient_id, region_id, patient_info,
                 serial, step_counter, customer_idx, sample_idx,
@@ -1050,6 +1128,9 @@ def _generate_valid_exam_rows(cond, region_id, seq_type, serial_idx,
     tokens, durations, mu, sigma, repaired_list, duration_source_idx = selected
     repaired_tokens = torch.tensor(
         repaired_list, dtype=tokens.dtype, device=tokens.device
+    )
+    repaired_tokens = _calibrate_exam_finish(
+        repaired_tokens, serial_idx, region_id, seq_type
     )
 
     finish_idx = len(repaired_list) - 2
@@ -1230,6 +1311,8 @@ for customer_idx, (serial_str, daily_schedules) in enumerate(customer_schedules.
     regeneration_count = 0
     fallback_exam_count = 0
     day_budget = DayBudget(MAX_DAY_SPAN_SEC)
+    _raw_abort_start = abort_generation_stats['raw_abort']
+    _raw_total_start = abort_generation_stats['raw_total']
 
     # Generate dates from the synthetic range (outside training window — no leakage)
     _start = datetime.strptime(SYNTH_DATE_START, '%Y-%m-%d')
@@ -1464,6 +1547,25 @@ for customer_idx, (serial_str, daily_schedules) in enumerate(customer_schedules.
             flag = ('  ⚠ ' + '; '.join(flags)) if flags else ''
             print(f"  Exam duration: mean={mean_dur:.1f}s  median={med_dur:.1f}s  "
                   f"p99={p99_dur:.0f}s  >600s={long_share:.2f}%  n={len(durs)}{flag}")
+
+    _raw_total = abort_generation_stats['raw_total'] - _raw_total_start
+    _raw_abort = abort_generation_stats['raw_abort'] - _raw_abort_start
+    if _raw_total:
+        _raw_rate = _raw_abort / _raw_total
+        _rendered_abort = sum(
+            row.get('FinishEvent') == 'Stopped by User' for row in all_exam_rows
+        )
+        _rendered_rate = _rendered_abort / len(all_exam_rows) if all_exam_rows else 0.0
+        print("  Abort calibration: "
+              f"raw={_raw_abort}/{_raw_total} ({_raw_rate:.1%}), "
+              f"rendered={_rendered_abort}/{len(all_exam_rows)} ({_rendered_rate:.1%}), "
+              f"overrides={abort_generation_stats['overrides']}")
+        if _raw_rate > MAX_RAW_ABORT_RATE:
+            raise RuntimeError(
+                f"Raw abort rate {_raw_rate:.1%} exceeds MAX_RAW_ABORT_RATE "
+                f"({MAX_RAW_ABORT_RATE:.1%}) for serial {serial_str}; refusing to export. "
+                "Retrain step 04 with abort_oversample_factor=1 and inspect terminal logits."
+            )
 
     # ── Save exchange CSV ──
     if all_exchange_rows:

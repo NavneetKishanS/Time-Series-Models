@@ -343,12 +343,10 @@ EXAMINATION_TRAINING_CONFIG = {
     # Abort sequences are ~3.9% of training; factor 4 -> ~13% share. Tune
     # against the MRI_MSR_34 rate in step-05 output: raise if aborts still
     # never appear, lower if they appear too often.
-    # Lowered 4 -> 2 on 2026-06-13: once the conditioning-erasure bug was
-    # fixed (b6e8e37) the model actually learns the abort token, and factor 4
-    # over-fired it — the 06-13 run produced an 8.4% "Stopped by User" rate
-    # vs ~0.8% before. Factor 2 (~7.5% training share) should pull the
-    # generated abort rate back toward a realistic low-single-digit %.
-    'abort_oversample_factor': 2,
+    # Disabled while terminal-event calibration is enforced at generation.
+    # A 2x factor still let the autoregressive decoder produce a 36% abort
+    # rate on the 2026-08 run, far above the 2.7–3.9% observed corpus rate.
+    'abort_oversample_factor': 1,
 }
 
 # ============================================================================
